@@ -1,0 +1,4 @@
+# Runtime dependencies: Python standard library only.
+# External executable dependency: ffmpeg + ffprobe.
+# Development/test: pytest.
+# Packaging: PyInstaller (optional).
