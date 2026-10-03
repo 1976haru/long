@@ -1,0 +1,83 @@
+name: Build Windows Portable
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "main.py"
+      - "app/**"
+      - "VERSION"
+      - ".github/workflows/windows-portable.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip pyinstaller pytest
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build EXE
+        shell: cmd
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name PlaylistLongVideoMaker_v0.3 main.py
+
+      - name: Download FFmpeg essentials
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile "$env:RUNNER_TEMP\ffmpeg.zip"
+          Expand-Archive "$env:RUNNER_TEMP\ffmpeg.zip" -DestinationPath "$env:RUNNER_TEMP\ffmpeg"
+          $ffmpeg = Get-ChildItem "$env:RUNNER_TEMP\ffmpeg" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          $ffprobe = Get-ChildItem "$env:RUNNER_TEMP\ffmpeg" -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          if (-not $ffmpeg -or -not $ffprobe) { throw "FFmpeg binaries not found" }
+          New-Item -ItemType Directory -Force -Path "portable\bin" | Out-Null
+          Copy-Item $ffmpeg.FullName "portable\bin\ffmpeg.exe"
+          Copy-Item $ffprobe.FullName "portable\bin\ffprobe.exe"
+
+      - name: Assemble friend package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Copy-Item "dist\PlaylistLongVideoMaker_v0.3.exe" "portable\PlaylistLongVideoMaker_v0.3.exe"
+          @'
+          Playlist Long Video Maker v0.3 - 지인용
+          =========================================
+
+          1. ZIP 파일을 먼저 압축 해제하세요.
+          2. PlaylistLongVideoMaker_v0.3.exe 를 더블클릭하세요.
+          3. [+ 영상 추가]에서 CapCut으로 자막/이미지/파형/음원까지 완성된 SET MP4를 선택하세요.
+          4. [회차 기준]을 권장합니다. 5/10/15/20회 또는 직접 회차를 선택할 수 있습니다.
+          5. [+ 현재 설정을 대기열에 추가] 후 최대 5개까지 등록할 수 있습니다.
+          6. [대기열 자동 시작]을 누르면 한 작업씩 순차 처리합니다.
+
+          중요:
+          - Python 설치 필요 없음
+          - FFmpeg 설치 필요 없음 (bin 폴더에 포함)
+          - 영상/오디오는 재인코딩하지 않고 FFmpeg -c copy로 연결
+          - 원본 화질/음질의 재인코딩 손실 없음
+          - 여러 SET의 해상도/FPS/코덱 등이 다르면 안전을 위해 작업을 차단
+          - 프로그램 실행 중 bin 폴더를 삭제하거나 이동하지 마세요.
+          - Windows 10/11 64-bit 권장
+          '@ | Set-Content -Encoding UTF8 "portable\README_지인용.txt"
+
+      - name: Upload portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlaylistLongVideoMaker_v0.3_FRIEND_PORTABLE
+          path: portable/
+          if-no-files-found: error
+          retention-days: 30
