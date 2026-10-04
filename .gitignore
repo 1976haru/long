@@ -12,3 +12,14 @@ LONG_OUTPUT/
 *.log
 .DS_Store
 Thumbs.db
+
+# 비밀 정보: 절대 커밋 금지 (Stream Key, SSH Private Key, DPAPI blob)
+stream.key
+stream.key.part
+*.key
+*.pem
+*.ppk
+id_rsa*
+id_ed25519*
+live_secret.dat
+cloud_known_hosts

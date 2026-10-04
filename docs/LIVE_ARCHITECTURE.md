@@ -38,8 +38,16 @@ Long Video (기존, 변경 없음)            LIVE (분리)
 | `app/live_core.py` | `build_output_url`, `build_live_command`, dry-run, `ProgressParser`/`LiveStats`, `LiveProcess`(graceful stop, kill-on-exit job) |
 | `app/live_supervisor.py` | `LiveState`, `RETRY_DELAYS`, `LiveSupervisor` watchdog |
 | `app/live_controller.py` | Tk 비의존 로직: `run_preflight`, `LiveController`(이벤트 큐, keep-awake, snapshot) |
-| `app/live_ui.py` | `LiveWindow` — 위젯만 담당 |
+| `app/live_ui.py` | `LiveWindow` — 위젯만 담당 (LIVE READY, 실행 위치, 송출 방식, Cloud 상태) |
+| `app/live_ready.py` | `analyze_live_ready` (ffprobe만, 초반 60초 packet 헤더), `make_live_ready_file` (PC 1회 변환) |
+| `app/cloud_model.py` | OCI Always Free 프로필/검증, ssh.exe 탐색/인자, 안전한 서버 파일명, SHA256 |
+| `app/cloud_client.py` | SSH 원격 작업(준비 6단계, 업로드, 시작/종료, 상태, 로그), `CloudLiveController` |
+| `app/cloud_setup_ui.py` | 초보자용 4 STEP 처음 설정 도우미 |
+| `cloud/long_live_worker.py` | Linux 서버 worker (표준 라이브러리만, DIRECT COPY, watchdog, status.json) |
+| `deploy/linux/` | `long-live.service`, `install.sh`, `uninstall.sh` |
 | `app/tooling.py` | `FFMPEG_GUARD` 공용 실행 잠금, `KeepAwake` |
+
+DIRECT COPY: `build_live_copy_command()` — `-re -stream_loop -1 -i FILE -map 0:v:0 -map 0:a:0 -c:v copy -c:a copy -progress pipe:1 -f flv TARGET` (인코더/필터/-r/-g/-b:v 없음). 송출 방식 기본값은 **자동/저부하**: LIVE READY → DIRECT COPY, 아니면 `LIVE READY 파일 만들기` 권장. libx264 TRANSCODE는 내 PC에서 사용자가 명시적으로 고를 때만. 무료 Cloud 상세: `docs/FREE_CLOUD.md`.
 
 `app/ui.py`에는 `● 24H LIVE` 버튼, LIVE 창 열기, 종료 시 LIVE 정리 연결만 있다.
 

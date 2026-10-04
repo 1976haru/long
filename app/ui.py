@@ -16,6 +16,7 @@ from .core import (
     strict_copy_compatibility, target_seconds,
 )
 from .settings import load_settings, save_settings
+from .live_supervisor import busy_message
 from .live_ui import LiveWindow
 from .tooling import FFMPEG_GUARD, discover_ffmpeg, prevent_windows_sleep, remember_ffmpeg
 
@@ -322,7 +323,7 @@ class MainWindow(tk.Tk):
         if not self._need_tools():return
         idx=[i for i,j in enumerate(self.jobs) if j.status!="완료"]
         if not idx:messagebox.showinfo("대기열","모든 작업이 완료 상태입니다.");return
-        if not FFMPEG_GUARD.try_acquire("long"):messagebox.showwarning("FFmpeg 사용 중","현재 LIVE 송출 중입니다.\nLIVE를 종료한 뒤 장시간 영상 제작을 시작하세요.");return
+        if not FFMPEG_GUARD.try_acquire("long"):messagebox.showwarning("FFmpeg 사용 중",busy_message(FFMPEG_GUARD.owner)+"\n끝난 뒤 장시간 영상 제작을 시작하세요.");return
         self.running=True;self.cancel.clear();self.start.configure(state="disabled");self.stop.configure(state="normal")
         cont=bool(self.keep_going.get());awake=bool(self.keep_awake.get())
         threading.Thread(target=self._worker_guarded,args=(idx,cont,awake),daemon=True).start()
@@ -408,10 +409,12 @@ class MainWindow(tk.Tk):
 
     def _close(self):
         w=self._live_window()
-        if w and w.controller.active:
-            if not messagebox.askyesno("LIVE 송출 중","현재 LIVE 송출 중입니다.\nLIVE를 종료하고 프로그램을 닫을까요?",parent=self):return
-            self.status.set("LIVE 종료 중...")
-            w.shutdown(self._finish_close);return
+        if w:
+            # 내 PC LIVE는 종료 확인 후 FFmpeg 정상 종료, Cloud LIVE는 [PC만 종료](기본)/[LIVE도 종료]/[취소]
+            w.confirm_close(self._close_after_live,for_app=True);return
+        self._close_after_live()
+
+    def _close_after_live(self):
         if self.running and not messagebox.askyesno("작업 중","현재 작업을 중지하고 종료할까요?"):return
         if self.running:self.cancel.set()
         self._finish_close()

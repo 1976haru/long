@@ -20,15 +20,20 @@ CapCut에서 **자막·이미지·파형·음원·구독/좋아요 요소까지 
 
 상단 `● 24H LIVE` 버튼 → **24H Playlist LIVE Studio** 창에서 완성 MP4 1개를 YouTube LIVE로 무한 반복 송출합니다.
 
-1. `영상 선택` (오디오가 있는 MP4만 가능, 입력 해상도 그대로 송출)
-2. YouTube Live Control Room의 Stream Key 입력 (필요하면 `이 PC에 안전하게 기억`)
-3. 송출 품질 프로필 확인 (영상 해상도에 맞게 자동 추천)
-4. `송출 설정 검사` → `▶ LIVE 시작` → 상태 확인 → `■ LIVE 종료`
+1. `영상 선택` → 자동으로 **LIVE READY** 검사 (아니면 `LIVE READY 파일 만들기`로 PC에서 한 번만 변환)
+2. 실행 위치: **무료 Cloud (권장, PC를 꺼도 방송 계속)** 또는 **내 PC**
+3. 무료 Cloud는 처음 한 번 `처음 설정 도우미` (Oracle Always Free 서버 연결 → 자동 준비)
+4. YouTube Live Control Room의 Stream Key 입력 (필요하면 `이 PC에 안전하게 기억`)
+5. `▶ 24H LIVE 시작` → 상태 확인 → `■ LIVE 종료`
+
+- LIVE READY 파일은 재인코딩 없이 그대로 송출합니다 (**DIRECT COPY**: CPU/RAM 매우 낮음).
+- 이 프로그램은 **유료 Cloud 자원을 자동 생성하지 않습니다.** 무료 Cloud를 쓸 수 없으면 `내 PC에서 LIVE`를 사용하세요. 자세한 내용: `docs/FREE_CLOUD.md`
 
 - 처음 테스트는 YouTube Live Control Room에서 **비공개/일부공개** 스트림으로 확인하세요.
 - 기존 장시간 MP4 제작 기능과 사용법은 그대로입니다. LIVE는 별도 모듈(`app/live_*.py`)입니다.
 - FFmpeg는 계속 동시에 1개만 실행됩니다: 제작 중에는 LIVE 불가, LIVE 중에는 제작 불가.
 - 끊기면 5→10→30→60초 간격으로 자동 재접속, 종료 시 FFmpeg를 정상 종료합니다.
+- Cloud LIVE 중 PC 프로그램을 닫으면 기본은 **PC만 종료** (Cloud 방송은 계속).
 - Stream Key는 로그/설정 파일에 남기지 않으며, 기억 옵션은 Windows DPAPI 암호화 파일로만 저장합니다. 자세한 내용: `docs/LIVE_ARCHITECTURE.md`
 
 ## 가장 쉬운 사용법

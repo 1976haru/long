@@ -8,7 +8,7 @@ if %errorlevel%==0 (
   set PY=python
 )
 %PY% -m pip install --upgrade pyinstaller
-%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name PlaylistLongVideoMaker_v0.3 main.py
+%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name PlaylistLongVideoMaker_v0.3 --add-data "cloud\long_live_worker.py;cloud" --add-data "deploy\linux;deploy\linux" main.py
 if %errorlevel% neq 0 (
   echo.
   echo EXE 빌드 실패

@@ -6,6 +6,8 @@ on:
     paths:
       - "main.py"
       - "app/**"
+      - "cloud/**"
+      - "deploy/**"
       - "VERSION"
       - ".github/workflows/windows-portable.yml"
   workflow_dispatch:
@@ -33,7 +35,7 @@ jobs:
 
       - name: Build EXE
         shell: cmd
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name PlaylistLongVideoMaker_v0.3 main.py
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name PlaylistLongVideoMaker_v0.3 --add-data "cloud\long_live_worker.py;cloud" --add-data "deploy\linux;deploy\linux" main.py
 
       - name: Download FFmpeg essentials
         shell: pwsh

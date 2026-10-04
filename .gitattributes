@@ -1,0 +1,4 @@
+# Linux 서버용 파일은 CRLF로 바뀌면 실행되지 않는다.
+*.sh text eol=lf
+*.service text eol=lf
+cloud/*.py text eol=lf

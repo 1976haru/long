@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Callable
 
 from .core import BuildError, VideoInfo, format_duration, probe_video
-from .live_core import LiveConfigError, build_live_command, build_output_url, describe_live_command
-from .live_profile import LiveConfig, LivePreset, redact, validate_live_config
+from .live_core import LiveConfigError, build_output_url, build_stream_command, describe_live_command
+from .live_profile import MODE_COPY, MODE_TRANSCODE, LiveConfig, LivePreset, redact, validate_live_config
 from .live_supervisor import LiveBusyError, LiveState, LiveSupervisor, busy_message, make_process_factory
 from .tooling import FFMPEG_GUARD, FfmpegExecutionGuard, KeepAwake
 
@@ -108,8 +108,15 @@ def run_preflight(
     guard: FfmpegExecutionGuard = FFMPEG_GUARD,
     supervisor_state: LiveState = LiveState.STOPPED,
     probe: Callable = probe_video,
+    mode: str = MODE_TRANSCODE,
+    ready_report=None,
+    location: str = "local",
 ) -> PreflightResult:
-    """실제 송출 없이 검사. 결과 문자열에는 Stream Key가 절대 들어가지 않는다."""
+    """실제 송출 없이 검사. 결과 문자열에는 Stream Key가 절대 들어가지 않는다.
+
+    mode=copy(DIRECT COPY)이면 ready_report(LiveReadyReport)가 LIVE READY여야 한다.
+    location=cloud이면 PC FFmpeg 잠금(FFMPEG_GUARD)/로컬 supervisor 상태는 보지 않는다 (서버에서 실행).
+    """
     r = PreflightResult()
     key = (stream_key or "").strip()
 
@@ -150,10 +157,19 @@ def run_preflight(
         except LiveConfigError as e:
             r.add(False, str(e))
 
-    if guard.owner is not None and guard.owner != "live":
-        r.add(False, busy_message(guard.owner))
-    if supervisor_state not in (LiveState.STOPPED, LiveState.FAILED):
-        r.add(False, "LIVE가 이미 실행 중입니다.")
+    if mode == MODE_COPY:
+        if ready_report is None:
+            r.add(False, "LIVE READY 분석이 필요합니다.")
+        elif ready_report.ready:
+            r.add(True, "LIVE READY · DIRECT COPY (재인코딩 없음)")
+        else:
+            reason = next((i.message for i in ready_report.issues if i.blocking), "")
+            r.add(False, f"LIVE READY 파일이 아닙니다: {reason} [LIVE READY 파일 만들기]를 사용하세요.")
+    if location == "local":
+        if guard.owner is not None and guard.owner != "live":
+            r.add(False, busy_message(guard.owner))
+        if supervisor_state not in (LiveState.STOPPED, LiveState.FAILED):
+            r.add(False, "LIVE가 이미 실행 중입니다.")
 
     if all(i.ok for i in r.items) and info is not None:
         config = LiveConfig(
@@ -164,10 +180,11 @@ def run_preflight(
             audio_bitrate_kbps=preset.audio_bitrate_kbps,
             fps=preset.fps,
             keyframe_seconds=preset.keyframe_seconds,
+            mode=mode,
         )
         try:
             validate_live_config(config)
-            cmd = build_live_command(ffmpeg=Path(ffmpeg), config=config)
+            cmd = build_stream_command(ffmpeg=Path(ffmpeg), config=config)
             text = describe_live_command(cmd, config)
             if key in text:
                 r.add(False, "보안 검사 실패: 송출 정보에서 Stream Key를 가리지 못했습니다.")

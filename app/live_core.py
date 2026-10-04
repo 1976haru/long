@@ -19,7 +19,7 @@ from typing import Iterable, Sequence
 from urllib.parse import urlsplit
 
 from .core import creationflags_no_window
-from .live_profile import MASK, LiveConfig, LiveConfigError, redact, validate_live_config
+from .live_profile import MASK, MODE_COPY, LiveConfig, LiveConfigError, redact, validate_live_config
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +105,45 @@ def build_live_command(
     ]
 
 
+def build_live_copy_command(
+    *,
+    ffmpeg: Path,
+    config: LiveConfig,
+    output_target: str | None = None,
+    output_format: str = "flv",
+) -> list[str]:
+    """DIRECT COPY: LIVE READY 파일을 재인코딩 없이 그대로 반복 송출 (FFmpeg stream copy).
+
+    인코더/필터/-r/-g/-b:v를 넣지 않는다. CPU/RAM 부하가 매우 낮다.
+    입력이 H.264/AAC, 일정한 keyframe 간격이어야 한다 (live_ready.analyze_live_ready로 확인).
+    """
+    validate_live_config(config, check_input=False)
+    target = output_target if output_target is not None else build_output_url(config.ingest_url, config.stream_key)
+    return [
+        str(ffmpeg),
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-re",
+        "-stream_loop", "-1",
+        "-i", str(config.input_path),
+        "-map", "0:v:0",
+        "-map", "0:a:0",
+        "-c:v", "copy",
+        "-c:a", "copy",
+        "-progress", "pipe:1",
+        "-nostats",
+        "-f", output_format,
+        target,
+    ]
+
+
+def build_stream_command(*, ffmpeg: Path, config: LiveConfig, output_target: str | None = None) -> list[str]:
+    """config.mode에 따라 DIRECT COPY 또는 TRANSCODE 명령을 만든다."""
+    if config.mode == MODE_COPY:
+        return build_live_copy_command(ffmpeg=ffmpeg, config=config, output_target=output_target)
+    return build_live_command(ffmpeg=ffmpeg, config=config, output_target=output_target)
+
+
 def redact_command(cmd: Sequence[str], secrets: Iterable[str | None]) -> list[str]:
     secrets = list(secrets)
     return [redact(str(a), secrets) for a in cmd]
@@ -118,8 +157,10 @@ def describe_live_command(cmd: Sequence[str], config: LiveConfig) -> str:
         f"input={config.input_path.name}",
         f"target={mask_output_url(config.ingest_url)}",
         f"stream_key={config.masked_key or '(없음)'}",
-        f"video={config.video_bitrate_kbps}k fps={config.fps} keyframe={config.keyframe_seconds}s",
-        f"audio=aac {config.audio_bitrate_kbps}k",
+        f"mode={'DIRECT COPY' if config.mode == MODE_COPY else 'TRANSCODE'}",
+        (f"video={config.video_bitrate_kbps}k fps={config.fps} keyframe={config.keyframe_seconds}s"
+         if config.mode != MODE_COPY else "video=copy audio=copy"),
+        f"audio=aac {config.audio_bitrate_kbps}k" if config.mode != MODE_COPY else "re-encode=none",
         "command=" + subprocess.list2cmdline(safe),
     ]
     return "\n".join(lines)
@@ -128,7 +169,7 @@ def describe_live_command(cmd: Sequence[str], config: LiveConfig) -> str:
 def prepare_live(*, ffmpeg: Path, config: LiveConfig, check_input: bool = True) -> tuple[list[str], str]:
     """Dry-run: 설정 검증 + 명령 생성 + 마스킹된 설명. 프로세스는 실행하지 않는다."""
     validate_live_config(config, check_input=check_input)
-    cmd = build_live_command(ffmpeg=ffmpeg, config=config)
+    cmd = build_stream_command(ffmpeg=ffmpeg, config=config)
     return cmd, describe_live_command(cmd, config)
 
 

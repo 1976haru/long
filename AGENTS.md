@@ -30,4 +30,5 @@ git diff --check
 - app/ui.py: Tkinter UI, 최대 5개 순차 대기열
 - app/tooling.py: FFmpeg 자동 탐색, Windows 절전 방지, FFmpeg 동시 실행 잠금
 - app/live_*.py: v0.4 LIVE 송출 경로 (제작 경로와 분리, docs/LIVE_ARCHITECTURE.md). 로직은 live_controller.py, Tk 위젯은 live_ui.py
+- app/cloud_*.py, cloud/, deploy/linux/: 무료 Cloud(OCI Always Free) LIVE (docs/FREE_CLOUD.md). 유료 Cloud 자원 생성/결제 API 호출 금지, shell=True 금지
 - tests/: 회차/무손실 연결 회귀 테스트

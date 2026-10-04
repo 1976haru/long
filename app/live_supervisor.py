@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import collections
 import enum
 import logging
 import threading
@@ -13,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Callable, Protocol
 
-from .live_core import LiveProcess, LiveStats, build_live_command
+from .live_core import LiveProcess, LiveStats, build_stream_command
 from .live_profile import LiveConfig, redact
 from .tooling import FFMPEG_GUARD, FfmpegExecutionGuard
 
@@ -23,6 +24,7 @@ RETRY_DELAYS = (5, 10, 30, 60)
 # 이 시간 이상 정상 송출된 뒤 끊기면 backoff를 처음(5초)부터 다시 시작한다.
 STABLE_RESET_SECONDS = 60.0
 GUARD_OWNER = "live"
+HISTORY_LIMIT = 100  # 상태/재접속 기록은 최근 100건만 메모리에 보관
 
 
 def busy_message(owner: str | None) -> str:
@@ -30,6 +32,8 @@ def busy_message(owner: str | None) -> str:
         return "현재 장시간 영상 제작 중입니다."
     if owner == GUARD_OWNER:
         return "현재 LIVE 송출 중입니다."
+    if owner == "convert":
+        return "현재 LIVE READY 파일을 만드는 중입니다."
     return "다른 FFmpeg 작업이 실행 중입니다."
 
 
@@ -65,7 +69,7 @@ class ProcessLike(Protocol):
 
 def make_process_factory(ffmpeg: Path, config: LiveConfig) -> Callable[[], LiveProcess]:
     def factory() -> LiveProcess:
-        cmd = build_live_command(ffmpeg=ffmpeg, config=config)
+        cmd = build_stream_command(ffmpeg=ffmpeg, config=config)
         return LiveProcess(cmd, secrets=[config.stream_key])
     return factory
 
@@ -97,6 +101,8 @@ class LiveSupervisor:
         self.state = LiveState.STOPPED
         self.attempt = 0
         self.reconnect_count = 0
+        self.state_history: collections.deque = collections.deque(maxlen=HISTORY_LIMIT)
+        self.reconnect_history: collections.deque = collections.deque(maxlen=HISTORY_LIMIT)
         self.next_retry_at: float | None = None
         self.last_exit_code: int | None = None
         self.last_error = ""
@@ -104,6 +110,7 @@ class LiveSupervisor:
     def _set(self, state: LiveState, message: str = "") -> None:
         self.state = state
         message = redact(message, self._secrets)
+        self.state_history.append((self._clock(), state.value, message))
         log.info("LIVE state=%s %s", state.value, message)
         if self._on_state:
             try:
@@ -172,6 +179,7 @@ class LiveSupervisor:
                 delay = retry_delay(self.attempt)
                 self.attempt += 1
                 self.next_retry_at = now + delay
+                self.reconnect_history.append((now, self.last_exit_code, delay))
                 self._set(LiveState.RECONNECT_WAIT, f"rc={self.last_exit_code} retry_in={delay}s attempt={self.attempt}")
             elif self.state is LiveState.RECONNECT_WAIT and self.next_retry_at is not None and now >= self.next_retry_at:
                 self.reconnect_count += 1
