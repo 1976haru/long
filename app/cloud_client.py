@@ -38,6 +38,24 @@ MIN_FREE_BYTES = 2 * 1024**3
 q = shlex.quote
 
 
+def lf_bytes(data: bytes) -> bytes:
+    """텍스트 bytes의 줄바꿈을 LF로 통일 (CRLF, 단독 CR 모두). 영상 등 binary에는 쓰지 않는다."""
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def to_linux_bytes(text: str) -> bytes:
+    """Linux로 보낼 텍스트 → LF-only UTF-8 bytes."""
+    return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
+def _decode(data) -> str:
+    if data is None:
+        return ""
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data).decode("utf-8", "replace")
+    return str(data)
+
+
 class CloudError(RuntimeError):
     """사용자에게 보여줄 한글 메시지. secret을 포함하지 않는다."""
 
@@ -203,16 +221,26 @@ class CloudClient:
             self.detail.append(line[:400])
 
     def run(self, remote_cmd: str, *, input_text: str | None = None, timeout: float = 60) -> RemoteResult:
+        """원격 명령 1개. input_text(스크립트/Stream Key/설정)는 LF-only UTF-8 bytes로 stdin에 보낸다."""
+        return self._run_bytes(remote_cmd, None if input_text is None else to_linux_bytes(input_text), timeout=timeout)
+
+    def _run_bytes(self, remote_cmd: str, payload: bytes | None, *, timeout: float) -> RemoteResult:
+        """binary subprocess (text=False).
+
+        Windows에서 text=True로 stdin을 쓰면 TextIOWrapper가 \\n을 \\r\\n으로 바꿔 보낸다 →
+        Linux bash가 "$'\\r': command not found"로 실패했다 (실제 OCI 테스트에서 확인).
+        stdin payload는 로그/detail/repr 어디에도 남기지 않는다.
+        """
         args = self._base() + [remote_cmd]
         self._note("$ ssh " + self.profile.destination + " " + (remote_cmd if len(remote_cmd) < 300 else remote_cmd[:300] + " …"))
         try:
-            p = self._runner(args, input=input_text, capture_output=True, text=True, encoding="utf-8",
-                             errors="replace", timeout=timeout, check=False, creationflags=creationflags_no_window())
+            p = self._runner(args, input=payload, capture_output=True, timeout=timeout, check=False,
+                             creationflags=creationflags_no_window())
         except subprocess.TimeoutExpired:
             raise CloudError("서버 응답 시간이 초과되었습니다. " + CLOUD_UNAVAILABLE) from None
         except OSError:
             raise CloudError(SSH_MISSING) from None
-        res = RemoteResult(p.returncode, p.stdout or "", p.stderr or "")
+        res = RemoteResult(p.returncode, _decode(p.stdout), _decode(p.stderr))
         if res.out.strip():
             self._note(res.out.strip())
         if res.err.strip():
@@ -220,8 +248,9 @@ class CloudClient:
         return res
 
     def script(self, script: str, *args: str, timeout: float = 120) -> RemoteResult:
+        """Linux bash 스크립트를 `bash -s --`의 stdin으로 실행 (byte-level LF만 전달)."""
         cmd = "bash -s --" + "".join(" " + q(str(a)) for a in args)
-        return self.run(cmd, input_text=script.replace("\r\n", "\n"), timeout=timeout)
+        return self._run_bytes(cmd, to_linux_bytes(script), timeout=timeout)
 
     def _must(self, res: RemoteResult, fallback: str) -> RemoteResult:
         if res.rc == 255:  # ssh 연결 오류
@@ -338,7 +367,8 @@ class CloudClient:
         self._must(self.run(f"mkdir -m 700 {q(stage)}"), "설치 준비 실패")
         try:
             for name, path in files.items():
-                data = path.read_bytes().replace(b"\r\n", b"\n")  # Linux 줄바꿈 보장
+                # 텍스트(.py/.sh/.service)만: Windows checkout/EXE 번들에 CRLF가 섞여도 서버에는 LF만
+                data = lf_bytes(path.read_bytes())
                 self.upload_stream(f"cat > {q(stage + '/' + name)}", io.BytesIO(data), len(data))
             res = self._must(self.run(f"sudo -n bash {q(stage + '/install.sh')} {q(self.profile.user)}", timeout=180),
                              "LIVE Worker 설치 실패")

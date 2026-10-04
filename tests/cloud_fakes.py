@@ -30,14 +30,20 @@ class FakeRemote:
 
     # subprocess.run 대체
     def run(self, args, input=None, **kw):
+        # 실제 ssh와 같은 binary 경로만 허용: text mode면 Windows가 stdin에 CR을 끼워 넣는다
         assert kw.get("shell") is not True
+        assert not kw.get("text") and not kw.get("universal_newlines") and "encoding" not in kw
         assert isinstance(args, list)
-        self.calls.append({"args": list(args), "input": input})
+        assert input is None or isinstance(input, bytes), type(input)
+        assert input is None or b"\r" not in input, "CR on the wire"
+        text = None if input is None else input.decode("utf-8")
+        self.calls.append({"args": list(args), "input": text, "raw": input})
         cmd = args[-1]
         if not self.reachable:
-            return subprocess.CompletedProcess(args, 255, "", self.ssh_error or "ssh: connect to host x port 22: Connection timed out")
-        out, rc, err = self.handle(cmd, input)
-        return subprocess.CompletedProcess(args, rc, out, err)
+            err = self.ssh_error or "ssh: connect to host x port 22: Connection timed out"
+            return subprocess.CompletedProcess(args, 255, b"", err.encode())
+        out, rc, err = self.handle(cmd, text)
+        return subprocess.CompletedProcess(args, rc, out.encode("utf-8"), err.encode("utf-8"))
 
     def handle(self, cmd, input):
         if cmd == "echo LONG_LIVE_OK":
