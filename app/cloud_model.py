@@ -19,10 +19,12 @@ import ipaddress
 import os
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .core import creationflags_no_window
 from .settings import load_settings, save_settings, settings_dir
 
 PROVIDER_OCI_FREE = "OCI_ALWAYS_FREE"
@@ -129,35 +131,218 @@ def save_cloud_profile(profile: CloudProfile | None) -> None:
     save_settings(data)
 
 
-def find_ssh() -> Path | None:
-    """Windows 내장 OpenSSH 우선, 없으면 PATH."""
-    if os.name == "nt":
-        root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
-        for sub in ("System32", "Sysnative"):
-            p = root / sub / "OpenSSH" / "ssh.exe"
-            if p.is_file():
-                return p
-    p = shutil.which("ssh")
-    return Path(p) if p else None
+# ---------------- SSH 연결 도구 탐색 ----------------
+# Windows OpenSSH가 없어도 Git for Windows / GitHub Desktop에 들어 있는 ssh.exe를 찾아 쓴다.
+# 존재 여부만 보지 않고 `ssh -V`로 실제 동작을 확인(probe)한 후보만 사용한다.
+
+SSH_SOURCE_LABELS = {
+    "manual": "직접 지정한 SSH",
+    "windows": "Windows OpenSSH",
+    "path": "PATH의 SSH",
+    "git": "Git for Windows SSH",
+    "github_desktop": "GitHub Desktop SSH",
+}
+SSH_PROBE_TIMEOUT = 5.0
+GIT_FOR_WINDOWS_URL = "https://git-scm.com/download/win"
+
+SSH_MISSING = ("SSH 연결 도구를 찾지 못했습니다.\n\n"
+               "[다시 찾기]를 눌러 Git/GitHub Desktop의 SSH를 찾아보거나\n"
+               "[직접 선택]에서 ssh.exe를 지정하세요.\n\n"
+               "Windows OpenSSH 설치는 필수가 아닙니다.")
+SSH_INVALID = "선택한 파일은 SSH 연결 도구가 아닙니다 (ssh -V 확인 실패). ssh.exe를 선택하세요."
 
 
-SSH_MISSING = ("Windows의 OpenSSH 클라이언트(ssh.exe)를 찾을 수 없습니다.\n"
-               "Windows 설정 → 시스템 → 선택적 기능 → 'OpenSSH 클라이언트'를 추가한 뒤 다시 시도하세요.")
+@dataclass(frozen=True)
+class SshCandidate:
+    path: Path
+    source: str
+
+    @property
+    def label(self) -> str:
+        return SSH_SOURCE_LABELS.get(self.source, "SSH")
+
+
+@dataclass(frozen=True)
+class SshTool:
+    """probe에 성공한 SSH 실행 파일."""
+    path: Path
+    source: str
+    version: str
+
+    @property
+    def label(self) -> str:
+        return SSH_SOURCE_LABELS.get(self.source, "SSH")
+
+
+def _classify_ssh(path) -> str:
+    s = str(path).replace("/", "\\").lower()
+    if "\\githubdesktop\\" in s:
+        return "github_desktop"
+    if "\\openssh\\ssh" in s and ("\\system32\\" in s or "\\sysnative\\" in s):
+        return "windows"
+    if "\\git\\usr\\bin\\" in s or "\\git\\mingw64\\bin\\" in s:
+        return "git"
+    return "path"
+
+
+def _version_key(name: str) -> tuple:
+    return tuple(int(n) for n in re.findall(r"\d+", name))
+
+
+def discover_ssh_candidates(*, saved: tuple[str, str] | None = None, env=None, which=shutil.which,
+                            is_windows: bool | None = None) -> list[SshCandidate]:
+    """우선순위 순서의 SSH 후보 (실제 존재하는 파일만, 중복 제거). 예외를 밖으로 내보내지 않는다."""
+    env = os.environ if env is None else env
+    is_windows = (os.name == "nt") if is_windows is None else is_windows
+    raw: list[tuple[Path, str]] = []
+
+    def add(p, source):
+        try:
+            if p:
+                raw.append((Path(p), source))
+        except (TypeError, ValueError):
+            pass
+
+    try:
+        # 1. 사용자가 지정했거나 이전에 확인된 경로
+        if saved and saved[0]:
+            add(saved[0], saved[1] if saved[1] in SSH_SOURCE_LABELS else "manual")
+        # 2. Windows 내장 OpenSSH
+        if is_windows:
+            root = Path(env.get("SystemRoot") or env.get("WINDIR") or r"C:\Windows")
+            for sub in ("System32", "Sysnative"):
+                add(root / sub / "OpenSSH" / "ssh.exe", "windows")
+        # 3. PATH (위치를 보고 Git/GitHub Desktop/Windows로 이름 표시)
+        try:
+            found = which("ssh")
+            add(found, _classify_ssh(found) if found else "path")
+        except Exception:
+            pass
+        if is_windows:
+            # 4. Git for Windows 기본 설치 위치 (PATH에 없어도 찾는다)
+            for var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+                if env.get(var):
+                    add(Path(env[var]) / "Git" / "usr" / "bin" / "ssh.exe", "git")
+            if env.get("LOCALAPPDATA"):
+                add(Path(env["LOCALAPPDATA"]) / "Programs" / "Git" / "usr" / "bin" / "ssh.exe", "git")
+        # 5. PATH의 git.exe에서 Git root 역산 (<root>\cmd\git.exe, <root>\mingw64\bin\git.exe 등)
+        try:
+            git = which("git")
+        except Exception:
+            git = None
+        if git:
+            for anc in list(Path(git).parents)[:3]:
+                add(anc / "usr" / "bin" / "ssh.exe", "git")
+                add(anc / "mingw64" / "bin" / "ssh.exe", "git")
+        # 6. GitHub Desktop 내장 Git (최신 버전 우선)
+        if is_windows and env.get("LOCALAPPDATA"):
+            base = Path(env["LOCALAPPDATA"]) / "GitHubDesktop"
+            try:
+                apps = sorted(base.glob("app-*"), key=lambda p: _version_key(p.name), reverse=True)
+            except OSError:
+                apps = []
+            for app_dir in apps:
+                g = app_dir / "resources" / "app" / "git"
+                add(g / "usr" / "bin" / "ssh.exe", "github_desktop")
+                add(g / "mingw64" / "bin" / "ssh.exe", "github_desktop")
+    except Exception:
+        pass  # 탐색 실패로 앱이 종료되지 않게
+
+    out, seen = [], set()
+    for p, source in raw:
+        try:
+            key = os.path.normcase(os.path.abspath(str(p)))
+            if key in seen or not p.is_file():
+                continue
+        except (OSError, ValueError):
+            continue
+        seen.add(key)
+        out.append(SshCandidate(p, source))
+    return out
+
+
+def probe_ssh_executable(path, *, runner=subprocess.run, timeout: float = SSH_PROBE_TIMEOUT) -> str | None:
+    """`ssh -V`를 실행해 OpenSSH 버전 문자열을 돌려준다. 동작하지 않으면 None (예외 없음)."""
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return None
+        res = runner([str(p), "-V"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                     timeout=timeout, check=False, creationflags=creationflags_no_window())
+    except Exception:
+        return None
+    text = f"{res.stdout or ''}\n{res.stderr or ''}"
+    for line in text.splitlines():
+        if "openssh" in line.lower():
+            return line.strip()[:120]
+    return None
+
+
+def load_saved_ssh() -> tuple[str, str] | None:
+    """settings.json의 cloud_ssh {path, source}. 없거나 형식이 다르면 None (이전 설정 호환)."""
+    d = load_settings().get("cloud_ssh")
+    if isinstance(d, dict) and isinstance(d.get("path"), str) and d["path"]:
+        return d["path"], str(d.get("source") or "manual")
+    return None
+
+
+def save_ssh_tool(tool: SshTool | None) -> None:
+    """SSH 실행 파일 경로와 종류만 저장한다 (key/Stream Key/비밀번호 저장 없음)."""
+    data = load_settings()
+    if tool is None:
+        data.pop("cloud_ssh", None)
+    else:
+        data["cloud_ssh"] = {"path": str(tool.path), "source": tool.source}
+    save_settings(data)
+
+
+def discover_ssh(*, saved: tuple[str, str] | None = None, probe=probe_ssh_executable, **kw) -> SshTool | None:
+    for c in discover_ssh_candidates(saved=saved, **kw):
+        version = probe(c.path)
+        if version:
+            return SshTool(c.path, c.source, version)
+    return None
+
+
+def validate_manual_ssh(path, *, probe=probe_ssh_executable) -> SshTool:
+    version = probe(path)
+    if not version:
+        raise CloudConfigError(SSH_INVALID)
+    return SshTool(Path(path), "manual", version)
+
+
+def find_ssh(**kw) -> Path | None:
+    """저장된 경로 → Windows OpenSSH → PATH → Git → GitHub Desktop 순서로 probe에 성공한 ssh."""
+    kw.setdefault("saved", load_saved_ssh())
+    tool = discover_ssh(**kw)
+    return tool.path if tool else None
 
 
 def known_hosts_file() -> Path:
     return settings_dir() / "cloud_known_hosts"
 
 
+def ssh_option_path(path) -> str:
+    """ssh -o 값용 경로 (shell quoting 아님, argument 하나로 전달).
+
+    큰따옴표: 공백 있는 경로가 여러 파일로 나뉘지 않게 (OpenSSH 설정 문법). 공백이 없으면 붙이지 않는다 —
+      Git for Windows(MSYS) ssh는 공백 없는 인자 안의 \\" 를 잘못 해석한다 ("invalid quotes").
+    / 변환: 역슬래시 escape 규칙 회피 (Windows OpenSSH, Git/MSYS ssh 모두 C:/... 인식).
+    %% : ssh의 %토큰 확장 방지.
+    """
+    s = str(path).replace("\\", "/").replace("%", "%%")
+    return f'"{s}"' if any(c.isspace() for c in s) else s
+
+
 def ssh_base_args(ssh: Path, profile: CloudProfile, *, connect_timeout: int = 10) -> list[str]:
     """ssh argument list. destination 앞에 `--`를 두어 옵션 주입을 막는다."""
     return [
         str(ssh),
-        "-i", str(profile.key_path),
+        "-i", str(profile.key_path).replace("%", "%%"),
         "-o", "BatchMode=yes",
         "-o", "IdentitiesOnly=yes",
         "-o", "StrictHostKeyChecking=accept-new",
-        "-o", f"UserKnownHostsFile={known_hosts_file()}",
+        "-o", f"UserKnownHostsFile={ssh_option_path(known_hosts_file())}",
         "-o", f"ConnectTimeout={int(connect_timeout)}",
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=4",

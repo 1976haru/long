@@ -59,7 +59,9 @@ def test_ssh_args_safe(tmp_path):
     assert args[-2:] == ["--", "ubuntu@1.2.3.4"]  # 옵션 주입 차단
     joined = " ".join(args)
     assert "BatchMode=yes" in joined and "StrictHostKeyChecking=accept-new" in joined
-    assert f"UserKnownHostsFile={known_hosts_file()}" in joined
+    # 공백 경로가 여러 파일로 나뉘지 않도록 큰따옴표 + / 경로 (SSH 탐색 hotfix에서 수정)
+    kh = str(known_hosts_file()).replace(chr(92), "/")
+    assert (f'UserKnownHostsFile="{kh}"' if " " in kh else f"UserKnownHostsFile={kh}") in args
 
 
 @pytest.mark.parametrize("name", ["CHILI LAB EP001.mp4", "곡 모음 1.mp4", "a'; rm -rf ~.mp4", "$(reboot).mp4", "-rf.mp4", "ok_name-1.0.mp4"])

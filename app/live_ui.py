@@ -26,7 +26,7 @@ from .live_profile import (
 from .live_ready import LiveReadyCancelled, analyze_live_ready, make_live_ready_file
 from .live_secrets import default_key_store
 from .live_supervisor import LiveBusyError, LiveState, busy_message
-from .tooling import FFMPEG_GUARD
+from .tooling import FFMPEG_GUARD, release_tk_variables
 
 KEY_REVEAL_MS = 8000
 TICK_MS = 500
@@ -63,6 +63,18 @@ def ask_cloud_close(parent, message: str) -> str:
 CLOUD_CLOSE_MESSAGE = "Cloud에서 LIVE가 계속 방송 중입니다.\n\nPC 프로그램만 종료할까요?"
 
 
+def default_cloud_client() -> CloudClient:
+    """CloudLiveController 스레드가 호출한다 — Tk 창을 참조하지 않는 모듈 함수여야 한다."""
+    profile = load_cloud_profile()
+    if profile is None:
+        raise CloudConfigError("무료 Cloud가 아직 설정되지 않았습니다. [처음 설정 도우미]를 진행하세요.")
+    return CloudClient(profile.validated())
+
+# 주의: 백그라운드 스레드의 함수는 Tk 객체(self, 위젯, StringVar)를 참조하면 안 된다.
+# 스레드가 Tk 창의 마지막 참조를 놓으면 tkinter Variable이 다른 스레드에서 해제되어
+# "main thread is not in main loop" 오류로 Tk 상태가 깨진다. 큐/일반 값만 넘긴다.
+
+
 class LiveWindow(tk.Toplevel):
     def __init__(self, master, *, tools: Callable[[], tuple], controller: LiveController | None = None, key_store=None,
                  cloud: CloudLiveController | None = None):
@@ -73,7 +85,7 @@ class LiveWindow(tk.Toplevel):
         self._tools = tools
         self.controller = controller or LiveController()
         self.store = key_store or default_key_store()
-        self.cloud = cloud or CloudLiveController(self._make_cloud_client)
+        self.cloud = cloud or CloudLiveController(default_cloud_client)
         self._closing = False
         self._reveal_job = None
         self._tick_job = None
@@ -119,11 +131,6 @@ class LiveWindow(tk.Toplevel):
             self.cloud.start_polling()
         self._tick()
 
-    def _make_cloud_client(self) -> CloudClient:
-        profile = load_cloud_profile()
-        if profile is None:
-            raise CloudConfigError("무료 Cloud가 아직 설정되지 않았습니다. [처음 설정 도우미]를 진행하세요.")
-        return CloudClient(profile.validated())
 
     # ---------- layout ----------
     def _scroll_area(self):
@@ -302,9 +309,10 @@ class LiveWindow(tk.Toplevel):
         token = self._analyze_token
         self.ready_text.set("LIVE READY 확인 중...")
 
+        q = self._ui_q
+
         def work():
-            rep = analyze_live_ready(path, ffprobe)
-            self._ui_q.put(("ready", token, rep))
+            q.put(("ready", token, analyze_live_ready(path, ffprobe)))
         threading.Thread(target=work, name="live-ready", daemon=True).start()
 
     def _apply_ready(self, rep):
@@ -332,16 +340,18 @@ class LiveWindow(tk.Toplevel):
         self.ready_bar["value"] = 0
         self.ready_progress.set("LIVE READY 변환 준비 중")
 
+        q, cancel, height = self._ui_q, self._convert_cancel, self._height
+
         def work():
             try:
-                out = make_live_ready_file(ffmpeg=ffmpeg, ffprobe=ffprobe, src=Path(src), height=self._height,
-                                           duration=duration, cancel=self._convert_cancel,
-                                           progress_cb=lambda f, t: self._ui_q.put(("convert_progress", f, t)))
-                self._ui_q.put(("convert_done", True, out))
+                out = make_live_ready_file(ffmpeg=ffmpeg, ffprobe=ffprobe, src=Path(src), height=height,
+                                           duration=duration, cancel=cancel,
+                                           progress_cb=lambda f, t: q.put(("convert_progress", f, t)))
+                q.put(("convert_done", True, out))
             except LiveReadyCancelled as e:
-                self._ui_q.put(("convert_done", False, str(e)))
+                q.put(("convert_done", False, str(e)))
             except Exception as e:
-                self._ui_q.put(("convert_done", False, str(e)[:600]))
+                q.put(("convert_done", False, str(e)[:600]))
             finally:
                 FFMPEG_GUARD.release(CONVERT_OWNER)
         self._convert_thread = threading.Thread(target=work, name="live-ready-convert", daemon=True)
@@ -571,7 +581,7 @@ class LiveWindow(tk.Toplevel):
         self._refresh()
 
     def _show_failed(self):
-        if self._failed_shown:
+        if self._failed_shown or getattr(self, "_destroyed", False):
             return
         self._failed_shown = True
         snap = self.controller.snapshot()
@@ -596,16 +606,19 @@ class LiveWindow(tk.Toplevel):
         txt.insert("1.0", redact("\n".join(lines), [key]))
         txt.configure(state="disabled")
 
+        self._details_txt = txt
+
         def load_logs():
-            if self.cloud.client is None:
+            client, q = self.cloud.client, self._ui_q
+            if client is None:
                 return
 
             def work():
                 try:
-                    logs = self.cloud.client.logs()
+                    logs = client.logs()
                 except Exception as e:
                     logs = [str(e)]
-                self._ui_q.put(("logs", d, txt, logs))
+                q.put(("logs", logs))
             threading.Thread(target=work, daemon=True).start()
         ttk.Button(d, text="Cloud 로그 불러오기 (최근 50줄)", command=load_logs).pack(anchor="e")
 
@@ -647,7 +660,10 @@ class LiveWindow(tk.Toplevel):
                     messagebox.showwarning("LIVE READY", payload, parent=self)
                 self._sync_widgets()
             elif kind == "logs":
-                _, d, txt, logs = ev
+                _, logs = ev
+                txt = getattr(self, "_details_txt", None)
+                if txt is None:
+                    continue
                 try:
                     txt.configure(state="normal")
                     txt.insert("end", "\n\n[Cloud 서버 로그 (최근 50줄)]\n" + redact("\n".join(logs), [self.key_var.get().strip()]))
@@ -846,6 +862,9 @@ class LiveWindow(tk.Toplevel):
         wait_done()
 
     def destroy(self):
+        if getattr(self, "_destroyed", False):
+            return
+        self._destroyed = True
         if self.controller.active:
             # 예외 경로 안전장치: 창이 사라지기 전 반드시 로컬 FFmpeg 종료. (Cloud LIVE는 건드리지 않음)
             self.controller.stop_blocking()
@@ -862,3 +881,4 @@ class LiveWindow(tk.Toplevel):
                     pass
         self.key_var.set("")
         super().destroy()
+        release_tk_variables(self)  # 이후 어느 스레드에서 GC가 돌아도 Tcl 호출이 없도록 (main thread에서 정리)

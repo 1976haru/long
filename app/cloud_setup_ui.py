@@ -14,9 +14,11 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 from .cloud_client import CloudClient, CloudError, fix_key_permissions
+from .tooling import release_tk_variables
 from .cloud_model import (
-    FREE_NOTICE, FREE_UNSURE, NO_CAPACITY, ORACLE_CONSOLE_URL, ORACLE_FREE_URL, SSH_MISSING, CloudConfigError,
-    CloudProfile, find_ssh, load_cloud_profile, save_cloud_profile,
+    FREE_NOTICE, FREE_UNSURE, GIT_FOR_WINDOWS_URL, NO_CAPACITY, ORACLE_CONSOLE_URL, ORACLE_FREE_URL, SSH_INVALID,
+    SSH_MISSING, CloudConfigError, CloudProfile, SshTool, discover_ssh, load_cloud_profile, load_saved_ssh,
+    probe_ssh_executable, save_cloud_profile, save_ssh_tool,
 )
 
 STEP2_TEXT = """Oracle Console에서 서버(인스턴스)를 만들 때 아래 값만 고르세요.
@@ -36,20 +38,48 @@ LIVE 송출(DIRECT COPY)은 부하가 매우 낮아 이 기준에 해당할 수 
 이 프로그램은 회수를 피하기 위한 가짜 부하를 만들지 않습니다. 서버가 회수되면 [내 PC에서 LIVE]를 사용하세요."""
 
 
+def _background(name: str, q: queue.Queue, fn: Callable, make_event: Callable[[bool, object], tuple]) -> threading.Thread:
+    """fn을 백그라운드에서 실행하고 결과 이벤트를 큐에 넣는다.
+
+    중요: fn/make_event는 Tk 객체를 참조하면 안 된다. 스레드가 Tk 창의 마지막 참조를 놓으면
+    tkinter Variable이 다른 스레드에서 해제되어 "main thread is not in main loop" 오류로 Tk 상태가 깨진다.
+    """
+    def run():
+        try:
+            ev = make_event(True, fn())
+        except Exception as e:
+            ev = make_event(False, e)
+        q.put(ev)
+    t = threading.Thread(target=run, name=name, daemon=True)
+    t.start()
+    return t
+
+
 class CloudSetupWizard(tk.Toplevel):
     STEPS = 4
 
     def __init__(self, master, *, on_done: Callable[[CloudProfile], None] | None = None,
-                 client_factory: Callable[[CloudProfile], CloudClient] = CloudClient,
-                 open_url: Callable[[str], object] = webbrowser.open):
+                 client_factory: Callable[[CloudProfile], CloudClient] | None = None,
+                 open_url: Callable[[str], object] = webbrowser.open,
+                 ssh_discover: Callable[[], SshTool | None] | None = None,
+                 ssh_probe: Callable = probe_ssh_executable,
+                 pick_file: Callable = filedialog.askopenfilename):
         super().__init__(master)
         self.title("무료 Cloud 처음 설정 도우미")
         self.geometry("720x600")
         self.minsize(600, 520)
         self.transient(master)
         self._on_done = on_done
-        self._client_factory = client_factory
+        # 기본: 이 화면에서 찾은(또는 직접 지정한) ssh.exe로 연결
+        self._client_factory = client_factory or (
+            lambda profile: CloudClient(profile, ssh=self.ssh_tool.path if self.ssh_tool else None))
         self._open_url = open_url
+        self._ssh_discover = ssh_discover or (lambda: discover_ssh(saved=load_saved_ssh()))
+        self._ssh_probe = ssh_probe
+        self._pick_file = pick_file
+        self.ssh_tool: SshTool | None = None
+        self.ssh_searching = False
+        self._ssh_detail = False
         self._q: queue.Queue = queue.Queue()
         self._worker: threading.Thread | None = None
         self.step = 1
@@ -62,6 +92,8 @@ class CloudSetupWizard(tk.Toplevel):
         self.user = tk.StringVar(value=prev.user if prev else "ubuntu")
         self.key_path = tk.StringVar(value=prev.key_path if prev else "")
         self.conn_msg = tk.StringVar()
+        self.ssh_msg = tk.StringVar()
+        self.ssh_path_msg = tk.StringVar()
         self.prep_msg = tk.StringVar()
         self.step_title = tk.StringVar()
 
@@ -132,16 +164,95 @@ class CloudSetupWizard(tk.Toplevel):
         g.columnconfigure(1, weight=1)
         ttk.Label(self.body, text="Ubuntu 서버의 기본 사용자 이름은 ubuntu 입니다. 키 파일 내용은 저장하지 않고 위치만 기억합니다.",
                   foreground="gray30", wraplength=640).pack(anchor="w", pady=(6, 0))
+        # SSH 연결 도구 (Windows OpenSSH가 없어도 Git/GitHub Desktop의 ssh.exe 사용)
+        sf = ttk.LabelFrame(self.body, text="SSH 연결 도구", padding=6)
+        sf.pack(fill="x", pady=(8, 0))
+        sr = ttk.Frame(sf); sr.pack(fill="x")
+        self.lbl_ssh = ttk.Label(sr, textvariable=self.ssh_msg)
+        self.lbl_ssh.pack(side="left")
+        ttk.Button(sr, text="상세", width=5, command=self._toggle_ssh_detail).pack(side="right")
+        self.btn_ssh_pick = ttk.Button(sr, text="직접 선택", command=self._pick_ssh)
+        self.btn_ssh_pick.pack(side="right", padx=(4, 0))
+        self.btn_ssh_find = ttk.Button(sr, text="다시 찾기", command=self._start_ssh_discovery)
+        self.btn_ssh_find.pack(side="right", padx=(4, 0))
+        self.lbl_ssh_path = ttk.Label(sf, textvariable=self.ssh_path_msg, foreground="gray30", wraplength=640, justify="left")
+        self.btn_git_help = ttk.Button(sf, text="Git for Windows 설치 안내 (브라우저)", command=lambda: self._open_url(GIT_FOR_WINDOWS_URL))
         row = ttk.Frame(self.body); row.pack(anchor="w", pady=10)
         self.btn_conn = ttk.Button(row, text="연결 검사", command=self._check_conn)
         self.btn_conn.pack(side="left")
         self.btn_keyfix = ttk.Button(row, text="키 파일 권한 고치기", command=self._fix_key)
         self.lbl_conn = ttk.Label(self.body, textvariable=self.conn_msg, justify="left", wraplength=640)
         self.lbl_conn.pack(anchor="w")
-        if find_ssh() is None:
-            self.conn_msg.set(SSH_MISSING)
-            self.lbl_conn.configure(foreground="firebrick")
-            self.btn_conn.configure(state="disabled")
+        self._update_ssh_row()
+
+    # ---------- SSH 연결 도구 ----------
+    def _start_ssh_discovery(self):
+        """STEP 3 진입/[다시 찾기]: 새로 설치한 Git/OpenSSH도 재시작 없이 찾는다 (probe는 스레드에서)."""
+        if self.ssh_searching:
+            return
+        self.ssh_searching = True
+        self._update_ssh_row()
+
+        _background("ssh-discover", self._q, self._ssh_discover, lambda ok, v: ("ssh", v if ok else None))
+
+    def _pick_ssh(self):
+        p = self._pick_file(parent=self, title="ssh.exe 선택",
+                            filetypes=[("ssh.exe", "ssh.exe"), ("실행 파일", "*.exe"), ("모든 파일", "*.*")])
+        if not p:
+            return
+        self.ssh_searching = True
+        self._update_ssh_row()
+
+        probe = self._ssh_probe
+        _background("ssh-probe", self._q, lambda: probe(p), lambda ok, v: ("ssh_manual", p, v if ok else None))
+
+    def _set_ssh_tool(self, tool: SshTool | None, *, save: bool = True):
+        self.ssh_tool = tool
+        if tool is not None and save:
+            try:
+                save_ssh_tool(tool)  # 실행 파일 경로만 저장
+            except OSError:
+                pass
+
+    def _toggle_ssh_detail(self):
+        self._ssh_detail = not self._ssh_detail
+        self._update_ssh_row()
+
+    def _update_ssh_row(self):
+        if self.step != 3 or not hasattr(self, "lbl_ssh"):
+            return
+        try:
+            if self.ssh_searching:
+                self.ssh_msg.set("SSH 연결 도구를 찾는 중...")
+                self.lbl_ssh.configure(foreground="gray30")
+            elif self.ssh_tool is not None:
+                self.ssh_msg.set(f"✓ {self.ssh_tool.label}")
+                self.lbl_ssh.configure(foreground="darkgreen")
+            else:
+                self.ssh_msg.set("✗ SSH 연결 도구를 찾지 못했습니다")
+                self.lbl_ssh.configure(foreground="firebrick")
+            if self.ssh_tool is not None:
+                self.ssh_path_msg.set(f"{self.ssh_tool.path}\n{self.ssh_tool.version}")
+            if self._ssh_detail and self.ssh_tool is not None:
+                self.lbl_ssh_path.pack(anchor="w", pady=(4, 0))
+            else:
+                self.lbl_ssh_path.pack_forget()
+            missing = self.ssh_tool is None and not self.ssh_searching
+            if missing:
+                self.btn_git_help.pack(anchor="w", pady=(4, 0))
+                if not self.conn_msg.get() or self.conn_msg.get().startswith("✓"):
+                    self.conn_msg.set(SSH_MISSING)
+                    self.lbl_conn.configure(foreground="firebrick")
+            else:
+                self.btn_git_help.pack_forget()
+                if self.conn_msg.get() in (SSH_MISSING, SSH_INVALID):
+                    self.conn_msg.set("")
+            busy = self.busy or self.ssh_searching
+            self.btn_conn.configure(state="normal" if self.ssh_tool is not None and not busy else "disabled")
+            self.btn_ssh_find.configure(state="disabled" if busy else "normal")
+            self.btn_ssh_pick.configure(state="disabled" if busy else "normal")
+        except tk.TclError:
+            pass
 
     def _step4(self):
         self.step_title.set("STEP 4/4 · 무료 Cloud 자동 준비")
@@ -171,6 +282,8 @@ class CloudSetupWizard(tk.Toplevel):
             return
         self.step = max(1, min(self.STEPS, step))
         self._render()
+        if self.step == 3:
+            self._start_ssh_discovery()  # 열 때마다 다시 찾기 (새로 설치한 도구도 인식)
 
     def _back(self):
         self._go(self.step - 1)
@@ -192,18 +305,17 @@ class CloudSetupWizard(tk.Toplevel):
         return CloudProfile(self.host.get(), self.user.get(), self.key_path.get()).validated()
 
     def _run(self, fn, tag):
+        """fn은 Tk 객체(self)를 참조하지 않아야 한다 (CloudClient 메서드 등)."""
         if self.busy:
             return
 
-        def body():
-            try:
-                self._q.put((tag, True, fn()))
-            except (CloudError, CloudConfigError) as e:
-                self._q.put((tag, False, str(e)))
-            except Exception as e:
-                self._q.put((tag, False, f"예상하지 못한 오류 ({type(e).__name__})"))
-        self._worker = threading.Thread(target=body, daemon=True)
-        self._worker.start()
+        def result(ok, v):
+            if ok:
+                return (tag, True, v)
+            if isinstance(v, (CloudError, CloudConfigError)):
+                return (tag, False, str(v))
+            return (tag, False, f"예상하지 못한 오류 ({type(v).__name__})")
+        self._worker = _background(f"cloud-{tag}", self._q, fn, result)
         self._render_buttons()
 
     def _render_buttons(self):
@@ -233,7 +345,8 @@ class CloudSetupWizard(tk.Toplevel):
             return
         self.btn_prep.configure(state="disabled")
         self.prep_msg.set("준비 중...")
-        self._run(lambda: self.client.prepare(lambda i, n: self._q.put(("prep_step", i, n))), "prep")
+        client, q = self.client, self._q  # 스레드에 Tk 창(self)을 넘기지 않는다
+        self._run(lambda: client.prepare(lambda i, n: q.put(("prep_step", i, n))), "prep")
 
     def _mark_done(self):
         for v in self.step_labels:
@@ -242,10 +355,27 @@ class CloudSetupWizard(tk.Toplevel):
         self.lbl_prep.configure(foreground="darkgreen")
 
     def _pump(self):
+        if getattr(self, "_destroyed", False):
+            return
         try:
             while True:
                 tag, *rest = self._q.get_nowait()
-                if tag == "conn":
+                if tag == "ssh":
+                    self.ssh_searching = False
+                    self._set_ssh_tool(rest[0])
+                    self._update_ssh_row()
+                elif tag == "ssh_manual":
+                    path, version = rest
+                    self.ssh_searching = False
+                    if version:
+                        self._set_ssh_tool(SshTool(Path(path), "manual", version))
+                        self.conn_msg.set("✓ SSH 연결 도구를 확인했습니다. [연결 검사]를 눌러 주세요.")
+                        self.lbl_conn.configure(foreground="darkgreen")
+                    else:
+                        self.conn_msg.set(SSH_INVALID)
+                        self.lbl_conn.configure(foreground="firebrick")
+                    self._update_ssh_row()
+                elif tag == "conn":
                     ok, payload = rest
                     self.connected = ok
                     if ok:
@@ -298,3 +428,10 @@ class CloudSetupWizard(tk.Toplevel):
         if self.busy and not messagebox.askyesno("설정 중", "설정 작업이 진행 중입니다. 창을 닫을까요?\n(서버 작업은 끝까지 진행될 수 있습니다)", parent=self):
             return
         self.destroy()
+
+    def destroy(self):
+        if getattr(self, "_destroyed", False):
+            return
+        self._destroyed = True
+        super().destroy()
+        release_tk_variables(self)  # 백그라운드 스레드의 GC가 Tcl을 건드리지 않도록 main thread에서 정리

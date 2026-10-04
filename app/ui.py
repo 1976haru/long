@@ -18,7 +18,7 @@ from .core import (
 from .settings import load_settings, save_settings
 from .live_supervisor import busy_message
 from .live_ui import LiveWindow
-from .tooling import FFMPEG_GUARD, discover_ffmpeg, prevent_windows_sleep, remember_ffmpeg
+from .tooling import FFMPEG_GUARD, discover_ffmpeg, prevent_windows_sleep, release_tk_variables, remember_ffmpeg
 
 
 @dataclass
@@ -422,4 +422,4 @@ class MainWindow(tk.Tk):
     def _finish_close(self):
         w=self._live_window()
         if w:w.destroy()
-        self._save();self.destroy()
+        self._save();self.destroy();release_tk_variables(self)

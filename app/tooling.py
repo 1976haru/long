@@ -124,3 +124,33 @@ class KeepAwake:
         if self.active:
             self._set(0x80000000)  # ES_CONTINUOUS
             self.active = False
+
+
+def release_tk_variables(obj) -> None:
+    """창 destroy 시 Tk main thread에서 tkinter Variable(StringVar 등)을 미리 정리한다.
+
+    파괴된 창이 참조 순환 안에 남으면 cyclic GC가 아무 스레드(FFmpeg reader, Cloud polling 등)에서
+    실행될 수 있고, 그때 Variable.__del__이 다른 스레드에서 Tcl을 호출해
+    "main thread is not in main loop"로 Tk 상태가 깨진다. 여기서 미리 해제해 두면 이후 GC는 아무 Tcl 호출도 하지 않는다.
+    """
+    import tkinter as tk
+
+    def finalize(v):
+        tkapp = getattr(v, "_tk", None)
+        if tkapp is None:
+            return
+        try:
+            if tkapp.getboolean(tkapp.call("info", "exists", v._name)):
+                tkapp.globalunsetvar(v._name)
+            for name in getattr(v, "_tclCommands", None) or ():
+                tkapp.deletecommand(name)
+        except Exception:
+            pass
+        v._tclCommands = None
+        v._tk = None  # Variable.__del__은 _tk가 None이면 아무것도 하지 않는다
+
+    for value in list(vars(obj).values()):
+        items = value.values() if isinstance(value, dict) else value if isinstance(value, (list, tuple)) else (value,)
+        for item in items:
+            if isinstance(item, tk.Variable):
+                finalize(item)
