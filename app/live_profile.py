@@ -44,7 +44,7 @@ class LiveProfile:
     name: str
     ingest_url: str
     video_bitrate_kbps: int = 8000
-    audio_bitrate_kbps: int = 192
+    audio_bitrate_kbps: int = 128
     fps: int = 30
     keyframe_seconds: int = 2
     reconnect: bool = True
@@ -65,6 +65,39 @@ YOUTUBE_DEFAULT_PROFILE = LiveProfile(name="YouTube 1080p30 (RTMPS)", ingest_url
 
 
 @dataclass(frozen=True)
+class LivePreset:
+    """UI 송출 품질 preset. 해상도는 바꾸지 않고 입력 해상도 그대로 송출한다."""
+
+    key: str
+    label: str
+    input_height: int
+    video_bitrate_kbps: int
+    audio_bitrate_kbps: int = 128
+    fps: int = 30
+    keyframe_seconds: int = 2
+
+
+LIVE_PRESETS = (
+    LivePreset("720p30", "720p 입력용 저부하 (5 Mbps)", 720, 5000),
+    LivePreset("1080p30", "1080p 입력용 안정형 (8 Mbps)", 1080, 8000),
+    LivePreset("1080p30hq", "1080p 입력용 고화질 (10 Mbps)", 1080, 10000),
+)
+DEFAULT_PRESET_KEY = "1080p30"
+
+
+def preset_by_key(key: str) -> LivePreset:
+    for p in LIVE_PRESETS:
+        if p.key == key:
+            return p
+    raise KeyError(key)
+
+
+def recommend_preset(height: int) -> LivePreset:
+    """입력 영상 높이에 맞는 preset 추천. 720p 이하는 저부하, 그 외는 1080p 안정형."""
+    return preset_by_key("720p30" if 0 < height <= 720 else DEFAULT_PRESET_KEY)
+
+
+@dataclass(frozen=True)
 class LiveConfig:
     """실제 송출 세션 설정. stream_key는 repr에서 제외된다."""
 
@@ -72,7 +105,7 @@ class LiveConfig:
     ingest_url: str
     stream_key: str = field(repr=False)
     video_bitrate_kbps: int = 8000
-    audio_bitrate_kbps: int = 192
+    audio_bitrate_kbps: int = 128
     fps: int = 30
     keyframe_seconds: int = 2
     audio_sample_rate: int = 44100

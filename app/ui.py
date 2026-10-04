@@ -16,6 +16,7 @@ from .core import (
     strict_copy_compatibility, target_seconds,
 )
 from .settings import load_settings, save_settings
+from .live_ui import LiveWindow
 from .tooling import FFMPEG_GUARD, discover_ffmpeg, prevent_windows_sleep, remember_ffmpeg
 
 
@@ -61,6 +62,7 @@ class MainWindow(tk.Tk):
         self.cancel = threading.Event()
         self.events = queue.Queue()
         self.running = False
+        self.live_win = None
 
         self.mode = tk.StringVar(value="rounds")
         self.rounds = tk.IntVar(value=10)
@@ -94,7 +96,8 @@ class MainWindow(tk.Tk):
         self.tool_text = ttk.Label(tr, text="FFmpeg 확인 중...")
         self.tool_text.pack(side="left")
         ttk.Button(tr, text="FFmpeg 설정", command=self._pick_ffmpeg).pack(side="right")
-        ttk.Button(tr, text="24H LIVE (개발 중)", command=self._live_placeholder).pack(side="right", padx=(0, 5))
+        ttk.Style(self).configure("Live.TButton", foreground="red")
+        ttk.Button(tr, text="● 24H LIVE", style="Live.TButton", command=self._open_live).pack(side="right", padx=(0, 5))
 
         f1 = ttk.LabelFrame(root, text="① SET 영상", padding=7)
         f1.pack(fill="x")
@@ -319,13 +322,26 @@ class MainWindow(tk.Tk):
         if not self._need_tools():return
         idx=[i for i,j in enumerate(self.jobs) if j.status!="완료"]
         if not idx:messagebox.showinfo("대기열","모든 작업이 완료 상태입니다.");return
-        if not FFMPEG_GUARD.try_acquire("long"):messagebox.showwarning("FFmpeg 사용 중","LIVE 송출 중에는 장시간 영상 제작을 시작할 수 없습니다.");return
+        if not FFMPEG_GUARD.try_acquire("long"):messagebox.showwarning("FFmpeg 사용 중","현재 LIVE 송출 중입니다.\nLIVE를 종료한 뒤 장시간 영상 제작을 시작하세요.");return
         self.running=True;self.cancel.clear();self.start.configure(state="disabled");self.stop.configure(state="normal")
         cont=bool(self.keep_going.get());awake=bool(self.keep_awake.get())
         threading.Thread(target=self._worker_guarded,args=(idx,cont,awake),daemon=True).start()
 
-    def _live_placeholder(self):
-        messagebox.showinfo("24H LIVE (개발 중)","24시간 LIVE 송출은 v0.4에서 개발 중입니다.\n현재는 backend(Phase 1)만 준비되어 있습니다.")
+    def _live_window(self):
+        if self.live_win is not None:
+            try:
+                if self.live_win.winfo_exists():return self.live_win
+            except tk.TclError:pass
+        self.live_win=None
+        return None
+
+    def _open_live(self):
+        w=self._live_window()
+        if w:w.deiconify();w.lift();w.focus_set();return
+        self.live_win=LiveWindow(self,tools=self._live_tools)
+
+    def _live_tools(self):
+        return (self.ffmpeg,self.ffprobe) if self._need_tools() else (None,None)
 
     def _worker_guarded(self,indices,cont,awake):
         try:self._worker(indices,cont,awake)
@@ -391,6 +407,16 @@ class MainWindow(tk.Tk):
         data=load_settings();data["prevent_sleep"]=bool(self.keep_awake.get());data["continue_on_error"]=bool(self.keep_going.get());data["queue"]=[asdict(j) for j in self.jobs];save_settings(data)
 
     def _close(self):
+        w=self._live_window()
+        if w and w.controller.active:
+            if not messagebox.askyesno("LIVE 송출 중","현재 LIVE 송출 중입니다.\nLIVE를 종료하고 프로그램을 닫을까요?",parent=self):return
+            self.status.set("LIVE 종료 중...")
+            w.shutdown(self._finish_close);return
         if self.running and not messagebox.askyesno("작업 중","현재 작업을 중지하고 종료할까요?"):return
         if self.running:self.cancel.set()
+        self._finish_close()
+
+    def _finish_close(self):
+        w=self._live_window()
+        if w:w.destroy()
         self._save();self.destroy()

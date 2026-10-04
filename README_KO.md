@@ -16,12 +16,20 @@ CapCut에서 **자막·이미지·파형·음원·구독/좋아요 요소까지 
 - 장시간 대기열 동안 Windows 절전 방지 옵션을 제공합니다.
 - 대기열을 자동 저장해 프로그램 재실행 시 복구합니다.
 
-## v0.4 개발 중 — 24H LIVE backend Phase 1
+## v0.4 개발 중 — 24H LIVE (단일 MP4)
 
-- YouTube 24시간 LIVE 송출을 위한 **backend 기반만** 추가되었습니다 (UI는 `24H LIVE (개발 중)` 안내 버튼만 있음).
-- 기존 장시간 MP4 제작 기능과 사용법은 그대로입니다. LIVE는 별도 모듈(`app/live_*.py`)로 분리되어 있습니다.
+상단 `● 24H LIVE` 버튼 → **24H Playlist LIVE Studio** 창에서 완성 MP4 1개를 YouTube LIVE로 무한 반복 송출합니다.
+
+1. `영상 선택` (오디오가 있는 MP4만 가능, 입력 해상도 그대로 송출)
+2. YouTube Live Control Room의 Stream Key 입력 (필요하면 `이 PC에 안전하게 기억`)
+3. 송출 품질 프로필 확인 (영상 해상도에 맞게 자동 추천)
+4. `송출 설정 검사` → `▶ LIVE 시작` → 상태 확인 → `■ LIVE 종료`
+
+- 처음 테스트는 YouTube Live Control Room에서 **비공개/일부공개** 스트림으로 확인하세요.
+- 기존 장시간 MP4 제작 기능과 사용법은 그대로입니다. LIVE는 별도 모듈(`app/live_*.py`)입니다.
 - FFmpeg는 계속 동시에 1개만 실행됩니다: 제작 중에는 LIVE 불가, LIVE 중에는 제작 불가.
-- Stream Key는 저장소/설정 파일/로그에 남기지 않습니다. 자세한 내용: `docs/LIVE_ARCHITECTURE.md`
+- 끊기면 5→10→30→60초 간격으로 자동 재접속, 종료 시 FFmpeg를 정상 종료합니다.
+- Stream Key는 로그/설정 파일에 남기지 않으며, 기억 옵션은 Windows DPAPI 암호화 파일로만 저장합니다. 자세한 내용: `docs/LIVE_ARCHITECTURE.md`
 
 ## 가장 쉬운 사용법
 

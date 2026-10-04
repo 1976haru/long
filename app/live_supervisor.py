@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from .live_core import LiveProcess, LiveStats, build_live_command
-from .live_profile import LiveConfig
+from .live_profile import LiveConfig, redact
 from .tooling import FFMPEG_GUARD, FfmpegExecutionGuard
 
 log = logging.getLogger(__name__)
@@ -23,6 +23,14 @@ RETRY_DELAYS = (5, 10, 30, 60)
 # 이 시간 이상 정상 송출된 뒤 끊기면 backoff를 처음(5초)부터 다시 시작한다.
 STABLE_RESET_SECONDS = 60.0
 GUARD_OWNER = "live"
+
+
+def busy_message(owner: str | None) -> str:
+    if owner == "long":
+        return "현재 장시간 영상 제작 중입니다."
+    if owner == GUARD_OWNER:
+        return "현재 LIVE 송출 중입니다."
+    return "다른 FFmpeg 작업이 실행 중입니다."
 
 
 def retry_delay(attempt: int) -> int:
@@ -70,11 +78,16 @@ class LiveSupervisor:
         guard: FfmpegExecutionGuard = FFMPEG_GUARD,
         clock: Callable[[], float] = time.monotonic,
         on_state: Callable[[LiveState, str], None] | None = None,
+        reconnect: bool = True,
+        secrets: tuple[str, ...] = (),
     ):
         self._factory = process_factory
         self._guard = guard
         self._clock = clock
         self._on_state = on_state
+        self.reconnect = reconnect
+        self._secrets = [s for s in secrets if s]
+        self.session_started_at: float | None = None
         self._lock = threading.RLock()
         self._proc: ProcessLike | None = None
         self._user_stop = False
@@ -83,12 +96,14 @@ class LiveSupervisor:
         self._wake = threading.Event()
         self.state = LiveState.STOPPED
         self.attempt = 0
+        self.reconnect_count = 0
         self.next_retry_at: float | None = None
         self.last_exit_code: int | None = None
         self.last_error = ""
 
     def _set(self, state: LiveState, message: str = "") -> None:
         self.state = state
+        message = redact(message, self._secrets)
         log.info("LIVE state=%s %s", state.value, message)
         if self._on_state:
             try:
@@ -105,12 +120,14 @@ class LiveSupervisor:
             if self.active:
                 raise LiveBusyError("LIVE가 이미 실행 중입니다.")
             if not self._guard.try_acquire(GUARD_OWNER):
-                raise LiveBusyError("다른 FFmpeg 작업(장시간 영상 제작)이 실행 중이라 LIVE를 시작할 수 없습니다.")
+                raise LiveBusyError(busy_message(self._guard.owner))
             self._user_stop = False
             self.attempt = 0
+            self.reconnect_count = 0
             self.next_retry_at = None
             self.last_exit_code = None
             self.last_error = ""
+            self.session_started_at = self._clock()
             self._launch()
 
     def _launch(self) -> None:
@@ -121,7 +138,7 @@ class LiveSupervisor:
         except Exception as e:
             # 설정/실행 파일 문제는 재시도해도 해결되지 않으므로 FAILED.
             self._proc = None
-            self.last_error = str(e)
+            self.last_error = redact(str(e), self._secrets)
             self._guard.release(GUARD_OWNER)
             self._set(LiveState.FAILED, self.last_error)
             return
@@ -139,9 +156,17 @@ class LiveSupervisor:
             if self.state is LiveState.RUNNING and self._proc is not None and not self._proc.is_running():
                 self.last_exit_code = self._proc.return_code()
                 try:
-                    self._proc.stop()  # 종료된 프로세스 회수 (zombie 방지)
+                    self._proc.stop()  # 종료된 프로세스 회수 (zombie 방지), stderr reader 정리
                 except Exception:
                     log.exception("LIVE process cleanup failed")
+                errors = getattr(self._proc, "recent_errors", None)
+                lines = errors() if callable(errors) else []
+                self.last_error = redact(lines[-1], self._secrets) if lines else f"FFmpeg가 종료되었습니다 (코드 {self.last_exit_code})"
+                if not self.reconnect:
+                    self._proc = None
+                    self._guard.release(GUARD_OWNER)
+                    self._set(LiveState.FAILED, f"rc={self.last_exit_code} reconnect=off")
+                    return self.state
                 if now - self._run_started >= STABLE_RESET_SECONDS:
                     self.attempt = 0
                 delay = retry_delay(self.attempt)
@@ -149,6 +174,7 @@ class LiveSupervisor:
                 self.next_retry_at = now + delay
                 self._set(LiveState.RECONNECT_WAIT, f"rc={self.last_exit_code} retry_in={delay}s attempt={self.attempt}")
             elif self.state is LiveState.RECONNECT_WAIT and self.next_retry_at is not None and now >= self.next_retry_at:
+                self.reconnect_count += 1
                 self._launch()
             return self.state
 

@@ -90,3 +90,23 @@ def test_progress_parser_extracts_stats():
     for x in ["fps=0.00", "bitrate=N/A", "out_time_us=N/A", "speed=N/A", "progress=continue"]:
         s = p.feed(x)
     assert s.bitrate is None and s.speed is None and s.out_time_seconds is None
+
+
+def test_youtube_readiness_command():
+    """Gate 7: 실제 key 없이 YouTube RTMPS 기본 preset 명령 확인."""
+    from app.live_profile import YOUTUBE_RTMPS_INGEST, preset_by_key
+    p = preset_by_key("1080p30")
+    c = LiveConfig(input_path=Path("set.mp4"), ingest_url=YOUTUBE_RTMPS_INGEST, stream_key=FAKE_KEY,
+                   video_bitrate_kbps=p.video_bitrate_kbps, audio_bitrate_kbps=p.audio_bitrate_kbps,
+                   fps=p.fps, keyframe_seconds=p.keyframe_seconds)
+    cmd = build_live_command(ffmpeg=Path("ffmpeg"), config=c)
+    assert cmd[-1].startswith("rtmps://a.rtmps.youtube.com:443/live2/")
+    assert opt(cmd, "-c:v") == "libx264"
+    assert opt(cmd, "-b:v") == opt(cmd, "-minrate") == opt(cmd, "-maxrate") == "8000k"
+    assert "nal-hrd=cbr" in opt(cmd, "-x264-params")
+    assert opt(cmd, "-r") == "30" and opt(cmd, "-g") == "60"
+    assert opt(cmd, "-c:a") == "aac" and opt(cmd, "-b:a") == "128k"
+    assert opt(cmd, "-ar") == "44100" and opt(cmd, "-ac") == "2"
+    assert "-nostdin" not in cmd  # stdin `q` 정상 종료 사용
+    assert "0:a:0" in cmd and "0:a:0?" not in cmd  # 오디오 필수
+    assert "-vf" not in cmd and "-s" not in cmd  # 입력 해상도 그대로

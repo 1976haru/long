@@ -96,3 +96,31 @@ class FfmpegExecutionGuard:
 
 
 FFMPEG_GUARD = FfmpegExecutionGuard()
+
+
+class KeepAwake:
+    """LIVE 전체 수명 동안 Windows 절전을 막는다.
+
+    SetThreadExecutionState는 호출한 스레드에 묶이므로 enable/disable은 항상 같은
+    (Tk main) 스레드에서 호출한다. 장시간 제작의 prevent_windows_sleep()과는 독립적이다.
+    """
+
+    def __init__(self, setter=None):
+        self._setter = setter
+        self.active = False
+
+    def _set(self, flags: int) -> None:
+        if self._setter is not None:
+            self._setter(flags)
+        elif os.name == "nt":
+            ctypes.windll.kernel32.SetThreadExecutionState(flags)
+
+    def enable(self) -> None:
+        if not self.active:
+            self._set(0x80000000 | 0x00000001)  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+            self.active = True
+
+    def disable(self) -> None:
+        if self.active:
+            self._set(0x80000000)  # ES_CONTINUOUS
+            self.active = False

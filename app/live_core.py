@@ -7,7 +7,9 @@ Python은 영상 프레임을 읽지 않고, FFmpeg -progress 출력만 파싱�
 from __future__ import annotations
 
 import collections
+import ctypes
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -59,6 +61,9 @@ def build_live_command(
     """LIVE FFmpeg argument list. shell=True 없이 그대로 Popen에 전달한다.
 
     output_target을 지정하면 ingest URL 대신 그 대상(로컬 파일 등)으로 출력한다 (smoke/dry-run 용).
+    -nostdin을 쓰지 않는다: LiveProcess가 stdin으로 `q`를 보내 FFmpeg를 정상 종료시킨다.
+    오디오 stream은 필수다 (음악 LIVE 용도, preflight에서 오디오 없는 영상은 차단).
+    해상도는 바꾸지 않는다 (입력 해상도 그대로 송출).
     """
     validate_live_config(config, check_input=False)
     target = output_target if output_target is not None else build_output_url(config.ingest_url, config.stream_key)
@@ -67,7 +72,6 @@ def build_live_command(
     return [
         str(ffmpeg),
         "-hide_banner",
-        "-nostdin",
         "-loglevel", "warning",
         # 실시간 속도로 입력을 읽는다 (파일을 최대 속도로 밀어내지 않도록).
         "-re",
@@ -75,15 +79,18 @@ def build_live_command(
         "-stream_loop", "-1",
         "-i", str(config.input_path),
         "-map", "0:v:0",
-        "-map", "0:a:0?",
+        "-map", "0:a:0",
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-profile:v", "high",
         "-pix_fmt", "yuv420p",
         "-r", str(config.fps),
+        # CBR (YouTube ingest 권장)
         "-b:v", f"{vb}k",
+        "-minrate", f"{vb}k",
         "-maxrate", f"{vb}k",
         "-bufsize", f"{vb * 2}k",
+        "-x264-params", "nal-hrd=cbr",
         "-g", str(gop),
         "-keyint_min", str(gop),
         "-sc_threshold", "0",
@@ -176,10 +183,95 @@ class ProgressParser:
         return self.latest
 
 
-class LiveProcess:
-    """LIVE FFmpeg 프로세스 1개. stdout/stderr는 백그라운드 스레드가 읽어 GUI를 막지 않는다."""
+_JOB: int | None = None
 
-    STOP_TIMEOUT = 5.0
+
+def _kill_on_exit_job():
+    """Windows Job Object (KILL_ON_JOB_CLOSE). 앱이 비정상 종료돼도 LIVE FFmpeg가 남지 않게 한다.
+
+    핸들은 앱 수명 동안 열어두며, 앱 프로세스가 끝나 OS가 핸들을 닫으면 job 안의 FFmpeg도 종료된다.
+    실패해도 송출 자체는 가능하므로 best-effort.
+    """
+    global _JOB
+    if os.name != "nt":
+        return None
+    if _JOB is not None:
+        return _JOB or None
+    _JOB = 0
+    try:
+        from ctypes import wintypes
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+        class BASIC(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class EXTENDED(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BASIC),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        k32.SetInformationJobObject.restype = wintypes.BOOL
+        k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+        info = EXTENDED()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            return None
+        _JOB = job
+        return job
+    except Exception:
+        log.warning("kill-on-exit job object unavailable", exc_info=True)
+        return None
+
+
+def _assign_to_job(proc) -> bool:
+    job = _kill_on_exit_job()
+    handle = getattr(proc, "_handle", None)
+    if not job or handle is None:
+        return False
+    try:
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.AssignProcessToJobObject.restype = wintypes.BOOL
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        return bool(k32.AssignProcessToJobObject(job, int(handle)))
+    except Exception:
+        return False
+
+
+class LiveProcess:
+    """LIVE FFmpeg 프로세스 1개. stdout/stderr는 백그라운드 스레드가 읽어 GUI를 막지 않는다.
+
+    stop()은 stdin `q` 정상 종료 → terminate → kill 순서로 시도하고 항상 wait()로 회수한다.
+    """
+
+    GRACEFUL_TIMEOUT = 5.0
+    TERMINATE_TIMEOUT = 3.0
+    KILL_TIMEOUT = 3.0
 
     def __init__(self, cmd: Sequence[str], *, secrets: Iterable[str | None] = (), popen=subprocess.Popen):
         self._cmd = list(cmd)
@@ -192,6 +284,8 @@ class LiveProcess:
         self._stderr: collections.deque[str] = collections.deque(maxlen=30)
         self._started_at: float | None = None
         self._ended_at: float | None = None
+        self.last_stop_method: str | None = None
+        self.in_kill_job = False
 
     def __repr__(self) -> str:
         return f"LiveProcess(running={self.is_running()}, rc={self.return_code()})"
@@ -205,7 +299,7 @@ class LiveProcess:
             try:
                 self._proc = self._popen(
                     self._cmd,
-                    stdin=subprocess.DEVNULL,
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -218,6 +312,8 @@ class LiveProcess:
                 raise RuntimeError(redact(f"FFmpeg를 실행할 수 없습니다: {e}", self._secrets)) from None
             self._started_at = time.monotonic()
             self._ended_at = None
+            self.last_stop_method = None
+            self.in_kill_job = _assign_to_job(self._proc)
             self._threads = [
                 threading.Thread(target=self._read_stdout, args=(self._proc.stdout,), daemon=True),
                 threading.Thread(target=self._read_stderr, args=(self._proc.stderr,), daemon=True),
@@ -246,35 +342,68 @@ class LiveProcess:
         except (OSError, ValueError):
             pass
 
-    def stop(self, timeout: float | None = None) -> int | None:
-        timeout = self.STOP_TIMEOUT if timeout is None else timeout
+    def stop(
+        self,
+        graceful_timeout: float | None = None,
+        terminate_timeout: float | None = None,
+        kill_timeout: float | None = None,
+    ) -> int | None:
+        """q 정상 종료 → terminate → kill. 이미 종료된 프로세스도 회수한다."""
+        graceful_timeout = self.GRACEFUL_TIMEOUT if graceful_timeout is None else graceful_timeout
+        terminate_timeout = self.TERMINATE_TIMEOUT if terminate_timeout is None else terminate_timeout
+        kill_timeout = self.KILL_TIMEOUT if kill_timeout is None else kill_timeout
         with self._lock:
             proc = self._proc
             if proc is None:
                 return None
+            method = "exited"
             if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=timeout)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except OSError:
-                    pass
-            try:
-                # 항상 wait()로 회수해 zombie가 남지 않게 한다.
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                log.warning("LIVE ffmpeg did not exit after kill")
+                method = "graceful"
+                self._send_quit(proc)
+                if not self._wait(proc, graceful_timeout):
+                    method = "terminate"
+                    self._signal(proc.terminate)
+                    if not self._wait(proc, terminate_timeout):
+                        method = "kill"
+                        self._signal(proc.kill)
+                        if not self._wait(proc, kill_timeout):
+                            log.warning("LIVE ffmpeg did not exit after kill")
             for t in self._threads:
                 t.join(timeout=2)
-            for s in (proc.stdout, proc.stderr):
+            for s in (proc.stdin, proc.stdout, proc.stderr):
                 try:
                     if s:
                         s.close()
-                except OSError:
+                except (OSError, ValueError):
                     pass
             self._mark_ended()
+            self.last_stop_method = method
+            log.info("LIVE ffmpeg stopped (method=%s rc=%s)", method, proc.returncode)
             return proc.returncode
+
+    @staticmethod
+    def _send_quit(proc) -> None:
+        try:
+            if proc.stdin:
+                proc.stdin.write("q")
+                proc.stdin.flush()
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def _wait(proc, timeout: float) -> bool:
+        try:
+            proc.wait(timeout=timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
+    @staticmethod
+    def _signal(fn) -> None:
+        try:
+            fn()
+        except OSError:
+            pass
 
     def _mark_ended(self) -> None:
         if self._started_at is not None and self._ended_at is None:
