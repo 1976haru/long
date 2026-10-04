@@ -40,6 +40,24 @@ CapCut
 - WinGet FFmpeg 자동 탐색
 - 대기열 자동 저장/복구
 
+## 두 실행 경로 (v0.4~)
+
+```text
+Long Video (v0.3 그대로)
+  SET MP4 → 회차/시간 계획 → 대기열(최대 5) → run_concat_copy (-c copy) → .part.mp4 → ffprobe 검증 → MP4
+
+LIVE (v0.4 Phase 1, 분리 모듈)
+  단일 MP4 → LiveConfig → build_live_command (-re -stream_loop -1, H.264/AAC) → LiveProcess → RTMP/RTMPS
+                                                         └ LiveSupervisor watchdog (5/10/30/60초 재접속)
+```
+
+- 두 경로는 코드를 공유하지 않는다. 공유하는 것은 FFmpeg 탐색(`tooling.py`)과 동시 실행 잠금(`FFMPEG_GUARD`)뿐이다.
+- `-c copy` 무재인코딩 원칙은 Long Video 경로의 원칙이며 LIVE 때문에 변경하지 않는다.
+- LIVE는 ingest 안정성을 위해 별도 인코딩 프로필을 사용한다.
+- FFmpeg 동시 1개 원칙은 두 경로 전체에 적용된다.
+- Stream Key는 settings.json에 저장하지 않는다.
+- 상세 설계: `docs/LIVE_ARCHITECTURE.md`
+
 ## 향후 후보
 
 - 드래그앤드롭

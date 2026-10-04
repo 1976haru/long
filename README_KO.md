@@ -16,6 +16,13 @@ CapCut에서 **자막·이미지·파형·음원·구독/좋아요 요소까지 
 - 장시간 대기열 동안 Windows 절전 방지 옵션을 제공합니다.
 - 대기열을 자동 저장해 프로그램 재실행 시 복구합니다.
 
+## v0.4 개발 중 — 24H LIVE backend Phase 1
+
+- YouTube 24시간 LIVE 송출을 위한 **backend 기반만** 추가되었습니다 (UI는 `24H LIVE (개발 중)` 안내 버튼만 있음).
+- 기존 장시간 MP4 제작 기능과 사용법은 그대로입니다. LIVE는 별도 모듈(`app/live_*.py`)로 분리되어 있습니다.
+- FFmpeg는 계속 동시에 1개만 실행됩니다: 제작 중에는 LIVE 불가, LIVE 중에는 제작 불가.
+- Stream Key는 저장소/설정 파일/로그에 남기지 않습니다. 자세한 내용: `docs/LIVE_ARCHITECTURE.md`
+
 ## 가장 쉬운 사용법
 
 1. `RUN_WINDOWS.bat` 실행

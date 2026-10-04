@@ -28,5 +28,6 @@ git diff --check
 ## 중요 파일
 - app/core.py: ffprobe, 회차/시간 계획, concat, 사후 검증
 - app/ui.py: Tkinter UI, 최대 5개 순차 대기열
-- app/tooling.py: FFmpeg 자동 탐색, Windows 절전 방지
+- app/tooling.py: FFmpeg 자동 탐색, Windows 절전 방지, FFmpeg 동시 실행 잠금
+- app/live_*.py: v0.4 LIVE 송출 경로 (제작 경로와 분리, docs/LIVE_ARCHITECTURE.md)
 - tests/: 회차/무손실 연결 회귀 테스트

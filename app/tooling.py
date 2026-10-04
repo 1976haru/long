@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import shutil
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -65,3 +66,33 @@ def prevent_windows_sleep(enabled=True):
         yield
     finally:
         ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+
+
+class FfmpegExecutionGuard:
+    """장시간 제작과 LIVE 송출이 FFmpeg를 동시에 실행하지 않도록 막는 공용 잠금.
+
+    acquire/release를 서로 다른 스레드에서 호출해도 된다 (threading.Lock 사용).
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._owner: str | None = None
+
+    def try_acquire(self, owner: str) -> bool:
+        if not self._lock.acquire(blocking=False):
+            return False
+        self._owner = owner
+        return True
+
+    def release(self, owner: str) -> None:
+        if self._owner != owner:
+            return
+        self._owner = None
+        self._lock.release()
+
+    @property
+    def owner(self) -> str | None:
+        return self._owner
+
+
+FFMPEG_GUARD = FfmpegExecutionGuard()

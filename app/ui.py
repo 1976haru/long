@@ -16,7 +16,7 @@ from .core import (
     strict_copy_compatibility, target_seconds,
 )
 from .settings import load_settings, save_settings
-from .tooling import discover_ffmpeg, prevent_windows_sleep, remember_ffmpeg
+from .tooling import FFMPEG_GUARD, discover_ffmpeg, prevent_windows_sleep, remember_ffmpeg
 
 
 @dataclass
@@ -94,6 +94,7 @@ class MainWindow(tk.Tk):
         self.tool_text = ttk.Label(tr, text="FFmpeg 확인 중...")
         self.tool_text.pack(side="left")
         ttk.Button(tr, text="FFmpeg 설정", command=self._pick_ffmpeg).pack(side="right")
+        ttk.Button(tr, text="24H LIVE (개발 중)", command=self._live_placeholder).pack(side="right", padx=(0, 5))
 
         f1 = ttk.LabelFrame(root, text="① SET 영상", padding=7)
         f1.pack(fill="x")
@@ -318,9 +319,17 @@ class MainWindow(tk.Tk):
         if not self._need_tools():return
         idx=[i for i,j in enumerate(self.jobs) if j.status!="완료"]
         if not idx:messagebox.showinfo("대기열","모든 작업이 완료 상태입니다.");return
+        if not FFMPEG_GUARD.try_acquire("long"):messagebox.showwarning("FFmpeg 사용 중","LIVE 송출 중에는 장시간 영상 제작을 시작할 수 없습니다.");return
         self.running=True;self.cancel.clear();self.start.configure(state="disabled");self.stop.configure(state="normal")
         cont=bool(self.keep_going.get());awake=bool(self.keep_awake.get())
-        threading.Thread(target=self._worker,args=(idx,cont,awake),daemon=True).start()
+        threading.Thread(target=self._worker_guarded,args=(idx,cont,awake),daemon=True).start()
+
+    def _live_placeholder(self):
+        messagebox.showinfo("24H LIVE (개발 중)","24시간 LIVE 송출은 v0.4에서 개발 중입니다.\n현재는 backend(Phase 1)만 준비되어 있습니다.")
+
+    def _worker_guarded(self,indices,cont,awake):
+        try:self._worker(indices,cont,awake)
+        finally:FFMPEG_GUARD.release("long")
 
     def _stop(self):
         if self.running:self.cancel.set();self.stop.configure(state="disabled");self.status.set("현재 작업 중지 중...")
