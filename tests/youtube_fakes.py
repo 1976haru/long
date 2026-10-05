@@ -24,6 +24,18 @@ class FakeYouTube:
         self.token_forms: list[dict] = []
         self.issued = 0
         self._n = 0
+        # 다채널 업로드: access token → 채널 (없으면 self.channel)
+        self.token_channels: dict[str, dict] = {}
+        self.sessions: dict[str, dict] = {}  # 업로드 세션
+        self.videos: dict[str, dict] = {}
+        self.thumbnails: dict[str, bytes] = {}
+        self.upload_fail: deque = deque()  # ("chunk", status, keep_bytes)
+        self.expire_sessions = False
+        self.publish_override = None  # 업로드 후 저장되는 publishAt을 일부러 다르게
+        self.private_only = False  # 검수 안 된 API 프로젝트: 모든 업로드/수정이 private로 고정
+        self.refresh_channels: dict[str, dict] = {}  # refresh token → 채널 (다채널 OAuth)
+        self.code_refresh: dict[str, str] = {}  # 인증 code → refresh token
+        self.token_log: list[tuple[str, str]] = []  # (grant_type, refresh_token) 순서 기록
         fake = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -48,10 +60,39 @@ class FakeYouTube:
             def do_GET(self):  # noqa: N802
                 self._handle("GET")
 
+            def do_PUT(self):  # noqa: N802
+                self._handle("PUT")
+
+            def do_DELETE(self):  # noqa: N802
+                self._handle("DELETE")
+
+            def _send_raw(self, status, payload, headers):
+                body = json.dumps(payload).encode() if payload is not None else b""
+                self.send_response(status)
+                for k, v in headers.items():
+                    self.send_header(k, v)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def _handle(self, method):
                 parts = urllib.parse.urlsplit(self.path)
                 q = {k: v[0] for k, v in urllib.parse.parse_qs(parts.query).items()}
                 raw = self._read()
+                if parts.path.startswith("/upload/youtube/v3/"):
+                    op = "upload/" + parts.path.removeprefix("/upload/youtube/v3/")
+                    auth = self.headers.get("Authorization", "")
+                    fake.auth_headers.append(auth)
+                    token = auth.removeprefix("Bearer ")
+                    fake.calls.append((method, op, q, None))
+                    if token not in fake.valid_tokens:
+                        return self._send(401, {"error": {"code": 401, "errors": [{"reason": "authError"}]}})
+                    if fake.fail and op.startswith(fake.fail[0][0]):
+                        _, status, reason = fake.fail.popleft()
+                        return self._send(status, {"error": {"code": status, "errors": [{"reason": reason}]}})
+                    status, payload, headers = fake.upload_route(method, op, q, raw, dict(self.headers), token)
+                    return self._send_raw(status, payload, headers)
                 if parts.path == "/token":
                     form = {k: v[0] for k, v in urllib.parse.parse_qs(raw.decode()).items()}
                     fake.token_forms.append(form)
@@ -67,6 +108,7 @@ class FakeYouTube:
                 if fake.fail and op.startswith(fake.fail[0][0]):
                     _, status, reason = fake.fail.popleft()
                     return self._send(status, {"error": {"code": status, "errors": [{"reason": reason}]}})
+                fake.current_token = auth.removeprefix("Bearer ")
                 status, payload = fake.route(method, op, q, body)
                 self._send(status, payload)
 
@@ -93,7 +135,13 @@ class FakeYouTube:
         out = {"access_token": access, "expires_in": 3599, "scope": "https://www.googleapis.com/auth/youtube",
                "token_type": "Bearer"}
         if form.get("grant_type") == "authorization_code":
-            out["refresh_token"] = FAKE_REFRESH
+            out["refresh_token"] = self.code_refresh.get(form.get("code", ""), FAKE_REFRESH)
+            refresh = out["refresh_token"]
+        else:
+            refresh = form.get("refresh_token", "")
+        self.token_log.append((form.get("grant_type", ""), refresh))
+        if refresh in self.refresh_channels:
+            self.token_channels[access] = self.refresh_channels[refresh]
         return 200, out
 
     # ---------- api ----------
@@ -109,9 +157,82 @@ class FakeYouTube:
         s["status"]["streamStatus"] = "active" if self.stream_active else "inactive"
         return s
 
+    def channel_for(self, token):
+        return self.token_channels.get(token, self.channel)
+
+    # ---------- resumable upload ----------
+    def upload_route(self, method, op, q, raw, headers, token):
+        h = {k.lower(): v for k, v in headers.items()}
+        if op == "upload/videos" and method == "POST" and q.get("uploadType") == "resumable" and "upload_id" not in q:
+            sid = self._id("up")
+            self.sessions[sid] = {"total": int(h["x-upload-content-length"]), "data": bytearray(),
+                                  "body": json.loads(raw.decode()), "channel": self.channel_for(token)["id"]}
+            return 200, None, {"Location": f"{self.base}/upload/youtube/v3/videos?uploadType=resumable&upload_id={sid}"}
+        if op == "upload/videos" and method == "PUT":
+            s = self.sessions.get(q.get("upload_id", ""))
+            if s is None or self.expire_sessions:
+                return 404, {"error": {"code": 404, "errors": [{"reason": "notFound"}]}}, {}
+            rng = h.get("content-range", "")
+            have = len(s["data"])
+            ack = {"Range": f"bytes=0-{have - 1}"} if have else {}
+            if rng.startswith("bytes */"):
+                if "video" in s:
+                    return 200, s["video"], {}
+                return 308, None, ack
+            a_b, total = rng.removeprefix("bytes ").split("/")
+            a, b = (int(x) for x in a_b.split("-"))
+            if a != have:
+                return 308, None, ack
+            if self.upload_fail:
+                _, status, keep = self.upload_fail.popleft()
+                if keep:
+                    s["data"] += raw
+                return status, {"error": {"code": status, "errors": [{"reason": "backendError"}]}}, {}
+            s["data"] += raw
+            if len(s["data"]) < s["total"]:
+                return 308, None, {"Range": f"bytes=0-{len(s['data']) - 1}"}
+            vid = self._id("vid")
+            st = dict(s["body"]["status"])
+            if self.publish_override and "publishAt" in st:
+                st["publishAt"] = self.publish_override
+            if self.private_only:
+                st = {"privacyStatus": "private", "selfDeclaredMadeForKids": st.get("selfDeclaredMadeForKids", False)}
+            self.videos[vid] = {"id": vid, "snippet": dict(s["body"]["snippet"]), "status": st,
+                                "channel": s["channel"], "size": len(s["data"]), "bytes": bytes(s["data"])}
+            s["video"] = {"id": vid, "snippet": s["body"]["snippet"], "status": st}
+            return 200, s["video"], {}
+        if op == "upload/thumbnails/set" and method == "POST":
+            if q.get("videoId") not in self.videos and q.get("videoId") not in self.broadcasts:
+                return 404, {"error": {"code": 404, "errors": [{"reason": "videoNotFound"}]}}, {}
+            self.thumbnails[q["videoId"]] = raw
+            return 200, {"items": [{"default": {"url": "https://i.ytimg.com/x.jpg"}}]}, {}
+        return 404, {"error": {"code": 404, "errors": [{"reason": "notFound"}]}}, {}
+
     def route(self, method, op, q, body):
+        if op == "videos" and method == "GET":
+            v = self.videos.get(q.get("id", ""))
+            if v is None and q.get("id") in self.broadcasts:
+                b = self.broadcasts[q["id"]]
+                v = {"id": b["id"], "snippet": b["snippet"], "status": b["status"]}
+            return 200, {"items": [{"id": v["id"], "snippet": v["snippet"], "status": v["status"]}] if v else []}
+        if op == "videos" and method == "PUT":
+            v = self.videos.get(body["id"]) or self.broadcasts.get(body["id"])
+            if v is None:
+                return self._err(404, "videoNotFound")
+            part = q.get("part", "")
+            if part == "status":
+                v["status"] = {**v["status"], **body["status"]}
+                if self.private_only:
+                    v["status"] = {"privacyStatus": "private"}
+                return 200, {"id": body["id"], "status": v["status"]}
+            # 실제 API처럼: 요청에 없는 '수정 가능' snippet 값은 지워진다 (scheduledStartTime 같은 방송 값은 그대로)
+            keep = {k: x for k, x in v["snippet"].items()
+                    if k not in ("title", "description", "categoryId", "tags", "defaultLanguage")}
+            v["snippet"] = {**keep, **body["snippet"]}
+            return 200, {"id": body["id"], "snippet": v["snippet"]}
         if op == "channels" and method == "GET":
-            return 200, {"items": [{"id": self.channel["id"], "snippet": {"title": self.channel["title"]}}]}
+            ch = self.channel_for(getattr(self, "current_token", ""))
+            return 200, {"items": [{"id": ch["id"], "snippet": {"title": ch["title"]}}]}
         if op == "liveStreams" and method == "GET":
             if "id" in q:
                 items = [self.stream_view(self.streams[q["id"]])] if q["id"] in self.streams else []

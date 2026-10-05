@@ -17,7 +17,7 @@ import time
 import webbrowser
 from typing import Callable
 
-from .settings import load_settings, save_settings
+from .settings import SETTINGS_LOCK, load_settings, save_settings
 from .youtube_api import YouTubeApiClient, YouTubeApiError, YouTubeChannelInfo
 from .youtube_oauth import OAuthClient, OAuthError, OAuthSession, YouTubeAuthStore, authorize, load_client_file, urllib_transport
 from .youtube_session import (
@@ -40,22 +40,24 @@ def save_youtube_settings(**updates) -> dict:
     banned = {"refresh_token", "access_token", "client_secret", "stream_name", "stream_key", "token"}
     if banned & set(updates):
         raise ValueError("secret must not be stored in settings.json")
-    data = load_settings()
-    cur = dict(data.get(SETTINGS_KEY) or {})
-    cur.update({k: v for k, v in updates.items() if v is not None})
-    data[SETTINGS_KEY] = cur
-    save_settings(data)
+    with SETTINGS_LOCK:  # 업로드 대기열 스레드의 저장과 섞이지 않게
+        data = load_settings()
+        cur = dict(data.get(SETTINGS_KEY) or {})
+        cur.update({k: v for k, v in updates.items() if v is not None})
+        data[SETTINGS_KEY] = cur
+        save_settings(data)
     return cur
 
 
 def clear_youtube_connection(store: YouTubeAuthStore | None = None) -> None:
     (store or YouTubeAuthStore()).clear()
-    data = load_settings()
-    cur = dict(data.get(SETTINGS_KEY) or {})
-    for k in ("channel_id", "channel_title", "stream_id"):
-        cur.pop(k, None)
-    data[SETTINGS_KEY] = cur
-    save_settings(data)
+    with SETTINGS_LOCK:
+        data = load_settings()
+        cur = dict(data.get(SETTINGS_KEY) or {})
+        for k in ("channel_id", "channel_title", "stream_id"):
+            cur.pop(k, None)
+        data[SETTINGS_KEY] = cur
+        save_settings(data)
 
 
 def template_from_settings() -> BroadcastTemplate:

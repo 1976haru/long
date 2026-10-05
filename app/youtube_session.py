@@ -113,8 +113,14 @@ class YouTubeRolloverManager:
                  retry_delays=RETRY_DELAYS, health_poll: float = HEALTH_POLL_SECONDS,
                  transition_poll: float = TRANSITION_POLL_SECONDS,
                  transition_timeout: float = TRANSITION_TIMEOUT_SECONDS,
-                 on_event: Callable[[str, str], None] | None = None):
+                 on_event: Callable[[str, str], None] | None = None,
+                 metadata_template=None, channel: str = "", timezone_name: str = "Asia/Seoul"):
+        """metadata_template(MetadataTemplate)을 주면 새 Broadcast마다 제목/설명 변수, 태그, 카테고리, 언어, 썸네일을 적용한다."""
         template.validate()
+        self.metadata_template = metadata_template
+        self.channel = channel
+        self.timezone_name = timezone_name
+        self.metadata_warnings: list[str] = []
         self.api = api
         self.stream_id = stream_id
         self.template = template
@@ -184,17 +190,47 @@ class YouTubeRolloverManager:
             if e.reason != "redundantTransition":  # 이미 그 상태/처리 중이면 성공으로 본다
                 raise
 
+    def _render_metadata(self, number: int):
+        if self.metadata_template is None:
+            return None
+        from datetime import datetime, timezone as _tz
+        from zoneinfo import ZoneInfo
+        local = datetime.fromtimestamp(self.clock(), _tz.utc).astimezone(ZoneInfo(self.timezone_name))
+        return self.metadata_template.render(local_start=local, session=number, channel=self.channel,
+                                             thumb_counter=number - 1)
+
+    def _apply_extras(self, video_id: str, md) -> None:
+        """태그/카테고리/언어 + 썸네일. 실패해도 방송 교체는 계속 (경고만 남김)."""
+        if md is None:
+            return
+        from .youtube_schedule import ReservationResult, apply_metadata, upload_thumbnail
+        r = ReservationResult()
+        apply_metadata(self.api, video_id, md, r)
+        upload_thumbnail(self.api, video_id, md.thumbnail_path, r)
+        self.metadata_warnings = [f"{k}: {v}" for k, v in r.errors.items()]
+        if self.metadata_warnings:
+            self._event("metadata_partial", "; ".join(self.metadata_warnings))
+
     def _new_broadcast(self, number: int) -> str:
-        """insert → bind. insert 후 bind가 실패하면 다음 재시도에서 같은 Broadcast를 bind만 한다."""
+        """insert → bind (→ 메타데이터/썸네일). insert 후 bind가 실패하면 다음 재시도에서 같은 Broadcast를 bind만 한다."""
+        md = None
         if not self._pending_next_id:
-            b = self.api.insert_broadcast(title=self.template.title_for(number), description=self.template.description,
-                                          privacy=self.template.privacy, made_for_kids=self.template.made_for_kids,
-                                          scheduled_start=self.clock() + 60)
+            md = self._render_metadata(number)
+            if md is not None:
+                b = self.api.insert_broadcast(title=md.title, description=md.description, privacy=md.privacy_status,
+                                              made_for_kids=md.made_for_kids, scheduled_start=self.clock() + 60)
+            else:
+                b = self.api.insert_broadcast(title=self.template.title_for(number), description=self.template.description,
+                                              privacy=self.template.privacy, made_for_kids=self.template.made_for_kids,
+                                              scheduled_start=self.clock() + 60)
             self._pending_next_id = b.id
+            self._pending_md = md
         b = self.api.bind_broadcast(self._pending_next_id, self.stream_id)
         if b.bound_stream_id and b.bound_stream_id != self.stream_id:
             raise YouTubeApiError("다음 방송이 다른 스트림에 연결되었습니다.", kind="config", reason="wrongStream")
         bid, self._pending_next_id = self._pending_next_id, ""
+        self._apply_extras(bid, getattr(self, "_pending_md", None))
+        self._pending_md = None
         return bid
 
     # ---------- 첫 방송 ----------
@@ -210,6 +246,18 @@ class YouTubeRolloverManager:
             raise YouTubeApiError(f"YouTube 방송이 live가 되지 않았습니다 (상태: {st}).", kind="transition", reason="notLive")
         self.attach(bid, self.clock(), session_number=1)
         return bid
+
+    def go_live_existing(self, broadcast_id: str, *, session_number: int = 1) -> str:
+        """예약 목록의 [지금 시작]: 이미 만든 예약 Broadcast를 같은 stream에 bind → active 확인 → live."""
+        self.api.bind_broadcast(broadcast_id, self.stream_id)
+        if not self._wait_stream_active():
+            raise YouTubeApiError("YouTube가 송출 신호를 아직 받지 못했습니다 (stream inactive).",
+                                  kind="transition", reason="errorStreamInactive")
+        self._transition(broadcast_id, "live")
+        if self._wait_status(broadcast_id, ("live",)) != "live":
+            raise YouTubeApiError("예약 방송이 live가 되지 않았습니다.", kind="transition", reason="notLive")
+        self.attach(broadcast_id, self.clock(), session_number=session_number)
+        return broadcast_id
 
     def attach(self, current_broadcast_id: str, started_at: float, *, session_number: int = 1) -> None:
         self.current_id = current_broadcast_id

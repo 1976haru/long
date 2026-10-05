@@ -7,7 +7,7 @@ if %errorlevel%==0 (
 ) else (
   set PY=python
 )
-%PY% -m pip install --upgrade pyinstaller
+%PY% -m pip install --upgrade pyinstaller tzdata
 %PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name PlaylistLongVideoMaker_v0.3 --add-data "cloud\long_live_worker.py;cloud" --add-data "deploy\linux;deploy\linux" main.py
 if %errorlevel% neq 0 (
   echo.

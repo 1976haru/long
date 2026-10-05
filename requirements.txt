@@ -1,4 +1,6 @@
-# Runtime dependencies: Python standard library only.
+# Runtime dependencies: Python standard library only (+ tzdata below).
 # External executable dependency: ffmpeg + ffprobe.
 # Development/test: pytest.
 # Packaging: PyInstaller (optional).
+# Windows에는 IANA 시간대 DB가 없어 zoneinfo(예약 업로드/예약 LIVE의 Asia/Seoul·Asia/Tokyo)에 필요하다.
+tzdata; sys_platform == "win32"

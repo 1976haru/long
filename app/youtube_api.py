@@ -23,13 +23,18 @@ STREAM_MARKER = "Created by Playlist Long Video Maker (reusable)"
 TITLE_MAX = 100
 PRIVACY_VALUES = ("public", "unlisted", "private")
 RETRY_BACKOFF = (1.0, 2.0, 4.0, 8.0)
-TRANSIENT_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "backendError", "internalError"}
+TRANSIENT_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "backendError", "internalError",
+                     "uploadRateLimitExceeded"}
 
 # 공식 quota 비용 (units). 기본 한도 10,000 units/day.
 QUOTA_COSTS = {
     "liveBroadcasts.insert": 50, "liveBroadcasts.bind": 50, "liveBroadcasts.transition": 50,
     "liveBroadcasts.list": 1, "liveStreams.insert": 50, "liveStreams.list": 1, "channels.list": 1,
+    "videos.list": 1, "videos.update": 50, "thumbnails.set": 50, "liveBroadcasts.update": 50,
+    "liveBroadcasts.delete": 50, "videoCategories.list": 1, "videos.insert": 1600,
 }
+# videos.update(part=snippet): 요청에 없는 기존 snippet 값은 삭제된다(공식 문서) → 읽은 값을 모두 다시 보낸다.
+SNIPPET_MUTABLE = ("title", "description", "categoryId", "tags", "defaultLanguage")
 DAILY_QUOTA = 10_000
 
 CONFIG_MESSAGES = {
@@ -41,6 +46,10 @@ CONFIG_MESSAGES = {
     "notFound": "YouTube에서 해당 방송/스트림을 찾을 수 없습니다.",
     "liveBroadcastNotFound": "YouTube에서 해당 방송을 찾을 수 없습니다.",
     "liveStreamNotFound": "YouTube에서 해당 스트림을 찾을 수 없습니다.",
+    "videoNotFound": "YouTube에서 해당 영상(방송)을 찾을 수 없습니다.",
+    "invalidImage": "썸네일 이미지가 올바르지 않습니다.",
+    "mediaBodyTooLarge": "썸네일 파일이 너무 큽니다 (50MB 이하).",
+    "userBroadcastsExceedLimit": "YouTube 예약 방송 개수 한도에 도달했습니다. 지난 예약을 정리하세요.",
 }
 
 
@@ -123,9 +132,22 @@ class YouTubeApiClient:
         return f"YouTubeApiClient(base={self.base_url})"
 
     # ---------- core ----------
-    def _request(self, method: str, path: str, params: dict, body: dict | None, op: str) -> dict:
-        url = f"{self.base_url}/{path}?{urllib.parse.urlencode(params)}"
-        data = json.dumps(body).encode("utf-8") if body is not None else None
+    def access_token(self, force_refresh: bool = False) -> str:
+        """resumable upload(youtube_upload)처럼 _request를 쓰지 않는 호출용. 값은 로그에 남기지 않는다."""
+        try:
+            return self._token(force_refresh=True) if force_refresh else self._token()
+        except OAuthError as e:
+            raise YouTubeApiError(str(e), kind="auth", reason=e.kind) from None
+
+    @property
+    def upload_base_url(self) -> str:
+        return self.base_url.replace("/youtube/v3", "/upload/youtube/v3")
+
+    def _request(self, method: str, path: str, params: dict, body: dict | None, op: str, *,
+                 raw: bytes | None = None, content_type: str = "", upload: bool = False) -> dict:
+        base = self.upload_base_url if upload else self.base_url
+        url = f"{base}/{path}?{urllib.parse.urlencode(params)}"
+        data = raw if raw is not None else (json.dumps(body).encode("utf-8") if body is not None else None)
         refreshed = False
         attempt = 0
         while True:
@@ -135,7 +157,7 @@ class YouTubeApiClient:
                 raise YouTubeApiError(str(e), kind="auth", reason=e.kind) from None
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
             if data is not None:
-                headers["Content-Type"] = "application/json; charset=utf-8"
+                headers["Content-Type"] = content_type or "application/json; charset=utf-8"
             self.calls.append(op)
             try:
                 status, raw = self._transport(method, url, headers, data, self.timeout)
@@ -163,6 +185,8 @@ class YouTubeApiClient:
 
     @staticmethod
     def _error(status: int, payload: dict) -> YouTubeApiError:
+        if status == 413:
+            return YouTubeApiError(CONFIG_MESSAGES["mediaBodyTooLarge"], kind="config", reason="mediaBodyTooLarge", status=status)
         e = payload.get("error") if isinstance(payload, dict) else None
         reasons = [x.get("reason", "") for x in (e or {}).get("errors", []) if isinstance(x, dict)] if isinstance(e, dict) else []
         reason = reasons[0] if reasons else (e.get("status", "") if isinstance(e, dict) else "")
@@ -251,6 +275,7 @@ class YouTubeApiClient:
     def insert_broadcast(self, *, title: str, description: str = "", privacy: str = "unlisted",
                          made_for_kids: bool = False, scheduled_start: float | None = None,
                          scheduled_end: float | None = None) -> YouTubeBroadcastInfo:
+        """liveBroadcast에는 categoryId/tags가 없다 → 생성 후 videos.update로 적용 (update_video_metadata)."""
         validate_title(title)
         if privacy not in PRIVACY_VALUES:
             raise YouTubeApiError("공개 상태가 올바르지 않습니다.", kind="config", reason="invalidPrivacy")
@@ -294,6 +319,93 @@ class YouTubeApiClient:
 
     def complete_broadcast(self, broadcast_id: str) -> YouTubeBroadcastInfo:
         return self.transition_broadcast(broadcast_id, "complete")
+
+    def list_upcoming_broadcasts(self) -> list[YouTubeBroadcastInfo]:
+        d = self._request("GET", "liveBroadcasts", {"part": "id,snippet,status,contentDetails", "broadcastStatus": "upcoming",
+                                                    "broadcastType": "all", "maxResults": "50"}, None, "liveBroadcasts.list")
+        return [self._broadcast(i) for i in d.get("items") or []]
+
+    def update_broadcast(self, broadcast_id: str, *, title: str, description: str, scheduled_start: float,
+                         scheduled_end: float | None, privacy: str, made_for_kids: bool) -> YouTubeBroadcastInfo:
+        """예약 수정: snippet/status 전체를 다시 보낸다 (빠진 값이 지워지지 않게)."""
+        validate_title(title)
+        snippet = {"title": title, "description": description[:5000], "scheduledStartTime": _iso(scheduled_start)}
+        if scheduled_end is not None:
+            snippet["scheduledEndTime"] = _iso(scheduled_end)
+        body = {"id": broadcast_id, "snippet": snippet,
+                "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": bool(made_for_kids)}}
+        return self._broadcast(self._request("PUT", "liveBroadcasts", {"part": "snippet,status"}, body,
+                                             "liveBroadcasts.update"))
+
+    def delete_broadcast(self, broadcast_id: str) -> None:
+        self._request("DELETE", "liveBroadcasts", {"id": broadcast_id}, None, "liveBroadcasts.delete")
+
+    # ---------- videos (태그/카테고리/언어) ----------
+    def get_video_snippet(self, video_id: str) -> dict:
+        d = self._request("GET", "videos", {"part": "snippet", "id": video_id}, None, "videos.list")
+        items = d.get("items") or []
+        if not items:
+            raise YouTubeApiError(CONFIG_MESSAGES["videoNotFound"], kind="not_found", reason="videoNotFound")
+        sn = items[0].get("snippet")
+        if not isinstance(sn, dict):
+            raise YouTubeApiError("YouTube 영상 정보 형식이 올바르지 않습니다.", kind="transient", reason="badSnippet")
+        return sn
+
+    def update_video_metadata(self, video_id: str, *, tags: list[str] | None = None, category_id: str | None = None,
+                              default_language: str | None = None, title: str | None = None,
+                              description: str | None = None) -> dict:
+        """videos.list로 기존 snippet을 읽고, 바꿀 값만 바꿔 snippet 전체(title/description/categoryId/tags/defaultLanguage)를
+        다시 보낸다. tags만 보내면 다른 값이 지워지기 때문 (공식 문서)."""
+        cur = self.get_video_snippet(video_id)
+        new = {k: cur[k] for k in SNIPPET_MUTABLE if k in cur and cur[k] not in (None, "")}
+        if title is not None:
+            new["title"] = validate_title(title)
+        if description is not None:
+            new["description"] = description[:5000]
+        if category_id:
+            new["categoryId"] = str(category_id)
+        if tags is not None:
+            new["tags"] = list(tags)
+        if default_language:
+            new["defaultLanguage"] = default_language
+        if not new.get("title") or not new.get("categoryId"):
+            new.setdefault("categoryId", "10")
+            if not new.get("title"):
+                raise YouTubeApiError("영상 제목을 읽을 수 없어 메타데이터를 적용하지 않았습니다.", kind="config", reason="noTitle")
+        body = {"id": video_id, "snippet": new}
+        d = self._request("PUT", "videos", {"part": "snippet"}, body, "videos.update")
+        return d.get("snippet", new) if isinstance(d, dict) else new
+
+    def get_video_status(self, video_id: str) -> dict:
+        d = self._request("GET", "videos", {"part": "status", "id": video_id}, None, "videos.list")
+        items = d.get("items") or []
+        if not items:
+            raise YouTubeApiError(CONFIG_MESSAGES["videoNotFound"], kind="not_found", reason="videoNotFound")
+        return items[0].get("status") or {}
+
+    def update_video_status(self, video_id: str, *, privacy: str, made_for_kids: bool,
+                            publish_at: str | None = None) -> dict:
+        """videos.update(part=status). 예약 공개는 privacyStatus=private + publishAt(UTC ISO)."""
+        if privacy not in PRIVACY_VALUES:
+            raise YouTubeApiError("공개 상태가 올바르지 않습니다.", kind="config", reason="invalidPrivacy")
+        status = {"privacyStatus": privacy, "selfDeclaredMadeForKids": bool(made_for_kids)}
+        if publish_at:
+            status["publishAt"] = publish_at
+        d = self._request("PUT", "videos", {"part": "status"}, {"id": video_id, "status": status}, "videos.update")
+        return d.get("status", status) if isinstance(d, dict) else status
+
+    def list_video_categories(self, region: str = "KR", hl: str = "ko") -> list[tuple[str, str]]:
+        d = self._request("GET", "videoCategories", {"part": "snippet", "regionCode": region, "hl": hl}, None,
+                          "videoCategories.list")
+        return [(str(i.get("id")), str(i.get("snippet", {}).get("title", ""))) for i in d.get("items") or []
+                if i.get("snippet", {}).get("assignable")]
+
+    def set_thumbnail(self, video_id: str, image: bytes, mime: str) -> None:
+        """thumbnails.set (media upload, 최대 50MB). 이미지 bytes는 로그에 남기지 않는다."""
+        if mime not in ("image/jpeg", "image/png"):
+            raise YouTubeApiError("썸네일은 JPG 또는 PNG만 올릴 수 있습니다.", kind="config", reason="invalidImage")
+        self._request("POST", "thumbnails/set", {"videoId": video_id, "uploadType": "media"}, None, "thumbnails.set",
+                      raw=image, content_type=mime, upload=True)
 
 
 def validate_title(title: str) -> str:

@@ -15,7 +15,7 @@ from .core import (
     ensure_unique_output, format_duration, probe_video, run_concat_copy,
     strict_copy_compatibility, target_seconds,
 )
-from .settings import load_settings, save_settings
+from .settings import load_settings, save_settings, update_settings
 from .live_supervisor import busy_message
 from .live_ui import LiveWindow
 from .tooling import FFMPEG_GUARD, discover_ffmpeg, prevent_windows_sleep, release_tk_variables, remember_ffmpeg
@@ -52,8 +52,8 @@ class MainWindow(tk.Tk):
         super().__init__()
         self.app_root = Path(app_root)
         self.title("Playlist Long Video Maker v0.3")
-        self.geometry("1080x900")
-        self.minsize(930, 760)
+        self.geometry("1080x990")
+        self.minsize(930, 850)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         self.ffmpeg = None
@@ -64,6 +64,11 @@ class MainWindow(tk.Tk):
         self.events = queue.Queue()
         self.running = False
         self.live_win = None
+        self.upload_win = None
+        self.live_schedule_win = None
+        self.upload_queue = None  # 예약 업로드 대기열: 창을 닫아도 업로드가 계속되도록 MainWindow가 가진다
+        self.mode_cards = {}
+        self.mode_summary = tk.StringVar()
 
         self.mode = tk.StringVar(value="rounds")
         self.rounds = tk.IntVar(value=10)
@@ -83,6 +88,65 @@ class MainWindow(tk.Tk):
         self._restore()
         self._tools()
         self.after(100, self._pump)
+        self.after(300, self._refresh_summary)
+
+    def _mode_cards(self, root):
+        """상단 3개 모드 카드. ①은 지금 이 화면(기존 제작 UI 그대로), ②③은 별도 창을 연다."""
+        bar = ttk.Frame(root); bar.pack(fill="x", pady=(0, 4))
+        specs = (("long", "① 영상 늘리기", "SET 영상을 장시간 MP4로 제작", None, "● 현재 화면"),
+                 ("live", "② 실시간 스트리밍", "Cloud / 내 PC에서 Playlist LIVE", self._open_live, "LIVE 창 열기 ▶"),
+                 ("upload", "③ 예약 업로드", "한국·일본 등 여러 채널에 자동 예약", self._open_upload, "예약 업로드 열기 ▶"))
+        for i, (key, title, desc, cmd, foot) in enumerate(specs):
+            active = cmd is None
+            bg, border, fg = ("#e8f1ff", "#2f6fdf", "#1d4fa8") if active else ("#f6f6f6", "#c4c4c4", "#202020")
+            bar.columnconfigure(i, weight=1, uniform="card")
+            card = tk.Frame(bar, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border,
+                            cursor="" if active else "hand2")
+            card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0))
+            hd = tk.Frame(card, bg=bg); hd.pack(fill="x", padx=10, pady=(5, 0))
+            tk.Label(hd, text=title, bg=bg, fg=fg, font=("Segoe UI", 13, "bold")).pack(side="left")
+            tk.Label(hd, text=foot, bg=bg, fg=border if active else "#2f6fdf").pack(side="right")
+            ft = tk.Frame(card, bg=bg); ft.pack(fill="x", padx=10, pady=(0, 5))
+            tk.Label(ft, text=desc, bg=bg, fg="gray25").pack(side="left")
+            if key == "live":
+                sched = tk.Label(ft, text="예약 LIVE", bg=bg, fg="#2f6fdf", cursor="hand2")
+                sched.pack(side="right")
+                sched.bind("<Button-1>", lambda e: (self._open_live_schedule(), "break")[1])
+            if cmd:
+                for w in (card, hd, ft, *hd.winfo_children(), *ft.winfo_children()):
+                    if w.bind("<Button-1>"):
+                        continue
+                    w.bind("<Button-1>", lambda e, c=cmd: c())
+            self.mode_cards[key] = card
+        ttk.Frame(root, height=6).pack(fill="x")
+
+    def _upload_counts(self):
+        from .youtube_upload_queue import queue_counts
+        return self.upload_queue.counts() if self.upload_queue is not None else queue_counts()
+
+    def _live_state_text(self):
+        w = self._live_window()
+        if w is None:
+            return "LIVE 창 닫힘"
+        try:
+            if w.controller.active:
+                return "● LIVE 송출 중 (내 PC)"
+            if w.cloud.busy:
+                return "LIVE Cloud 확인 중"
+        except Exception:
+            pass
+        return "LIVE 대기"
+
+    def _refresh_summary(self):
+        try:
+            waiting = sum(j.status != "완료" for j in self.jobs)
+            c = self._upload_counts()
+            up = " · 업로드 중" if self.upload_queue is not None and self.upload_queue.running else ""
+            self.mode_summary.set(f"영상 제작 대기 {waiting} · {self._live_state_text()} · 예약 업로드 대기 {c['waiting']}{up}"
+                                  f" · 예약 완료 {c['done']}")
+        except tk.TclError:
+            return
+        self.after(1500, self._refresh_summary)
 
     def _ui(self):
         root = ttk.Frame(self, padding=12)
@@ -97,8 +161,8 @@ class MainWindow(tk.Tk):
         self.tool_text = ttk.Label(tr, text="FFmpeg 확인 중...")
         self.tool_text.pack(side="left")
         ttk.Button(tr, text="FFmpeg 설정", command=self._pick_ffmpeg).pack(side="right")
-        ttk.Style(self).configure("Live.TButton", foreground="red")
-        ttk.Button(tr, text="● 24H LIVE", style="Live.TButton", command=self._open_live).pack(side="right", padx=(0, 5))
+        ttk.Label(tr, textvariable=self.mode_summary, foreground="gray25").pack(side="right", padx=(0, 10))
+        self._mode_cards(root)
 
         f1 = ttk.LabelFrame(root, text="① SET 영상", padding=7)
         f1.pack(fill="x")
@@ -160,6 +224,7 @@ class MainWindow(tk.Tk):
         ttk.Label(qt, textvariable=self.qsummary).pack(side="left")
         ttk.Button(qt, text="전체 비우기", command=self._clear_jobs).pack(side="right")
         ttk.Button(qt, text="선택 삭제", command=self._del_job).pack(side="right", padx=4)
+        ttk.Button(qt, text="③ 예약 업로드로 보내기", command=self._send_to_upload).pack(side="right", padx=(0, 8))
         qcols=("n","inputs","mode","dur","output","state")
         self.qtree=ttk.Treeview(qf,columns=qcols,show="headings",height=5)
         qlabels=("#","SET","기준","예상 길이","출력 파일","상태")
@@ -341,6 +406,49 @@ class MainWindow(tk.Tk):
         if w:w.deiconify();w.lift();w.focus_set();return
         self.live_win=LiveWindow(self,tools=self._live_tools)
 
+    @staticmethod
+    def _alive(w):
+        try:
+            return w if w is not None and w.winfo_exists() else None
+        except tk.TclError:
+            return None
+
+    def _get_upload_queue(self):
+        if self.upload_queue is None:
+            from .youtube_accounts import ProfileStore
+            from .youtube_upload_queue import UploadQueue
+            self.upload_queue = UploadQueue(ProfileStore())
+        return self.upload_queue
+
+    def _open_upload(self, video_path="", title=""):
+        w = self._alive(self.upload_win)
+        if w is None:
+            from .youtube_upload_ui import MultiChannelUploadWindow
+            w = self.upload_win = MultiChannelUploadWindow(self, upload_queue=self._get_upload_queue())
+        else:
+            w.deiconify(); w.lift(); w.focus_set()
+        if video_path:
+            w.set_video(video_path, title)
+        return w
+
+    def _open_live_schedule(self):
+        w = self._alive(self.live_schedule_win)
+        if w is not None:
+            w.deiconify(); w.lift(); w.focus_set(); return w
+        from .youtube_live_schedule_ui import LiveScheduleWindow
+        self.live_schedule_win = LiveScheduleWindow(self)
+        return self.live_schedule_win
+
+    def _send_to_upload(self):
+        sel = self.qtree.selection()
+        if not sel:
+            messagebox.showinfo("예약 업로드", "대기열에서 완료된 작업을 선택하세요."); return None
+        j = self.jobs[self.qtree.index(sel[0])]
+        out = Path(j.output)
+        if j.status != "완료" or not out.is_file():
+            messagebox.showwarning("예약 업로드", "제작이 완료된 영상만 예약 업로드로 보낼 수 있습니다."); return None
+        return self._open_upload(str(out), out.stem)
+
     def _live_tools(self):
         return (self.ffmpeg,self.ffprobe) if self._need_tools() else (None,None)
 
@@ -384,7 +492,7 @@ class MainWindow(tk.Tk):
                 elif kind=="progress":
                     _,overall,text,pos,total=e;self.bar["value"]=overall*100;self.status.set(f"작업 {pos}/{total} · {text}")
                 elif kind=="done":
-                    _,i,out,dur,size,elapsed=e;self.jobs[i].status="완료";self.jobs[i].output=out;self._refresh_q();self._save();self.status.set(f"완료: {Path(out).name} · {format_duration(dur)} · {size/1024**3:.1f}GB")
+                    _,i,out,dur,size,elapsed=e;self.jobs[i].status="완료";self.jobs[i].output=out;self._refresh_q();self._save();self.status.set(f"완료: {Path(out).name} · {format_duration(dur)} · {size/1024**3:.1f}GB · 선택 후 [③ 예약 업로드로 보내기] 가능")
                 elif kind=="error":
                     _,i,msg=e;self.jobs[i].status="실패";self._refresh_q();self._save();messagebox.showerror("작업 실패",msg)
                 elif kind=="finish":
@@ -405,7 +513,7 @@ class MainWindow(tk.Tk):
         self._refresh_q()
 
     def _save(self):
-        data=load_settings();data["prevent_sleep"]=bool(self.keep_awake.get());data["continue_on_error"]=bool(self.keep_going.get());data["queue"]=[asdict(j) for j in self.jobs];save_settings(data)
+        update_settings(prevent_sleep=bool(self.keep_awake.get()),continue_on_error=bool(self.keep_going.get()),queue=[asdict(j) for j in self.jobs])
 
     def _close(self):
         w=self._live_window()
@@ -416,10 +524,15 @@ class MainWindow(tk.Tk):
 
     def _close_after_live(self):
         if self.running and not messagebox.askyesno("작업 중","현재 작업을 중지하고 종료할까요?"):return
+        uploading=self.upload_queue is not None and self.upload_queue.running
+        if uploading and not messagebox.askyesno("예약 업로드 중","예약 업로드를 중지하고 종료할까요?\n다음 실행 때 [▶ 예약 업로드 시작]을 누르면 받은 위치부터 이어서 올립니다."):return
         if self.running:self.cancel.set()
+        if uploading:self.upload_queue.stop(timeout=3.0)
         self._finish_close()
 
     def _finish_close(self):
         w=self._live_window()
         if w:w.destroy()
+        for w in (self._alive(self.upload_win),self._alive(self.live_schedule_win)):
+            if w:w.destroy()
         self._save();self.destroy();release_tk_variables(self)
