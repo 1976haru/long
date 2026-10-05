@@ -130,7 +130,8 @@ def test_thumbnail_exact_suffix_missing(folder):
 def test_thumbnail_ambiguous_is_not_auto_selected(folder):
     png(folder / "001.png")  # 001.jpg + 001.png
     m = match_thumbnail(folder / "001.mp4")
-    assert m.status == "ambiguous" and m.path == "" and len(m.candidates) == 2 and "후보 2개" in m.label
+    assert m.status == "ambiguous" and m.path == "" and len(m.candidates) == 2
+    assert m.label == "썸네일 후보 2개 - 하나를 선택하세요"
     assert m.candidates[0].endswith("001.jpg")  # 표시 순서: jpg → jpeg → png
 
 

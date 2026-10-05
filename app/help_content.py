@@ -12,7 +12,7 @@ MANUAL_VERSION = "v1.3"
 # 화면에 실제로 있는 버튼/메뉴 이름 (매뉴얼은 이 이름 그대로 쓴다)
 BUTTONS = {
     "card_long": "① 영상 늘리기", "card_live": "② 실시간 스트리밍", "card_upload": "③ 예약 업로드",
-    "guide": "? 처음 사용 가이드", "help": "? 도움말", "check": "⚙ 설정 점검", "comments": "💬 댓글 관리",
+    "guide": "? 처음 사용 가이드", "help": "? 도움말", "check": "⚙ 설정 점검", "comments": "댓글 관리",
     "channels": "YouTube 채널 관리", "new_channel": "＋ 새 채널", "connect": "Google 계정 연결",
     "pick_oauth": "Google 연결 파일 선택", "what_oauth": "이 파일이 뭔가요?",
     "pick_videos": "영상 선택", "add_folder": "폴더 한꺼번에 추가", "last_folder": "최근 폴더 다시 불러오기",

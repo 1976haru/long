@@ -212,8 +212,9 @@ def test_beginner_mode_default_and_advanced(root, fake, tmp_path):
 
 def test_main_beginner_toggle_card_help_and_buttons(app, quiet):
     labels = texts(app)
-    for name in ("? 처음 사용 가이드", "? 도움말", "⚙ 설정 점검", "초보자 모드"):
+    for name in ("? 처음 사용 가이드", "? 도움말", "⚙ 설정 점검", "초보자 모드", "댓글 관리"):
         assert name in labels
+    assert not any("💬" in x for x in labels)  # Windows Tk에서 네모로 보이는 이모지 쓰지 않음
     assert all(k in app.card_help_links for k in ("long", "live", "upload"))
     app._card_help("upload", "③ 예약 업로드")
     assert hc.CARD_HELP["upload"] in str(quiet[-1])

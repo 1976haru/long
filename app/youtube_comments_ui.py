@@ -1,4 +1,4 @@
-"""💬 댓글 관리 창 — 채널별 새 댓글 확인, 검토 후 답글/안전형 자동답글, 첫 댓글 자동등록 상태.
+"""댓글 관리 창 — 채널별 새 댓글 확인, 검토 후 답글/안전형 자동답글, 첫 댓글 자동등록 상태.
 
 - 모든 YouTube 호출은 백그라운드 스레드(CommentService)에서 하고, 이 창은 결과만 표시한다.
 - 프로그램이 꺼져 있으면 댓글을 달 수 없다. 다시 켜면 밀린 첫 댓글/새 댓글을 확인한다 (화면에 명시).
@@ -39,7 +39,7 @@ class CommentManagerWindow(tk.Toplevel):
     def __init__(self, master, *, service: CommentService, profile_id: str = "",
                  ask_text: Callable | None = None, open_channels: Callable | None = None):
         super().__init__(master)
-        self.title("💬 댓글 관리")
+        self.title("댓글 관리")
         sh = self.winfo_screenheight()
         self.geometry(f"1040x{max(520, min(820, sh - 90))}")
         self.minsize(820, 480)
@@ -77,7 +77,7 @@ class CommentManagerWindow(tk.Toplevel):
         root = ttk.Frame(self.scroll.body, padding=12)
         root.pack(fill="both", expand=True)
         hd = ttk.Frame(root); hd.pack(fill="x")
-        ttk.Label(hd, text="💬 댓글 관리", font=("Segoe UI", 15, "bold")).pack(side="left")
+        ttk.Label(hd, text="댓글 관리", font=("Segoe UI", 15, "bold")).pack(side="left")
         ttk.Button(hd, text="? 사용법", command=lambda: show_usage(self, "comments")).pack(side="right")
         ttk.Label(root, text=OFFLINE_NOTE, foreground="gray30", wraplength=980, justify="left").pack(anchor="w", pady=(0, 6))
         # 댓글 권한 부족 → 쉬운 안내 + [채널 다시 연결] (필요할 때만 보임)

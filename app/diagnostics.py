@@ -108,7 +108,7 @@ def check_settings(*, profiles, ffmpeg_ok: bool, comment_store=None) -> list[Che
     if comment_store is not None:
         monitored = [p for p in all_p if comment_store.has_settings(p.profile_id) and comment_store.settings_for(p).monitor]
         out.append(CheckItem(OK, "댓글 자동화 설정", f"새 댓글 확인 {len(monitored)}개 채널") if monitored else
-                   CheckItem(OK, "댓글 자동화 설정", "사용 안 함 (필요할 때 [💬 댓글 관리])"))
+                   CheckItem(OK, "댓글 자동화 설정", "사용 안 함 (필요할 때 [댓글 관리])"))
     return out
 
 

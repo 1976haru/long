@@ -150,7 +150,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         top = ttk.Frame(root); top.pack(fill="x")
         ttk.Label(top, text="③ 예약 업로드", font=("Segoe UI", 15, "bold")).pack(side="left")
         ttk.Button(top, text="YouTube 채널 관리", command=self.open_channels).pack(side="right")
-        ttk.Button(top, text="💬 댓글 관리", command=self.open_comments).pack(side="right", padx=6)
+        ttk.Button(top, text="댓글 관리", command=self.open_comments).pack(side="right", padx=6)
         ttk.Button(top, text="? 사용법", command=lambda: show_usage(self, "upload")).pack(side="right")
         ttk.Label(root, foreground="gray30", text=(
             "채널 → 영상 → 예약 순서로 고르고 [미리보기]에서 확인한 뒤 시작하세요. 업로드 직전마다 채널을 다시 "

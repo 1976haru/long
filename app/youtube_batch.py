@@ -79,7 +79,7 @@ class ThumbMatch:
             mark = {"template": " (템플릿)", "manual": " (직접 지정)"}.get(self.status, "")
             return f"{Path(self.path).name} ✓{mark}"
         if self.status == "ambiguous":
-            return f"후보 {len(self.candidates)}개 ⚠ 직접 선택"
+            return f"썸네일 후보 {len(self.candidates)}개 - 하나를 선택하세요"
         return "없음 ⚠"
 
 

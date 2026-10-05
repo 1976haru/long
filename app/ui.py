@@ -285,7 +285,7 @@ class MainWindow(tk.Tk):
         self.tool_text = ttk.Label(tr, text="FFmpeg 확인 중...")
         self.tool_text.pack(side="left")
         ttk.Button(tr, text="FFmpeg 설정", command=self._pick_ffmpeg).pack(side="right")
-        ttk.Button(tr, text="💬 댓글 관리", command=self._open_comments).pack(side="right", padx=(0, 6))
+        ttk.Button(tr, text="댓글 관리", command=self._open_comments).pack(side="right", padx=(0, 6))
         hr0 = ttk.Frame(root); hr0.pack(fill="x", pady=(0, 6))
         ttk.Button(hr0, text="? 처음 사용 가이드", command=self._open_welcome).pack(side="left")
         ttk.Button(hr0, text="? 도움말", command=self._open_help).pack(side="left", padx=4)
