@@ -201,4 +201,5 @@ backend 스레드(watchdog, stop)는 `controller.events` 큐에만 쓴다. `Live
 - Phase 1 (완료): backend — 명령, 보안, LiveProcess, watchdog, dry-run, guard
 - Phase 2 (완료): LIVE 창, preflight, DPAPI 저장, graceful q stop, keep-awake, close lifecycle
 - Phase 3A (완료): 다중 MP4 Playlist DIRECT COPY, 보관 안전 세션(11:50 안전 종료), Cloud 설정 v2, soak 도구
-- Phase 3B (예정): YouTube API로 다음 Broadcast 자동 생성/종료 (SessionRolloverProvider 교체)
+- Phase 3B (코드 완료, 실제 YouTube 미검증): YouTube API 자동 Broadcast 교체 — 재사용 stream 1개, 11:40 다음 방송 준비, 11:50 complete→live, 실패 시 현재 방송 유지. 자세한 내용: `docs/YOUTUBE_ROLLOVER.md`
+- 다음: 실제 YouTube 비공개 3분+3분 교체 smoke → Cloud credential Gate(서버 단독 교체) → 실제 OCI 배포 → 6/12/24h soak → 다채널

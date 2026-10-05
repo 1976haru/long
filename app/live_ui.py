@@ -33,6 +33,16 @@ from .live_session import (
 from .live_secrets import default_key_store
 from .live_supervisor import LiveBusyError, LiveState, busy_message
 from .settings import settings_dir
+from .youtube_api import PRIVACY_VALUES, YouTubeApiError
+from .youtube_config import (
+    RolloverRunner, build_api_client, is_connected, load_youtube_settings, save_youtube_settings,
+    template_from_settings,
+)
+from .youtube_oauth import TESTING_TOKEN_WARNING, OAuthError
+from .youtube_session import (
+    SESSION_YOUTUBE_AUTO, STATE_LABELS as YT_LABELS, STREAM_MODE_API, STREAM_MODE_MANUAL, TITLE_RULE_NUMBERED,
+    TITLE_RULE_SAME, BroadcastTemplate, YouTubeRolloverManager, session_seconds_for_run,
+)
 from .tooling import FFMPEG_GUARD, release_tk_variables
 
 KEY_REVEAL_MS = 8000
@@ -113,6 +123,20 @@ class LiveWindow(tk.Toplevel):
         self.playlist_summary = tk.StringVar(value="[영상 추가]로 LIVE READY MP4를 2개 이상 넣으세요.")
         self.next_session_msg = tk.StringVar()
         self.session_provider = ManualSessionProvider()
+        ys = load_youtube_settings()
+        tmpl = template_from_settings()
+        self.yt_mode = tk.StringVar(value=ys.get("stream_mode") or STREAM_MODE_MANUAL)
+        self.yt_status = tk.StringVar()
+        self.yt_title = tk.StringVar(value=tmpl.title)
+        self.yt_desc = tk.StringVar(value=tmpl.description)
+        self.yt_privacy = tk.StringVar(value=tmpl.privacy)
+        self.yt_kids = tk.BooleanVar(value=tmpl.made_for_kids)
+        self.yt_title_rule = tk.StringVar(value=tmpl.title_rule)
+        self.yt_manager: YouTubeRolloverManager | None = None
+        self.yt_runner: RolloverRunner | None = None
+        self._yt_snap = None
+        self._yt_busy = False
+        self._yt_pending_golive = None  # (api, stream_id, template) — FFmpeg 시작 후 첫 방송 live
         self.input_info = tk.StringVar(value="LIVE로 송출할 완성 MP4를 선택하세요.")
         self.ready_text = tk.StringVar()
         self.location = tk.StringVar(value=LOC_CLOUD)
@@ -131,13 +155,15 @@ class LiveWindow(tk.Toplevel):
         self.confirm_stop = tk.BooleanVar(value=True)
         self.st = {k: tk.StringVar(value="-") for k in (
             "state", "where", "session", "fps", "bitrate", "speed", "out_time", "reconnects", "retry", "exit",
-            "error", "media", "mode", "server", "disk", "playlist", "session_time", "session_left")}
+            "error", "media", "mode", "server", "disk", "playlist", "session_time", "session_left",
+            "yt_broadcast", "yt_next", "yt_rollover")}
         self._height = 0
 
         self._ui()
         self._load_saved_key()
         self._update_preset_detail()
         self._update_cloud_line()
+        self._on_yt_mode()
         self.protocol("WM_DELETE_WINDOW", self.request_close)
         if load_cloud_profile() is not None:
             self.cloud.check_async()
@@ -243,6 +269,43 @@ class LiveWindow(tk.Toplevel):
         # ③ YouTube 송출
         f2 = ttk.LabelFrame(root, text="③ YouTube 송출", padding=7)
         f2.pack(fill="x", pady=(8, 0))
+        ym = ttk.Frame(f2); ym.pack(fill="x", pady=(0, 6))
+        self.rb_yt_manual = ttk.Radiobutton(ym, text="Stream Key 직접 입력 (기본)", variable=self.yt_mode,
+                                            value=STREAM_MODE_MANUAL, command=self._on_yt_mode)
+        self.rb_yt_manual.pack(side="left")
+        self.rb_yt_api = ttk.Radiobutton(ym, text="YouTube 자동 세션 (API 연결)", variable=self.yt_mode,
+                                         value=STREAM_MODE_API, command=self._on_yt_mode)
+        self.rb_yt_api.pack(side="left", padx=(12, 0))
+        self.yt_frame = ttk.Frame(f2)
+        yr = ttk.Frame(self.yt_frame); yr.pack(fill="x")
+        self.lbl_yt = ttk.Label(yr, textvariable=self.yt_status)
+        self.lbl_yt.pack(side="left")
+        self.btn_yt_setup = ttk.Button(yr, text="YouTube 자동 세션 연결", command=self._open_yt_wizard)
+        self.btn_yt_setup.pack(side="right")
+        g = ttk.Frame(self.yt_frame); g.pack(fill="x", pady=(4, 0))
+        ttk.Label(g, text="LIVE 제목", width=11).grid(row=0, column=0, sticky="w")
+        self.ent_yt_title = ttk.Entry(g, textvariable=self.yt_title)
+        self.ent_yt_title.grid(row=0, column=1, sticky="we")
+        ttk.Label(g, text="LIVE 설명", width=11).grid(row=1, column=0, sticky="w", pady=(3, 0))
+        self.ent_yt_desc = ttk.Entry(g, textvariable=self.yt_desc)
+        self.ent_yt_desc.grid(row=1, column=1, sticky="we", pady=(3, 0))
+        g.columnconfigure(1, weight=1)
+        pr2 = ttk.Frame(self.yt_frame); pr2.pack(fill="x", pady=(3, 0))
+        ttk.Label(pr2, text="공개 상태", width=11).pack(side="left")
+        self.cmb_yt_privacy = ttk.Combobox(pr2, textvariable=self.yt_privacy, state="readonly", width=10, values=PRIVACY_VALUES)
+        self.cmb_yt_privacy.pack(side="left")
+        self.chk_yt_kids = ttk.Checkbutton(pr2, text="아동용 콘텐츠", variable=self.yt_kids)
+        self.chk_yt_kids.pack(side="left", padx=(12, 0))
+        tr2 = ttk.Frame(self.yt_frame); tr2.pack(fill="x", pady=(3, 0))
+        ttk.Label(tr2, text="다음 세션 제목", width=11).pack(side="left")
+        self.rb_yt_same = ttk.Radiobutton(tr2, text="동일 제목 유지 (권장)", variable=self.yt_title_rule, value=TITLE_RULE_SAME)
+        self.rb_yt_same.pack(side="left")
+        self.rb_yt_num = ttk.Radiobutton(tr2, text="회차 자동 추가 (| LIVE #02)", variable=self.yt_title_rule,
+                                         value=TITLE_RULE_NUMBERED)
+        self.rb_yt_num.pack(side="left", padx=(10, 0))
+        ttk.Label(self.yt_frame, foreground="gray30", justify="left", wraplength=780, text=(
+            "Stream Key는 YouTube API가 관리하는 재사용 스트림을 씁니다 (화면에 표시하지 않음). "
+            "자동 교체는 이번 버전에서 PC 프로그램이 켜져 있을 때 동작합니다.")).pack(anchor="w", pady=(3, 0))
         sr = ttk.Frame(f2); sr.pack(fill="x")
         ttk.Label(sr, text="서버", width=11).pack(side="left")
         self.rb_youtube = ttk.Radiobutton(sr, text="YouTube RTMPS 기본", variable=self.server_mode, value="youtube", command=self._sync_widgets)
@@ -296,10 +359,13 @@ class LiveWindow(tk.Toplevel):
         self.rb_archive = ttk.Radiobutton(f6, text="보관 안전 모드 — 11시간 50분마다 세션 종료",
                                           variable=self.session_mode, value=SESSION_ARCHIVE_SAFE)
         self.rb_archive.pack(anchor="w")
+        self.rb_yt_auto = ttk.Radiobutton(f6, text="YouTube 자동 교체 — 11시간 50분마다 새 방송으로 (YouTube API 연결 필요)",
+                                          variable=self.session_mode, value=SESSION_YOUTUBE_AUTO)
+        self.rb_yt_auto.pack(anchor="w")
         ttk.Label(f6, foreground="gray30", justify="left", wraplength=780, text=(
             "YouTube는 12시간을 넘는 LIVE를 보관하지 못할 수 있습니다. 보관 안전 모드는 11시간 50분에서 송출을 안전 종료합니다.\n"
             "(11시간 50분은 YouTube 공식 숫자가 아니라 이 프로그램이 정한 안전 여유값입니다. "
-            "새 YouTube LIVE 자동 생성은 다음 단계 기능입니다.)")).pack(anchor="w", pady=(2, 0))
+            "'YouTube 자동 교체'는 API 연결 시 송출을 멈추지 않고 새 방송으로 바꿉니다.)")).pack(anchor="w", pady=(2, 0))
         self.next_frame = ttk.Frame(f6)
         ttk.Label(self.next_frame, textvariable=self.next_session_msg, foreground="darkorange", justify="left").pack(anchor="w")
         self.btn_next_session = ttk.Button(self.next_frame, text="▶ 다음 세션 시작", command=self._next_session)
@@ -318,6 +384,7 @@ class LiveWindow(tk.Toplevel):
         f5.pack(fill="x", pady=(8, 0))
         rows = (("state", "상태"), ("where", "실행 위치"), ("session", "방송 시간"), ("media", "현재 영상"),
                 ("playlist", "Playlist 회차"), ("session_time", "세션 시간"), ("session_left", "세션 종료까지"),
+                ("yt_broadcast", "YouTube Broadcast"), ("yt_next", "다음 세션"), ("yt_rollover", "다음 교체"),
                 ("mode", "송출 방식"), ("fps", "FPS"), ("bitrate", "Bitrate"), ("speed", "Speed"),
                 ("out_time", "송출 위치"), ("reconnects", "재접속"), ("retry", "재접속까지"),
                 ("exit", "마지막 종료 코드"), ("error", "마지막 오류"), ("server", "Cloud 서버"), ("disk", "서버 저장 공간"))
@@ -581,7 +648,7 @@ class LiveWindow(tk.Toplevel):
     def _manifest_path(self) -> Path:
         return settings_dir() / "live_playlist.ffconcat"
 
-    def _preflight(self):
+    def _preflight(self, ingest: str | None = None, key: str | None = None):
         ffmpeg, ffprobe = self._tools()
         input_path, ready, pl_reports = self.input_path.get() or None, self.ready_report, None
         if self.playlist_mode:
@@ -591,7 +658,8 @@ class LiveWindow(tk.Toplevel):
             pl_reports = [i.report for i in items] if len(items) > 1 else None
         return run_preflight(
             ffmpeg=ffmpeg, ffprobe=ffprobe, input_path=input_path,
-            ingest_url=self._ingest(), stream_key=self.key_var.get(), preset=self._preset(),
+            ingest_url=ingest if ingest is not None else self._ingest(),
+            stream_key=key if key is not None else self.key_var.get(), preset=self._preset(),
             guard=self.controller.guard, supervisor_state=self.controller.state,
             mode=self.effective_mode(), ready_report=ready, location=self.location.get(),
             playlist_reports=pl_reports, manifest_path=self._manifest_path() if pl_reports else None,
@@ -713,20 +781,144 @@ class LiveWindow(tk.Toplevel):
     def busy_any(self) -> bool:
         return self.controller.active or self.cloud.busy or self.converting
 
-    def _start(self):
-        if self.busy_any or self.cloud.cloud_live_active:
+    # ---------- YouTube API (Phase 3B) ----------
+    @property
+    def api_mode(self) -> bool:
+        return self.yt_mode.get() == STREAM_MODE_API
+
+    def _on_yt_mode(self):
+        save_youtube_settings(stream_mode=self.yt_mode.get())
+        if self.api_mode:
+            self.yt_frame.pack(fill="x", pady=(0, 6))
+        else:
+            self.yt_frame.pack_forget()
+            if self.session_mode.get() == SESSION_YOUTUBE_AUTO:
+                self.session_mode.set(SESSION_CONTINUOUS)
+        self._update_yt_status()
+        self._sync_widgets()
+
+    def _update_yt_status(self):
+        ys = load_youtube_settings()
+        if is_connected():
+            self.yt_status.set(f"✓ YouTube 연결됨 · 채널: {ys.get('channel_title', '')}")
+            self.lbl_yt.configure(foreground="darkgreen")
+        else:
+            self.yt_status.set("○ 연결 안 됨 — [YouTube 자동 세션 연결]을 진행하세요.")
+            self.lbl_yt.configure(foreground="gray30")
+
+    def _open_yt_wizard(self):
+        from .youtube_setup_ui import YouTubeSetupWizard
+        YouTubeSetupWizard(self, on_done=lambda settings: self._update_yt_status())
+
+    def _yt_template(self) -> BroadcastTemplate:
+        t = BroadcastTemplate(self.yt_title.get().strip(), self.yt_desc.get().strip(), self.yt_privacy.get(),
+                              bool(self.yt_kids.get()), self.yt_title_rule.get())
+        t.validate()
+        save_youtube_settings(template={"title": t.title, "description": t.description, "privacy": t.privacy,
+                                        "made_for_kids": t.made_for_kids, "title_rule": t.title_rule})
+        return t
+
+    def _ffmpeg_session_mode(self) -> str:
+        """YouTube 자동 교체에서는 FFmpeg/worker를 11:50에 멈추지 않는다 (방송만 교체)."""
+        return SESSION_CONTINUOUS if self.session_mode.get() == SESSION_YOUTUBE_AUTO else self.session_mode.get()
+
+    def _start_api(self):
+        if not is_connected():
+            messagebox.showwarning("YouTube", "먼저 [YouTube 자동 세션 연결]을 진행하세요.", parent=self)
+            return
+        if self.session_mode.get() == SESSION_ARCHIVE_SAFE:
+            messagebox.showwarning("세션 관리", "YouTube API 연결 모드에서는 '계속 방송' 또는 'YouTube 자동 교체'를 선택하세요.",
+                                   parent=self)
+            return
+        try:
+            template = self._yt_template()
+        except YouTubeApiError as e:
+            messagebox.showerror("LIVE 제목/설정", str(e), parent=self)
+            return
+        self._yt_busy = True
+        saved_stream = load_youtube_settings().get("stream_id")
+        q = self._ui_q
+
+        def work():
+            try:
+                api = build_api_client()
+                st = api.ensure_reusable_stream(saved_stream)
+                q.put(("yt_stream", True, (api, st.id, st.rtmps_url, st.stream_name, template)))
+            except (YouTubeApiError, OAuthError) as e:
+                q.put(("yt_stream", False, str(e)))
+            except Exception as e:
+                q.put(("yt_stream", False, f"YouTube 준비 오류 ({type(e).__name__})"))
+        threading.Thread(target=work, name="youtube-stream", daemon=True).start()
+        self._sync_widgets()
+
+    def _begin_golive(self):
+        """FFmpeg가 reusable stream으로 송출을 시작한 뒤: 첫 Broadcast 생성 → bind → stream active → live."""
+        pending, self._yt_pending_golive = self._yt_pending_golive, None
+        if not pending:
+            return
+        api, stream_id, template = pending
+        q, auto = self._ui_q, self.session_mode.get() == SESSION_YOUTUBE_AUTO
+
+        def work():
+            m = YouTubeRolloverManager(api, stream_id=stream_id, template=template,
+                                       session_seconds=session_seconds_for_run())
+            try:
+                m.go_live_first()
+                q.put(("yt_live", True, (m, auto)))
+            except (YouTubeApiError, OAuthError) as e:
+                q.put(("yt_live", False, str(e)))
+            except Exception as e:
+                q.put(("yt_live", False, f"YouTube 방송 시작 오류 ({type(e).__name__})"))
+        self._yt_busy = True
+        threading.Thread(target=work, name="youtube-golive", daemon=True).start()
+
+    def _yt_end(self, complete: bool):
+        """LIVE 종료: 자동 교체 중지 + (선택) 현재 Broadcast complete. FFmpeg와 별개로 best-effort."""
+        runner, manager = self.yt_runner, self.yt_manager
+        self.yt_runner, self.yt_manager, self._yt_snap = None, None, None
+        if runner:
+            runner.stop()
+        if complete and manager and manager.current_id:
+            api, bid = manager.api, manager.current_id
+
+            def work():
+                try:
+                    api.complete_broadcast(bid)
+                except Exception:
+                    pass
+            threading.Thread(target=work, name="youtube-complete", daemon=True).start()
+
+    def _start(self, api_stream: tuple | None = None):
+        if self.busy_any or self.cloud.cloud_live_active or self._yt_busy:
+            return
+        if self.api_mode and api_stream is None:
+            # 분석 확인 먼저 (API 호출 전에)
+            analyzing = (not self.playlist.analyzed) if self.playlist_mode else (
+                self.ready_report is None and self.effective_mode() == MODE_COPY and self.input_path.get())
+            if analyzing:
+                messagebox.showinfo("LIVE READY", "영상 분석 중입니다. 잠시 후 다시 눌러 주세요.", parent=self)
+                return
+            self._start_api()
+            return
+        if self.session_mode.get() == SESSION_YOUTUBE_AUTO and not self.api_mode:
+            messagebox.showwarning("세션 관리", "YouTube 자동 교체는 'YouTube 자동 세션 (API 연결)'에서만 쓸 수 있습니다.", parent=self)
             return
         analyzing = (not self.playlist.analyzed) if self.playlist_mode else (
             self.ready_report is None and self.effective_mode() == MODE_COPY and self.input_path.get())
         if analyzing:
             messagebox.showinfo("LIVE READY", "영상 분석 중입니다. 잠시 후 다시 눌러 주세요.", parent=self)
             return
-        r = self._preflight()
+        api_ingest = api_key = None
+        if api_stream is not None:
+            api, stream_id, api_ingest, api_key, template = api_stream
+            self._yt_pending_golive = (api, stream_id, template)
+        r = self._preflight(ingest=api_ingest, key=api_key)
         if not r.ok:
+            self._yt_pending_golive = None
             messagebox.showerror("LIVE 시작 불가", "\n".join(r.errors()) or "송출 설정을 확인하세요.", parent=self)
             return
         self._hide_key()
-        if self.remember.get():
+        if self.remember.get() and api_stream is None:
             self._apply_remember()
         if self.location.get() == LOC_CLOUD:
             if load_cloud_profile() is None:
@@ -735,7 +927,7 @@ class LiveWindow(tk.Toplevel):
                 return
             local = self.playlist.paths if self.playlist_mode and len(self.playlist) > 1 else r.config.input_path
             self.cloud.start_async(local=local, ingest_url=r.config.ingest_url, stream_key=r.config.stream_key,
-                                   session_mode=self.session_mode.get(), session_id=pysecrets.token_hex(8))
+                                   session_mode=self._ffmpeg_session_mode(), session_id=pysecrets.token_hex(8))
             self._cloud_progress = "Cloud LIVE 준비 중"
             self._refresh()
             return
@@ -750,12 +942,16 @@ class LiveWindow(tk.Toplevel):
         try:
             state = self.controller.start(ffmpeg=ffmpeg, config=r.config,
                                           reconnect=bool(self.reconnect.get()), keep_awake=bool(self.keep_awake.get()),
-                                          session_limit=session_limit_seconds(self.session_mode.get()), playlist=playlist)
+                                          session_limit=session_limit_seconds(self._ffmpeg_session_mode()), playlist=playlist)
         except LiveBusyError as e:
+            self._yt_pending_golive = None
             messagebox.showwarning("LIVE 시작 불가", str(e), parent=self)
             return
         if state is LiveState.FAILED:
+            self._yt_pending_golive = None
             self._show_failed()
+        elif self._yt_pending_golive:
+            self._begin_golive()
         self._refresh()
 
     def _stop(self):
@@ -765,6 +961,7 @@ class LiveWindow(tk.Toplevel):
             if self.confirm_stop.get() and not messagebox.askyesno("Cloud LIVE 종료", "Cloud LIVE 송출을 종료할까요?", parent=self):
                 return
             self.cloud.stop_async()
+            self._yt_end(complete=True)
             self._cloud_progress = "Cloud LIVE 종료 중"
             self._refresh()
             return
@@ -773,6 +970,7 @@ class LiveWindow(tk.Toplevel):
         if self.confirm_stop.get() and not messagebox.askyesno("LIVE 종료", "LIVE 송출을 종료할까요?", parent=self):
             return
         self.controller.stop_async()
+        self._yt_end(complete=True)
         self._refresh()
 
     def _show_failed(self):
@@ -821,6 +1019,10 @@ class LiveWindow(tk.Toplevel):
     def _tick(self):
         self._tick_job = None
         try:
+            if self.yt_runner:
+                snaps = self.yt_runner.drain()
+                if snaps:
+                    self._yt_snap = snaps[-1]
             for ev in self.controller.drain_events():
                 if ev[0] == "state" and ev[1] is LiveState.FAILED and not self._closing:
                     self.after_idle(self._show_failed)
@@ -840,6 +1042,27 @@ class LiveWindow(tk.Toplevel):
             kind = ev[0]
             if kind == "ready" and ev[1] == self._analyze_token:
                 self._apply_ready(ev[2])
+            elif kind == "yt_stream":
+                self._yt_busy = False
+                ok, payload = ev[1], ev[2]
+                if ok:
+                    save_youtube_settings(stream_id=payload[1])
+                    self._start(api_stream=payload)
+                elif not self._closing:
+                    messagebox.showerror("YouTube", payload, parent=self)
+            elif kind == "yt_live":
+                self._yt_busy = False
+                ok, payload = ev[1], ev[2]
+                if ok:
+                    manager, auto = payload
+                    self.yt_manager = manager
+                    self._yt_snap = manager.snapshot()
+                    if auto:
+                        self.yt_runner = RolloverRunner(manager)
+                        self.yt_runner.start()
+                elif not self._closing:
+                    messagebox.showerror("YouTube 방송 시작", payload + "\n\n송출(FFmpeg)은 계속됩니다. YouTube Studio에서 상태를 확인하세요.",
+                                         parent=self)
             elif kind == "pl_ready":
                 self.playlist.set_report(ev[1], ev[2])
                 self._refresh_playlist()
@@ -900,10 +1123,14 @@ class LiveWindow(tk.Toplevel):
                         else:
                             msg = f"{len(ups)}개 완료 — 새로 보냄 {len(ups) - skipped}개 / 이미 있음 {skipped}개 (SHA256 검증)"
                         messagebox.showinfo("Cloud에 영상 보내기", msg, parent=self)
+                    elif name == "start" and self._yt_pending_golive:
+                        self._begin_golive()
                     elif name == "start" and not self._closing:
                         messagebox.showinfo("Cloud LIVE", "● CLOUD LIVE 시작\n\n이제 PC 프로그램을 종료해도 Cloud에서 방송이 계속됩니다.", parent=self)
                 else:
                     msg = redact(str(payload), [self.key_var.get().strip()])
+                    if name == "start":
+                        self._yt_pending_golive = None  # 송출 시작 실패 → YouTube 방송도 시작하지 않음
                     if name == "check":
                         self._cloud_reachable = False
                         self._cloud_msg = msg
@@ -972,7 +1199,24 @@ class LiveWindow(tk.Toplevel):
             st["disk"].set("-")
         self._sync_widgets()
 
+    def _set_youtube_rows(self):
+        st = self.st
+        snap = self._yt_snap
+        if snap is None:
+            st["yt_broadcast"].set("준비 중…" if self._yt_busy else "-")
+            st["yt_next"].set("-")
+            st["yt_rollover"].set("-")
+            return
+        st["yt_broadcast"].set(YT_LABELS[snap.state] if snap.state.value != "NEXT_READY" else "● LIVE")
+        if snap.warning:
+            st["yt_next"].set(snap.warning)
+        else:
+            st["yt_next"].set("✓ 준비됨" if snap.next_ready else ("자동 교체 안 함 (계속 방송)" if not self.yt_runner else "11:40에 준비"))
+        st["yt_rollover"].set(format_duration(snap.seconds_until_rollover)
+                              if self.yt_runner and snap.seconds_until_rollover is not None else "-")
+
     def _set_session_rows(self, elapsed: float, limit: float | None, remaining: float | None):
+        self._set_youtube_rows()
         st = self.st
         if limit:
             st["session_time"].set(f"{format_duration(elapsed)} / {format_duration(limit)}" if elapsed else
@@ -998,13 +1242,17 @@ class LiveWindow(tk.Toplevel):
                   self.btn_start, self.chk_reconnect, self.chk_awake, self.rb_cloud, self.rb_local,
                   self.rb_auto, self.btn_wizard, self.btn_upload, self.rb_single, self.rb_playlist,
                   self.btn_pl_add, self.btn_pl_remove, self.btn_pl_up, self.btn_pl_down, self.btn_pl_clear,
-                  self.rb_continuous, self.rb_archive, self.btn_next_session):
-            w.configure(state=normal)
+                  self.rb_continuous, self.rb_archive, self.btn_next_session,
+                  self.rb_yt_manual, self.rb_yt_api, self.btn_yt_setup, self.ent_yt_title, self.ent_yt_desc,
+                  self.chk_yt_kids, self.rb_yt_same, self.rb_yt_num):
+            w.configure(state=normal if not self._yt_busy else "disabled")
+        self.cmb_yt_privacy.configure(state="disabled" if locked or self._yt_busy else "readonly")
+        self.rb_yt_auto.configure(state="normal" if not locked and self.api_mode else "disabled")
         is_cloud = self.location.get() == LOC_CLOUD
         self.rb_transcode.configure(state="disabled" if locked or is_cloud else "normal")
         if is_cloud and self.send_mode.get() == SEND_TRANSCODE:
             self.send_mode.set(SEND_AUTO)
-        self.ent_key.configure(state=normal)
+        self.ent_key.configure(state="disabled" if self.api_mode else normal)  # API 모드: Stream Key는 API가 관리
         transcode = self.effective_mode() == MODE_TRANSCODE
         self.cmb_preset.configure(state="readonly" if transcode and not locked else "disabled")
         self.ent_custom.configure(state="normal" if not locked and self.server_mode.get() == "custom" else "disabled")
@@ -1062,7 +1310,11 @@ class LiveWindow(tk.Toplevel):
             self._wait_then(lambda: not self.converting, on_done)
             return
         if self.cloud.cloud_live_active:
-            choice = ask_cloud_close(self, CLOUD_CLOSE_MESSAGE)
+            msg = CLOUD_CLOSE_MESSAGE
+            if self.yt_runner:
+                msg += ("\n\n⚠ YouTube 자동 교체는 이번 버전에서 PC 프로그램이 켜져 있어야 동작합니다.\n"
+                        "PC만 종료하면 Cloud 송출은 계속되지만 11:50 방송 교체는 멈춥니다 (12시간 보관 위험).")
+            choice = ask_cloud_close(self, msg)
             if choice == "cancel":
                 return
             if choice == "stop":
@@ -1070,7 +1322,8 @@ class LiveWindow(tk.Toplevel):
                 self.cloud.stop_async()
                 self._wait_then(lambda: not self.cloud.busy, on_done)
                 return
-            on_done()  # PC만 종료: Cloud LIVE는 그대로
+            self._yt_end(complete=False)  # PC만 종료: Cloud LIVE와 현재 YouTube 방송은 그대로
+            on_done()
             return
         on_done()
 
@@ -1108,6 +1361,8 @@ class LiveWindow(tk.Toplevel):
             self._convert_cancel.set()
             self._convert_thread.join(10)
         self.cloud.stop_polling()
+        if self.yt_runner:
+            self.yt_runner.stop()
         self.controller.keep_awake.disable()
         for job in (self._tick_job, self._reveal_job):
             if job:

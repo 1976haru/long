@@ -23,3 +23,14 @@ id_rsa*
 id_ed25519*
 live_secret.dat
 cloud_known_hosts
+
+# soak 측정 결과 (tools/live_soak.py --out)
+soak_*/
+soak_out/
+soak_*.log
+
+# Google OAuth / YouTube: 절대 커밋 금지
+client_secret*.json
+oauth_client*.json
+youtube_token*.json
+youtube_token.dat
