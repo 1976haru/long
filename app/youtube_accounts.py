@@ -141,14 +141,14 @@ class ProfileStore:
     def add(self, profile: ChannelProfile) -> ChannelProfile:
         """새 프로필. 같은 profile_id가 이미 있으면 거부 (수정은 save)."""
         if self.get(profile.profile_id) is not None:
-            raise ProfileError("같은 ID의 채널 프로필이 이미 있습니다.")
+            raise ProfileError("같은 ID의 YouTube 채널이 이미 등록되어 있습니다.")
         return self.save(profile)
 
     def save(self, profile: ChannelProfile) -> ChannelProfile:
         profile.validate()
         others = [p for p in self.all() if p.profile_id != profile.profile_id]
         if any(p.alias == profile.alias for p in others):
-            raise ProfileError(f"같은 별칭의 채널 프로필이 이미 있습니다: {profile.alias}")
+            raise ProfileError(f"같은 별칭의 YouTube 채널이 이미 있습니다: {profile.alias}")
         dup = next((p for p in others if profile.channel_id and p.channel_id == profile.channel_id), None)
         if dup is not None:
             raise ProfileError(f"이 YouTube 채널은 이미 '{dup.alias}' 프로필에 연결되어 있습니다.")
@@ -181,7 +181,8 @@ class ProfileOAuthSession(OAuthSession):
         if not self._client_checked:
             saved = self.store.load()
             if saved and saved.get("client_id") and saved["client_id"] != self.client.client_id:
-                raise OAuthError("이 채널 프로필의 저장된 연결이 다른 OAuth Client로 만들어졌습니다. 계정을 다시 연결하세요.",
+                raise OAuthError("이 YouTube 채널의 저장된 연결이 다른 Google 연결 파일로 만들어졌습니다. "
+                                 "Google 계정을 다시 연결하세요.",
                                  "invalid_grant")
             self._client_checked = True
         return super().__call__(force_refresh)

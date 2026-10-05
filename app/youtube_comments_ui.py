@@ -19,6 +19,9 @@ from .youtube_comments import (
     template_warnings, _ts,
 )
 from .youtube_usage import comment_usage_text
+from .help_content import TOOLTIPS
+from .help_ui import InfoTip, show_usage
+from .ui_text import friendly_error, is_beginner
 
 OFFLINE_NOTE = ("프로그램이 꺼져 있는 동안에는 댓글을 달 수 없습니다. 다시 켜면 밀린 첫 댓글을 확인해 등록하고 새 댓글을 가져옵니다. "
                 "새 댓글은 프로그램이 켜져 있을 때 10분마다 확인합니다.")
@@ -34,7 +37,7 @@ def _local(iso: str) -> str:
 
 class CommentManagerWindow(tk.Toplevel):
     def __init__(self, master, *, service: CommentService, profile_id: str = "",
-                 ask_text: Callable | None = None):
+                 ask_text: Callable | None = None, open_channels: Callable | None = None):
         super().__init__(master)
         self.title("💬 댓글 관리")
         sh = self.winfo_screenheight()
@@ -44,6 +47,8 @@ class CommentManagerWindow(tk.Toplevel):
         self.profiles = service.profiles
         self.store = service.store
         self._ask_text = ask_text
+        self._open_channels = open_channels
+        self.channel_win = None
         self._q: queue.Queue = queue.Queue()
         self._worker = None
         self._profile_ids: list[str] = []
@@ -71,8 +76,17 @@ class CommentManagerWindow(tk.Toplevel):
         self.scroll.pack(fill="both", expand=True)
         root = ttk.Frame(self.scroll.body, padding=12)
         root.pack(fill="both", expand=True)
-        ttk.Label(root, text="💬 댓글 관리", font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        hd = ttk.Frame(root); hd.pack(fill="x")
+        ttk.Label(hd, text="💬 댓글 관리", font=("Segoe UI", 15, "bold")).pack(side="left")
+        ttk.Button(hd, text="? 사용법", command=lambda: show_usage(self, "comments")).pack(side="right")
         ttk.Label(root, text=OFFLINE_NOTE, foreground="gray30", wraplength=980, justify="left").pack(anchor="w", pady=(0, 6))
+        # 댓글 권한 부족 → 쉬운 안내 + [채널 다시 연결] (필요할 때만 보임)
+        self.reauth_frame = rf = ttk.Frame(root)
+        self.reauth_text = tk.StringVar()
+        ttk.Label(rf, textvariable=self.reauth_text, foreground="firebrick", wraplength=760, justify="left").pack(side="left")
+        ttk.Button(rf, text="채널 다시 연결", command=self.reconnect).pack(side="right")
+        self._reauth_anchor = ttk.Frame(root)
+        self._reauth_anchor.pack(fill="x")
 
         top = ttk.Frame(root); top.pack(fill="x")
         ttk.Label(top, text="채널").pack(side="left")
@@ -82,8 +96,9 @@ class CommentManagerWindow(tk.Toplevel):
         ttk.Label(top, text="자동답글").pack(side="left")
         cb = ttk.Combobox(top, textvariable=self.reply_mode, state="readonly", width=16,
                           values=list(REPLY_MODE_LABELS.values()))
-        cb.pack(side="left", padx=(4, 12))
+        cb.pack(side="left", padx=(4, 2))
         cb.bind("<<ComboboxSelected>>", lambda e: self.save_settings())
+        InfoTip(top, TOOLTIPS["auto_reply"]).pack(side="left", padx=(0, 12))
         ttk.Label(top, text="하루 최대").pack(side="left")
         cc = ttk.Combobox(top, textvariable=self.daily_cap, state="readonly", width=4, values=[str(x) for x in DAILY_CAPS])
         cc.pack(side="left", padx=(4, 12))
@@ -95,6 +110,8 @@ class CommentManagerWindow(tk.Toplevel):
                         command=self.save_settings).pack(side="left")
         ttk.Checkbutton(op, text="완료/제외된 댓글도 보기", variable=self.show_closed, command=self.refresh).pack(side="left", padx=12)
         ttk.Button(op, text="답글 문구·제외 키워드", command=self.toggle_templates).pack(side="right")
+        ttk.Label(root, text="자동답글: " + TOOLTIPS["auto_reply"].replace("\n", " ") + " (기본: 검토 후 답글)",
+                  foreground="gray30", wraplength=980, justify="left").pack(anchor="w", pady=(4, 0))
         self.lbl_counts = ttk.Label(root, textvariable=self.counts_text, font=("Segoe UI", 10, "bold"))
         self.lbl_counts.pack(anchor="w", pady=(6, 0))
         self.lbl_msg = ttk.Label(root, textvariable=self.message, wraplength=980, justify="left")
@@ -140,7 +157,15 @@ class CommentManagerWindow(tk.Toplevel):
         tb = ttk.Frame(ff); tb.pack(fill="x", pady=(4, 0))
         ttk.Button(tb, text="지금 확인 (비공개 대기 포함)", command=self.check_tasks).pack(side="left")
         ttk.Button(tb, text="첫 댓글 취소", command=self.cancel_task).pack(side="left", padx=4)
-        ttk.Label(root, textvariable=self.usage, foreground="gray40", wraplength=980).pack(anchor="w", pady=(6, 0))
+        self.lbl_usage = ttk.Label(root, textvariable=self.usage, foreground="gray40", wraplength=980)
+        self.apply_mode()
+
+    def apply_mode(self) -> None:
+        """초보자 모드에서는 API 사용량(기술 정보)을 숨긴다."""
+        if is_beginner():
+            self.lbl_usage.pack_forget()
+        elif not self.lbl_usage.winfo_manager():
+            self.lbl_usage.pack(anchor="w", pady=(6, 0))
 
     def toggle_templates(self):
         if self.templates_open:
@@ -190,10 +215,34 @@ class CommentManagerWindow(tk.Toplevel):
         self.txt_templates.delete("1.0", "end")
         self.txt_templates.insert("1.0", "\n".join(cs.reply_templates))
         self.warn_text.set("\n".join(template_warnings(cs.reply_templates)))
-        if cs.needs_reauth:
-            self._say("⚠ 댓글 권한이 부족합니다. ③ 예약 업로드 → [YouTube 채널 관리]에서 이 채널을 "
-                      "'댓글 기능 권한도 함께 요청'으로 다시 연결하세요.", "firebrick")
+        self._show_reauth(cs.needs_reauth)
         self.refresh()
+
+    def _show_reauth(self, on: bool) -> None:
+        if on:
+            fe = friendly_error(reason="insufficientPermissions")
+            self.reauth_text.set(f"⚠ {fe.problem}\n{fe.action}")
+            if not self.reauth_frame.winfo_manager():
+                self.reauth_frame.pack(fill="x", pady=(0, 6), before=self._reauth_anchor)
+        elif self.reauth_frame.winfo_manager():
+            self.reauth_frame.pack_forget()
+
+    def reconnect(self):
+        """[채널 다시 연결]: 채널 관리 창을 열고 '댓글 기능 권한도 함께 요청'이 켜진 상태로 그 채널을 선택."""
+        p = self.selected_profile()
+        if self._open_channels:
+            win = self._open_channels()
+        else:
+            from .youtube_channels_ui import ChannelManagerWindow
+            from .help_ui import ask_connect_guide
+            win = ChannelManagerWindow(self, profiles=self.profiles, connect_guide=ask_connect_guide,
+                                       on_change=lambda: self._on_profile())
+        self.channel_win = win
+        if p is not None and win is not None and win.tree.exists(p.profile_id):
+            win.tree.selection_set(p.profile_id)
+            win.selected_id = ""
+            win._on_select()
+        return win
 
     def save_settings(self) -> None:
         p = self.selected_profile()

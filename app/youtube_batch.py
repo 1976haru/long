@@ -285,6 +285,7 @@ class BatchPlan:
     items: list[PlannedUpload]
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    language: str = ""
 
     @property
     def all_errors(self) -> list[str]:
@@ -323,7 +324,8 @@ def build_plan(profile: ChannelProfile, items: list[BatchItem], template: Metada
                capacity: int = 100) -> BatchPlan:
     """영상마다 제목/설명/태그를 템플릿으로 만들고 검증. times=None이면 지금 올리기(privacy_now)."""
     zone = get_zone(profile.timezone)
-    plan = BatchPlan(profile.profile_id, profile.alias, profile.channel_title, profile.channel_id, profile.timezone, [])
+    plan = BatchPlan(profile.profile_id, profile.alias, profile.channel_title, profile.channel_id, profile.timezone, [],
+                     language=profile.language)
     if not items:
         plan.errors.append("업로드할 영상을 추가하세요.")
     if not profile.channel_id:

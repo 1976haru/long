@@ -100,7 +100,7 @@ def test_channel_manager_add_connect_disconnect_delete(root, tmp_path, _isolated
     bad.write_text(json.dumps({"web": {"client_id": "x", "client_secret": "y"}}))
     w.client_file.set(str(bad))
     w.start_connect()
-    assert "OAuth JSON" in w.message.get() and len(connected) == 1
+    assert "Google 연결 파일" in w.message.get() and len(connected) == 1
     # 연결 해제 / 삭제
     w.tree.selection_set(jp.profile_id)
     w._on_select()
@@ -203,7 +203,7 @@ def test_upload_window_shows_blocked_wrong_channel(root, studio, fake):
     assert pump(root, lambda: w.tree.set(job.job_id, "state") == "차단 (채널 불일치)")
     w.tree.selection_set(job.job_id)
     w._on_select()
-    assert "채널 불일치" in w.detail.get() and fake.sessions == {}
+    assert "YouTube 채널이 다릅니다" in w.detail.get() and fake.sessions == {}  # 초보자 모드: 문제 → 해결
     w.destroy()
 
 

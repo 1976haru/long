@@ -208,7 +208,7 @@ def test_profile_token_from_other_client_is_refused(fake):
                             sleep=lambda s: None)
     with pytest.raises(Exception) as ei:
         api.get_channel()
-    assert "다른 OAuth Client" in str(ei.value)
+    assert "다른 Google 연결 파일" in str(ei.value)
     assert fake.token_log == []  # 다른 client의 refresh token을 Google로 보내지도 않음
 
 

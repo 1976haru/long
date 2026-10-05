@@ -523,7 +523,7 @@ class CommentService:
             t.status = POSTED
             return self.store.save_task(t)
         if profile is None or profile.channel_id != t.channel_id:
-            t.status, t.error_kind, t.error = FAILED, E_CHANNEL, "채널 프로필이 삭제되었거나 다른 채널로 바뀌었습니다."
+            t.status, t.error_kind, t.error = FAILED, E_CHANNEL, "YouTube 채널이 삭제되었거나 다른 채널로 바뀌었습니다."
             return self.store.save_task(t)
         try:
             api = self._api(profile)
@@ -779,7 +779,7 @@ class CommentService:
                 body = validate_comment_text(text, "답글")
                 profile = self.profiles.get(rec.profile_id)
                 if profile is None or not profile.channel_id:
-                    raise ValueError("채널 프로필이 연결되어 있지 않습니다.")
+                    raise ValueError("이 YouTube 채널이 연결되어 있지 않습니다.")
                 api = self._api(profile)
                 if self._owner_replied(profile, api, rec):
                     rec.status = C_MANUAL

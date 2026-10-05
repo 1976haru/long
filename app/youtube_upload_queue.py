@@ -63,7 +63,7 @@ STATE_LABELS = {
     PENDING: "대기", VERIFYING_CHANNEL: "채널 확인 중", CREATING_SESSION: "업로드 준비", UPLOADING: "업로드 중",
     PROCESSING: "처리 중", APPLYING_THUMBNAIL: "썸네일 적용", VERIFYING_SCHEDULE: "예약 확인", COMPLETE: "예약 완료",
     PARTIAL: "일부 실패 (썸네일)", PAUSED: "일시 중지", CANCELLED: "취소됨", FAILED: "실패", BLOCKED: "차단 (채널 불일치)",
-    API_REVIEW_REQUIRED: "확인 필요 (API 제한)",
+    API_REVIEW_REQUIRED: "Google 설정 확인 필요",
 }
 _INTERRUPT = (PAUSED, FAILED, BLOCKED)
 TRANSITIONS: dict[str, tuple[str, ...]] = {
@@ -364,7 +364,7 @@ class UploadQueue:
         try:
             profile = self.profiles.get(job.profile_id)
             if profile is None:
-                raise ChannelMismatchError(job.channel_id, "(프로필 삭제됨)")
+                raise ChannelMismatchError(job.channel_id, "(채널 삭제됨)")
             if profile.channel_id != job.channel_id:
                 raise ChannelMismatchError(job.channel_id, profile.channel_id or "(연결 안 됨)")
             api = self.api_factory(profile, self.profiles)

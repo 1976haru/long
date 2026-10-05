@@ -8,14 +8,17 @@ if %errorlevel%==0 (
   set PY=python
 )
 %PY% -m pip install --upgrade pyinstaller tzdata
-%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name PlaylistLongVideoMaker_v0.3 --add-data "cloud\long_live_worker.py;cloud" --add-data "deploy\linux;deploy\linux" main.py
+%PY% -m app.manual_html
+%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name PlaylistLongVideoMaker_v0.3 --add-data "cloud\long_live_worker.py;cloud" --add-data "deploy\linux;deploy\linux" --add-data "docs\*.html;docs" main.py
 if %errorlevel% neq 0 (
   echo.
   echo EXE 빌드 실패
   pause
   exit /b 1
 )
+copy /Y "docs\*.html" "dist\" >nul
 echo.
 echo 완료: dist\PlaylistLongVideoMaker_v0.3.exe
+echo 사용자 매뉴얼: dist\사용자_매뉴얼.html (인터넷 없이 열림)
 echo EXE 옆에 ffmpeg.exe / ffprobe.exe를 두거나, 프로그램에서 기존 FFmpeg 위치를 지정하세요.
 pause

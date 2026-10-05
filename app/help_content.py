@@ -1,0 +1,197 @@
+"""내장 도움말/사용자 매뉴얼 내용 (Tk 없음). 프로그램 안 도움말과 docs/*.html이 같은 내용을 쓴다.
+
+버튼 이름은 BUTTONS에 모아 두고, 실제 화면 문구와 같은지 테스트로 확인한다.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+APP_NAME = "YouTube Playlist Studio"
+MANUAL_VERSION = "v1.3"
+
+# 화면에 실제로 있는 버튼/메뉴 이름 (매뉴얼은 이 이름 그대로 쓴다)
+BUTTONS = {
+    "card_long": "① 영상 늘리기", "card_live": "② 실시간 스트리밍", "card_upload": "③ 예약 업로드",
+    "guide": "? 처음 사용 가이드", "help": "? 도움말", "check": "⚙ 설정 점검", "comments": "💬 댓글 관리",
+    "channels": "YouTube 채널 관리", "new_channel": "＋ 새 채널", "connect": "Google 계정 연결",
+    "pick_oauth": "Google 연결 파일 선택", "what_oauth": "이 파일이 뭔가요?",
+    "pick_videos": "영상 선택", "add_folder": "폴더 한꺼번에 추가", "last_folder": "최근 폴더 다시 불러오기",
+    "detail": "▼ 제목·설명·태그·썸네일 상세 설정", "preview": "▶ 미리보기 후 대기열에 추가",
+    "confirm_start": "맞습니다. 예약 업로드 시작", "reselect": "채널 다시 선택", "start_upload": "▶ 예약 업로드 시작",
+    "stop_upload": "■ 중지 (나중에 이어 올리기)", "add_set": "＋ 영상 추가", "add_job": "＋ 현재 설정을 대기열에 추가",
+    "start_long": "▶ 대기열 자동 시작", "send_upload": "③ 예약 업로드로 보내기", "live_start": "▶ 24H LIVE 시작",
+    "live_preset": "초보자 추천 설정", "live_schedule": "예약 LIVE", "check_comments": "지금 새 댓글 확인",
+    "first_comment": "공개 후 첫 댓글 자동등록", "copy_diag": "진단 정보 복사", "usage": "? 사용법",
+    "setup": "처음부터 설정하기", "quick": "5분 빠른 사용법", "later": "나중에 하기",
+}
+
+
+def B(key: str) -> str:
+    """매뉴얼 문장 안의 버튼 이름 표기: [버튼]."""
+    return f"[{BUTTONS[key]}]"
+
+
+@dataclass(frozen=True)
+class HelpTopic:
+    key: str
+    title: str
+    body: str
+    keywords: tuple = ()
+
+
+QUICK_START = f"""5분 만에 예약 업로드하기
+
+1. 메인 화면 위쪽의 {B('card_upload')} 카드를 누르세요.
+
+2. YouTube 채널을 선택하세요.
+   처음이면 {B('channels')} → {B('new_channel')} → {B('connect')} 순서로 연결합니다.
+
+3. {B('add_folder')}를 누르고 영상이 있는 폴더를 고르세요.
+   같은 이름의 사진(001.mp4 ↔ 001.jpg)이 있으면 썸네일로 자동 연결됩니다.
+
+4. 첫 날짜와 시간을 고르세요. (예: 내일 19:00, 매일)
+
+5. {B('preview')}를 누르세요.
+
+6. 채널 이름과 날짜가 맞으면 {B('confirm_start')}을 누르세요.
+
+끝. 창을 닫아도 프로그램이 켜져 있는 동안 업로드는 계속됩니다."""
+
+FEATURE_USAGE = {  # 각 창의 [? 사용법] — 5단계 이하
+    "upload": ("예약 업로드 사용법", [
+        "YouTube 채널을 선택하세요.", f"영상 또는 폴더를 선택하세요 ({B('pick_videos')} / {B('add_folder')}).",
+        "첫 날짜와 시간, 간격(매일·평일 등)을 선택하세요.", f"{B('preview')}에서 채널 이름과 날짜를 확인하세요.",
+        f"{B('confirm_start')}을 누르세요."]),
+    "long": ("영상 늘리기 사용법", [
+        f"{B('add_set')}으로 완성된 SET 영상을 넣으세요.", "몇 회 반복할지(회차) 또는 몇 시간짜리로 만들지 고르세요.",
+        f"{B('add_job')}를 누르세요.", f"{B('start_long')}을 누르세요.",
+        f"다 만들어지면 작업을 선택하고 {B('send_upload')}를 누르면 바로 예약 업로드할 수 있습니다."]),
+    "live": ("실시간 LIVE 사용법", [
+        "LIVE로 내보낼 영상을 고르세요 (1개 또는 여러 개).", "실행 위치를 고르세요: 무료 Cloud(권장) 또는 내 PC.",
+        f"잘 모르겠으면 {B('live_preset')}을 누르세요.", "YouTube Stream Key를 넣거나 YouTube 연결을 하세요.",
+        f"{B('live_start')}을 누르세요."]),
+    "comments": ("댓글 관리 사용법", [
+        "YouTube 채널을 선택하세요.", f"{B('check_comments')}을 누르면 새 댓글을 가져옵니다.",
+        "답글을 달 댓글을 고르고 [추천 답글 사용] 또는 [답글 작성]을 누르세요.",
+        "자동답글은 기본으로 꺼져 있습니다 ('검토 후 답글'). 필요할 때만 '자동답글 (안전형)'을 켜세요.",
+        "프로그램이 꺼져 있으면 댓글을 달 수 없습니다. 다시 켜면 밀린 작업을 확인합니다."]),
+    "channels": ("YouTube 채널 연결 사용법", [
+        f"{B('new_channel')}을 누르고 별칭·언어·시간대를 정하세요.", f"{B('pick_oauth')}으로 Google 연결 파일을 고르세요.",
+        f"{B('connect')}을 누르면 브라우저가 열립니다.", "Google 계정으로 로그인하고 YouTube 채널을 고른 뒤 [허용]을 누르세요.",
+        "연결된 채널 이름이 화면에 나오면 완료입니다."]),
+}
+
+TOOLTIPS = {
+    "timezone": "예약 시간이 계산되는 지역입니다.\n한국 채널은 Asia/Seoul, 일본 채널은 Asia/Tokyo를 사용하세요.",
+    "kids": "어린이를 주 시청자로 만든 영상인지 YouTube에 알려주는 설정입니다.\n잘 모르면 끈 채로 두세요.",
+    "schedule": "예약 공개를 고르면 영상은 먼저 비공개로 올라가고, 정한 날짜·시간에 YouTube가 자동으로 공개합니다.",
+    "thumb": "같은 이름의 사진(001.mp4 ↔ 001.jpg)이 없을 때만 사용합니다.",
+    "auto_reply": ("시청자가 남긴 간단한 감사·응원 댓글에 프로그램이 저장된 문구로 답글을 답니다.\n"
+                   "질문이나 링크가 있는 댓글은 자동으로 답하지 않고 검토 목록에 둡니다."),
+    "first_comment": "예약 영상은 공개되기 전에는 댓글을 달 수 없어서, 공개된 뒤 자동으로 첫 댓글을 답니다.",
+    "beginner": "초보자 모드에서는 어려운 기술 용어와 고급 설정을 숨깁니다. 끄면 고급 설정이 모두 보입니다.",
+}
+
+CARD_HELP = {
+    "long": "여러 곡 영상을 연결해서 1시간·3시간·10시간 같은 긴 영상을 만들 때 사용합니다.",
+    "live": "만든 영상을 YouTube에서 계속 반복 방송할 때 사용합니다.",
+    "upload": "여러 영상을 날짜와 시간을 정해서 YouTube에 자동으로 올립니다.",
+}
+
+TOPICS = (
+    HelpTopic("quick", "① 5분 빠른 시작", QUICK_START, ("시작", "처음", "업로드", "예약")),
+    HelpTopic("long", "② 영상 늘리기", f"""{CARD_HELP['long']}
+
+1. {B('add_set')}으로 CapCut 등에서 완성한 SET 영상(MP4)을 넣습니다. 여러 개면 목록 순서대로 1바퀴가 1회차입니다.
+2. 회차 기준(권장) 또는 시간 기준을 고릅니다. 회차 기준은 SET 중간에서 끊기지 않습니다.
+3. 저장 폴더와 파일 이름을 확인하고 {B('add_job')}를 누릅니다 (최대 5개).
+4. {B('start_long')}을 누르면 1개씩 순서대로 만듭니다.
+5. 화질을 지키기 위해 다시 인코딩하지 않습니다. SET 영상들의 해상도·FPS·코덱이 같아야 합니다.
+6. 다 만든 영상은 작업을 선택하고 {B('send_upload')}를 누르면 예약 업로드 창으로 바로 넘어갑니다.""",
+              ("영상", "늘리기", "회차", "SET", "FFmpeg", "반복")),
+    HelpTopic("upload", "③ 예약 업로드", f"""{CARD_HELP['upload']}
+
+STEP 1 채널 선택 → STEP 2 영상 선택 → STEP 3 날짜 선택 → STEP 4 미리보기 → STEP 5 예약 시작
+
+• {B('pick_videos')}: 영상 몇 개만 고를 때
+• {B('add_folder')}: 폴더 안 영상을 이름순(001, 002 …)으로 한꺼번에. 파일은 옮기거나 지우지 않습니다.
+• {B('last_folder')}: 마지막으로 쓴 폴더를 다시 읽습니다.
+• 썸네일: 001.mp4 ↔ 001.jpg / 001.png 처럼 같은 이름의 사진을 자동으로 연결합니다. 후보가 2개 이상이면 고르지 않고 표시합니다. 썸네일이 없어도 업로드는 됩니다.
+• 여러 영상 간격: 매일 / 평일 / 2일마다 / 매주 / N일마다. 날짜·시간은 그 채널의 시간대 기준입니다.
+• {B('detail')}: 제목·설명·태그·썸네일·첫 댓글. 채널마다 템플릿으로 저장할 수 있습니다.
+• {B('preview')}: 실제 YouTube 채널 이름을 한 번 더 확인합니다. 채널이 다르면 추가할 수 없습니다.
+• 업로드 직전마다 채널을 다시 확인하고, 다르면 업로드하지 않습니다.
+• 프로그램이 켜져 있는 동안 업로드는 계속됩니다. 중지하면 다음에 받은 곳부터 이어서 올립니다.""",
+              ("업로드", "예약", "폴더", "썸네일", "날짜", "시간대", "미리보기")),
+    HelpTopic("live", "④ 실시간 LIVE", f"""{CARD_HELP['live']}
+
+• {B('card_live')} 카드를 누르면 LIVE 창이 열립니다.
+• 무료 Cloud(권장): PC를 꺼도 방송이 계속됩니다. 처음 한 번 [처음 설정 도우미]가 필요합니다.
+• 내 PC: Cloud를 쓸 수 없을 때. PC를 끄면 방송도 끝납니다.
+• 잘 모르면 {B('live_preset')}을 누르세요: 재인코딩 없이 그대로 송출, 11시간 50분 안전 종료, 끊기면 자동 재연결.
+• {B('live_schedule')}: 앞으로 7일 동안의 LIVE를 미리 예약합니다 (② 카드의 '예약 LIVE').
+• LIVE 종료 전에는 확인 창이 나옵니다.""",
+              ("LIVE", "라이브", "방송", "스트리밍", "Cloud", "Stream Key")),
+    HelpTopic("comments", "⑤ 댓글 자동화", f"""{B('comments')}에서 사용합니다.
+
+• 첫 댓글 자동등록: 예약 업로드의 {B('detail')} → '{BUTTONS['first_comment']}'. 예약 영상은 공개된 뒤 약 1분 후에 첫 댓글을 답니다.
+• 새 댓글 확인: 프로그램이 켜져 있을 때 10분마다, 또는 {B('check_comments')}.
+• 자동답글 기본값은 '검토 후 답글'입니다. '자동답글 (안전형)'은 짧은 감사·응원 댓글에만, 하루 최대 10/20/30개, 1분 간격으로 답합니다.
+• 질문(?), 링크, 긴 댓글, 제외 키워드가 있는 댓글은 자동으로 답하지 않고 '검토 필요'로 둡니다.
+• 같은 댓글에 두 번 답하지 않습니다. YouTube Studio에서 직접 단 답글도 확인합니다.
+• 프로그램이 꺼져 있으면 댓글을 달 수 없습니다. 다시 켜면 밀린 첫 댓글을 확인해 등록합니다.""",
+              ("댓글", "답글", "자동답글", "첫 댓글")),
+    HelpTopic("channels", "⑥ YouTube 채널 연결", f"""예약 업로드·댓글은 YouTube 채널을 연결해야 사용할 수 있습니다.
+
+1. {B('card_upload')} → {B('channels')} → {B('new_channel')}
+   (처음이면 {B('guide')}의 'YouTube 채널 연결'에서 [한국 채널]/[일본 채널]을 누르면 언어·시간대가 자동으로 정해집니다.)
+2. {B('pick_oauth')}: Google Cloud에서 받은 '데스크톱 앱용 JSON 파일'입니다. ({B('what_oauth')}를 누르면 설명이 나옵니다.)
+3. {B('connect')}: 브라우저에서 로그인 → YouTube 채널 선택 → [허용] → 프로그램으로 돌아옵니다.
+4. 연결된 채널 이름·언어·시간대가 나오면 완료입니다.
+
+• 한국 채널과 일본 채널은 연결 정보가 따로 저장되어 섞이지 않습니다.
+• 비밀번호는 프로그램에 입력하지 않습니다. 로그인은 Google 화면에서만 합니다.
+• Google 앱이 '테스트' 상태이면 7일 뒤 연결이 끊길 수 있습니다. 그때는 {B('connect')}을 다시 누르세요.""",
+              ("채널", "연결", "Google", "로그인", "JSON", "연결 파일")),
+    HelpTopic("faq", "⑦ 자주 묻는 질문", """Q. 창을 닫으면 업로드가 멈추나요?
+A. 예약 업로드 창을 닫아도 프로그램이 켜져 있으면 계속됩니다. 프로그램 자체를 종료하면 멈추고, 다음에 [▶ 예약 업로드 시작]을 누르면 받은 곳부터 이어서 올립니다.
+
+Q. 컴퓨터를 꺼도 예약 공개가 되나요?
+A. 네. 업로드가 끝난 영상은 YouTube가 정한 시간에 공개합니다. 단, 첫 댓글과 새 댓글 확인은 프로그램이 켜져 있어야 합니다.
+
+Q. 한국 영상이 일본 채널에 올라갈 수 있나요?
+A. 업로드 직전마다 실제 채널을 확인하고, 다르면 업로드하지 않습니다.
+
+Q. 썸네일이 없으면요?
+A. 썸네일 없이도 업로드됩니다. 나중에 YouTube Studio에서 바꿀 수 있습니다.
+
+Q. 영상이 비공개로만 올라가요.
+A. 'Google 설정 확인 필요'로 표시됩니다. 검수되지 않은 Google 프로젝트는 비공개로만 올릴 수 있습니다. 같은 영상을 다시 올리지 마세요.""",
+              ("질문", "FAQ", "비공개", "끄면", "종료")),
+    HelpTopic("trouble", "⑧ 문제 해결", f"""• FFmpeg를 찾지 못했습니다 → 메인의 [FFmpeg 설정]에서 ffmpeg.exe를 선택하세요 (같은 폴더에 ffprobe.exe 필요).
+• Google 연결이 끊겼습니다 → {B('channels')}에서 그 채널의 {B('connect')}을 다시 누르세요.
+• Google 연결 권한이 부족합니다 (댓글) → 그 채널을 '댓글 기능 권한도 함께 요청'을 켠 채 다시 연결하세요.
+• YouTube 채널이 다릅니다 → 예약 업로드에서 올바른 채널을 고르거나, 그 채널로 다시 연결하세요.
+• 예약 시간이 지났습니다 → 지금보다 5분 이상 뒤로 다시 고르세요.
+• 오늘 사용량 한도 → 내일 다시 시도하세요. 작업은 그대로 남아 있습니다.
+• 어디가 문제인지 모르겠으면 메인의 {B('check')}을 누르세요.
+• 도움을 요청할 때는 {B('copy_diag')}를 눌러 복사한 내용을 붙여넣으세요 (비밀값은 들어가지 않습니다).""",
+              ("문제", "오류", "에러", "FFmpeg", "진단", "해결")),
+)
+
+
+def topic(key: str) -> HelpTopic:
+    return next(t for t in TOPICS if t.key == key)
+
+
+def search(query: str) -> list[HelpTopic]:
+    q = (query or "").strip().lower()
+    if not q:
+        return list(TOPICS)
+    words = q.split()
+    return [t for t in TOPICS if all(w in (t.title + " " + t.body + " " + " ".join(t.keywords)).lower() for w in words)]
+
+
+def usage_text(key: str) -> tuple[str, str]:
+    title, steps = FEATURE_USAGE[key]
+    return title, "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))

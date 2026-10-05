@@ -196,6 +196,11 @@ class LiveWindow(tk.Toplevel):
         ttk.Label(head, text="●", foreground="red", font=("Segoe UI", 16, "bold")).pack(side="left")
         ttk.Label(head, text=" 24H Playlist LIVE Studio", font=("Segoe UI", 16, "bold")).pack(side="left")
         ttk.Label(root, text="완성 MP4 1개 또는 여러 개(Playlist)를 YouTube LIVE로 무한 반복 송출합니다.").pack(anchor="w", pady=(0, 6))
+        gr = ttk.Frame(root); gr.pack(fill="x", pady=(0, 6))
+        ttk.Button(gr, text="초보자 추천 설정", command=self.apply_beginner_preset).pack(side="left")
+        ttk.Label(gr, text="잘 모르겠으면 누르세요: 재인코딩 없이 그대로 송출 · 11시간 50분 안전 종료 · 끊기면 자동 재연결",
+                  foreground="gray30").pack(side="left", padx=8)
+        ttk.Button(gr, text="? 사용법", command=self._show_usage).pack(side="right")
 
         # ① 영상 + LIVE READY
         f1 = ttk.LabelFrame(root, text="① LIVE 영상", padding=7)
@@ -776,6 +781,25 @@ class LiveWindow(tk.Toplevel):
         if self.location.get() == LOC_CLOUD and load_cloud_profile() is None:
             extra = "\n\n무료 Cloud가 아직 설정되지 않았습니다. [처음 설정 도우미]를 진행하거나 [내 PC에서 LIVE]를 선택하세요."
         (messagebox.showinfo if r.ok and not extra else messagebox.showwarning)("송출 설정 검사", r.report() + extra, parent=self)
+
+    def apply_beginner_preset(self) -> bool:
+        """[초보자 추천 설정]: 재인코딩 없이 그대로 송출, 11:50 안전 종료(YouTube API 연결이면 자동 교체), 종료 확인.
+        끊김 자동 재연결은 항상 켜져 있다. 송출 중에는 바꾸지 않는다."""
+        if self.busy_any:
+            messagebox.showinfo("초보자 추천 설정", "LIVE가 진행 중일 때는 설정을 바꾸지 않습니다. 종료한 뒤 다시 누르세요.", parent=self)
+            return False
+        self.send_mode.set(SEND_AUTO)
+        self.session_mode.set(SESSION_YOUTUBE_AUTO if self.api_mode else SESSION_ARCHIVE_SAFE)
+        self.confirm_stop.set(True)
+        self._sync_widgets()
+        messagebox.showinfo("초보자 추천 설정", "✓ 적용했습니다.\n\n• 송출: 자동 / 저부하 (재인코딩 없이 그대로)\n"
+                            "• 11시간 50분에 안전하게 종료 (YouTube 보관 안전)\n• 끊기면 자동으로 다시 연결\n"
+                            "• LIVE 종료 전에 한 번 더 확인", parent=self)
+        return True
+
+    def _show_usage(self):
+        from .help_ui import show_usage
+        return show_usage(self, "live")
 
     @property
     def busy_any(self) -> bool:

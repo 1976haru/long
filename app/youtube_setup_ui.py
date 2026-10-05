@@ -133,7 +133,7 @@ class YouTubeSetupWizard(tk.Toplevel):
             self._check_file()
 
     def _pick(self):
-        p = self._pick_file(parent=self, title="OAuth Client JSON 선택", filetypes=[("JSON", "*.json"), ("모든 파일", "*.*")])
+        p = self._pick_file(parent=self, title="Google 연결 파일 선택", filetypes=[("JSON", "*.json"), ("모든 파일", "*.*")])
         if p:
             self.client_file.set(p)
             self._check_file()

@@ -22,6 +22,10 @@ from .youtube_batch import UploadTemplateStore, clone_profile
 from .youtube_metadata import DEFAULT_CATEGORIES, LANGUAGES, PRIVACY_LABELS, TIMEZONES
 from .youtube_comments import CommentStore
 from .youtube_oauth import COMMENT_SCOPES, OAuthError, load_client_file
+from .help_content import TOOLTIPS
+from .help_ui import InfoTip, show_oauth_help, show_usage
+from .ui_scroll import ScrollFrame
+from .ui_text import CONNECTING_TEXT, is_beginner
 
 
 def _label(mapping: dict, key: str) -> str:
@@ -35,7 +39,8 @@ def _key(mapping: dict, label: str) -> str:
 class ChannelManagerWindow(tk.Toplevel):
     def __init__(self, master, *, profiles: ProfileStore | None = None, connect: Callable[..., ChannelProfile] = connect_profile,
                  open_browser: Callable[[str], object] = webbrowser.open, pick_file: Callable = filedialog.askopenfilename,
-                 on_change: Callable[[], None] | None = None, templates: UploadTemplateStore | None = None):
+                 on_change: Callable[[], None] | None = None, templates: UploadTemplateStore | None = None,
+                 connect_guide: Callable | None = None):
         super().__init__(master)
         self.title("YouTube 채널 관리")
         self.geometry(f"860x{max(520, min(660, self.winfo_screenheight() - 90))}")
@@ -47,6 +52,8 @@ class ChannelManagerWindow(tk.Toplevel):
         self.default_template = tk.StringVar()
         self.comment_scope = tk.BooleanVar(value=False)  # 댓글 권한 부족이 확인된 채널이면 자동으로 켜진다
         self._connect = connect
+        self._connect_guide = connect_guide  # [Google 계정 연결] 전 '무슨 일이 일어나는지' 안내 (화면에서 열 때)
+        self.show_advanced_info = not is_beginner()
         self._open_browser = open_browser
         self._pick_file = pick_file
         self._on_change = on_change
@@ -71,9 +78,13 @@ class ChannelManagerWindow(tk.Toplevel):
 
     # ---------- 화면 ----------
     def _ui(self):
-        root = ttk.Frame(self, padding=12)
+        self.scroll = ScrollFrame(self)
+        self.scroll.pack(fill="both", expand=True)
+        root = ttk.Frame(self.scroll.body, padding=12)
         root.pack(fill="both", expand=True)
-        ttk.Label(root, text="YouTube 채널 관리", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        hd = ttk.Frame(root); hd.pack(fill="x")
+        ttk.Label(hd, text="YouTube 채널 관리", font=("Segoe UI", 14, "bold")).pack(side="left")
+        ttk.Button(hd, text="? 사용법", command=lambda: show_usage(self, "channels")).pack(side="right")
         ttk.Label(root, foreground="gray30", text=(
             "예약 업로드할 채널을 별칭으로 등록하고 채널마다 Google 계정을 연결하세요. "
             "업로드 직전마다 실제 채널을 다시 확인하고, 다르면 업로드하지 않습니다.")).pack(anchor="w", pady=(0, 8))
@@ -102,17 +113,28 @@ class ChannelManagerWindow(tk.Toplevel):
         row(0, "별칭", ttk.Entry(form, textvariable=self.alias))
         row(1, "언어", ttk.Combobox(form, textvariable=self.language, state="readonly",
                                    values=[_label(LANGUAGES, k) for k in LANGUAGES]))
-        row(2, "시간대", ttk.Combobox(form, textvariable=self.timezone, values=list(TIMEZONES)))
+        tzf = ttk.Frame(form)
+        ttk.Combobox(tzf, textvariable=self.timezone, values=list(TIMEZONES)).pack(side="left", fill="x", expand=True)
+        InfoTip(tzf, TOOLTIPS["timezone"]).pack(side="left", padx=4)
+        row(2, "시간대", tzf)
         row(3, "카테고리", ttk.Combobox(form, textvariable=self.category,
                                      values=[_label(DEFAULT_CATEGORIES, k) for k in DEFAULT_CATEGORIES]))
         row(4, "기본 공개 상태", ttk.Combobox(form, textvariable=self.privacy, state="readonly",
                                         values=[_label(PRIVACY_LABELS, k) for k in PRIVACY_LABELS]))
-        row(5, "", ttk.Checkbutton(form, text="아동용 영상 (기본값)", variable=self.made_for_kids))
+        kf = ttk.Frame(form)
+        ttk.Checkbutton(kf, text="아동용 영상 (기본값)", variable=self.made_for_kids).pack(side="left")
+        InfoTip(kf, TOOLTIPS["kids"]).pack(side="left", padx=4)
+        row(5, "", kf)
         cf = ttk.Frame(form)
         ttk.Entry(cf, textvariable=self.client_file).pack(side="left", fill="x", expand=True)
-        ttk.Button(cf, text="찾기", command=self._pick).pack(side="left", padx=(4, 0))
-        row(6, "OAuth JSON", cf)
-        row(7, "연결 상태", ttk.Label(form, textvariable=self.channel_text))
+        ttk.Button(cf, text="Google 연결 파일 선택", command=self._pick).pack(side="left", padx=(4, 0))
+        ttk.Button(cf, text="이 파일이 뭔가요?", command=lambda: show_oauth_help(self)).pack(side="left", padx=(4, 0))
+        row(6, "Google 연결 파일", cf)
+        stf = ttk.Frame(form)
+        ttk.Label(stf, textvariable=self.channel_text, justify="left").pack(side="left")
+        self.btn_adv_info = ttk.Button(stf, text="고급 정보 보기", command=self.toggle_advanced_info)
+        self.btn_adv_info.pack(side="right")
+        row(7, "연결 상태", stf)
         self.cb_default_template = ttk.Combobox(form, textvariable=self.default_template, state="readonly")
         row(8, "기본 업로드 템플릿", self.cb_default_template)
 
@@ -128,7 +150,8 @@ class ChannelManagerWindow(tk.Toplevel):
         self.lbl_msg = ttk.Label(root, textvariable=self.message, justify="left", wraplength=800)
         self.lbl_msg.pack(anchor="w", pady=(8, 0))
         ttk.Label(root, foreground="gray30", text=(
-            "OAuth JSON은 파일 위치만 기억합니다. 연결 정보(token)는 채널마다 따로 Windows 암호화 파일에 저장됩니다.")).pack(anchor="w")
+            "Google 연결 파일은 위치만 기억합니다. 연결 정보는 채널마다 따로 이 PC에 암호화해서 저장됩니다. "
+            "비밀번호는 이 프로그램에 입력하지 않습니다."), wraplength=800).pack(anchor="w")
 
     @property
     def busy(self) -> bool:
@@ -136,7 +159,22 @@ class ChannelManagerWindow(tk.Toplevel):
 
     def _say(self, text: str, color: str = "") -> None:
         self.message.set(text)
-        self.lbl_msg.configure(foreground=color or "black")
+        self.lbl_msg.configure(foreground=color or "black", font=("Segoe UI", 9))
+
+    def status_text(self, p: ChannelProfile) -> str:
+        """연결 확인 결과: 채널 이름·언어·시간대 (channel ID는 [고급 정보 보기]에서만)."""
+        if not p.channel_id:
+            return "연결 안 됨"
+        text = (f"✓ 연결 완료 — 연결된 채널\n채널 이름: {p.channel_title}\n"
+                f"언어: {LANGUAGES.get(p.language, p.language)}\n시간대: {p.timezone}")
+        return text + (f"\nChannel ID: {p.channel_id}" if self.show_advanced_info else "")
+
+    def toggle_advanced_info(self) -> None:
+        self.show_advanced_info = not self.show_advanced_info
+        self.btn_adv_info.configure(text="고급 정보 숨기기" if self.show_advanced_info else "고급 정보 보기")
+        p = self.profiles.get(self.selected_id) if self.selected_id else None
+        if p is not None:
+            self.channel_text.set(self.status_text(p))
 
     def refresh(self, select: str | None = None) -> None:
         sel = self.selected_id if select is None else select
@@ -187,7 +225,7 @@ class ChannelManagerWindow(tk.Toplevel):
         self.privacy.set(_label(PRIVACY_LABELS, p.privacy))
         self.made_for_kids.set(bool(p.made_for_kids))
         self.client_file.set(p.client_file)
-        self.channel_text.set(f"✓ {p.channel_title} ({p.channel_id})" if p.channel_id else "연결 안 됨")
+        self.channel_text.set(self.status_text(p))
         self._load_templates(p)
         needs = CommentStore().settings_for(p).needs_reauth
         self.comment_scope.set(bool(needs))
@@ -213,7 +251,7 @@ class ChannelManagerWindow(tk.Toplevel):
         self._buttons()
 
     def _pick(self) -> None:
-        p = self._pick_file(parent=self, title="OAuth Client JSON 선택", filetypes=[("JSON", "*.json"), ("모든 파일", "*.*")])
+        p = self._pick_file(parent=self, title="Google 연결 파일 선택", filetypes=[("JSON", "*.json"), ("모든 파일", "*.*")])
         if p:
             self.client_file.set(p)
 
@@ -270,7 +308,7 @@ class ChannelManagerWindow(tk.Toplevel):
         p = self.profiles.get(self.selected_id) if self.selected_id else None
         if p is None or self.busy:
             return
-        if not messagebox.askyesno("채널 삭제", f"'{p.alias}' 채널 프로필과 저장된 연결 정보를 삭제할까요?\n"
+        if not messagebox.askyesno("채널 삭제", f"'{p.alias}' YouTube 채널 등록과 저장된 연결 정보를 삭제할까요?\n"
                                    "(YouTube 채널/영상은 삭제되지 않습니다)", parent=self):
             return
         self.profiles.delete(p.profile_id)
@@ -282,6 +320,9 @@ class ChannelManagerWindow(tk.Toplevel):
     def disconnect_selected(self) -> None:
         p = self.profiles.get(self.selected_id) if self.selected_id else None
         if p is None or self.busy:
+            return
+        if not messagebox.askyesno("연결 해제", f"'{p.alias}' 채널의 Google 연결을 해제할까요?\n"
+                                   "해제하면 다시 [Google 계정 연결]을 해야 예약 업로드·댓글을 쓸 수 있습니다.", parent=self):
             return
         disconnect_profile(self.profiles, p)
         self.channel_text.set("연결 안 됨")
@@ -300,9 +341,12 @@ class ChannelManagerWindow(tk.Toplevel):
         try:
             load_client_file(path)
         except OAuthError as e:
-            self._say(f"✗ OAuth JSON: {e}", "firebrick")
+            self._say(f"✗ Google 연결 파일: {e}", "firebrick")
             return
-        self._say(f"브라우저에서 '{p.alias}' 채널 계정으로 로그인/허용하세요… (최대 5분)")
+        if self._connect_guide is not None and not self._connect_guide(self):
+            return
+        self._say(f"{CONNECTING_TEXT}\n('{p.alias}' 채널 계정으로 로그인 → 채널 선택 → [허용], 최대 5분)", "#1d4fa8")
+        self.lbl_msg.configure(font=("Segoe UI", 12, "bold"))
         profiles, connect, open_browser = self.profiles, self._connect, self._open_browser
         kw = {"scope": COMMENT_SCOPES} if self.comment_scope.get() else {}  # 기본은 기존 scope 그대로
 
@@ -339,7 +383,7 @@ class ChannelManagerWindow(tk.Toplevel):
                     self.selected_id = payload
                     self.refresh(payload)
                     if p:
-                        self.channel_text.set(f"✓ {p.channel_title} ({p.channel_id})")
+                        self.channel_text.set(self.status_text(p))
                         self._say(f"✓ 연결됨 — {p.alias} → {p.channel_title}", "darkgreen")
                     self._changed()
                 else:

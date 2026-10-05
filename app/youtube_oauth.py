@@ -90,22 +90,22 @@ def load_client_file(path) -> OAuthClient:
     """Google Cloud Console에서 받은 'Desktop app' OAuth client JSON."""
     p = Path(str(path).strip().strip('"'))
     if not p.is_file():
-        raise OAuthError("OAuth Client JSON 파일을 찾을 수 없습니다.")
+        raise OAuthError("Google 연결 파일(JSON)을 찾을 수 없습니다. [Google 연결 파일 선택]으로 다시 선택하세요.")
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        raise OAuthError("OAuth Client JSON 파일을 읽을 수 없습니다.") from None
+        raise OAuthError("Google 연결 파일(JSON)을 읽을 수 없습니다. Google Cloud에서 파일을 다시 받아 주세요.") from None
     if "web" in data and "installed" not in data:
-        raise OAuthError("웹 애플리케이션용 Client입니다. Google Cloud에서 '데스크톱 앱' 유형으로 OAuth Client를 만들어 주세요.")
+        raise OAuthError("웹 애플리케이션용 Google 연결 파일입니다. Google Cloud에서 '데스크톱 앱' 유형으로 다시 만들어 주세요.")
     inst = data.get("installed")
     if not isinstance(inst, dict) or not inst.get("client_id") or not inst.get("client_secret"):
-        raise OAuthError("올바른 OAuth Client JSON이 아닙니다 (데스크톱 앱 client_id/client_secret 필요).")
+        raise OAuthError("올바른 Google 연결 파일이 아닙니다. Google Cloud에서 받은 '데스크톱 앱용 JSON 파일'을 선택하세요.")
     auth_uri = inst.get("auth_uri") or AUTH_URI
     token_uri = inst.get("token_uri") or TOKEN_URI
     for u in (auth_uri, token_uri):
         host = urllib.parse.urlsplit(str(u)).hostname or ""
         if not str(u).startswith("https://") or not host.endswith((".google.com", ".googleapis.com")):
-            raise OAuthError("OAuth Client JSON의 주소가 Google 주소가 아닙니다.")
+            raise OAuthError("Google 연결 파일 안의 주소가 Google 주소가 아닙니다. 파일을 다시 받아 주세요.")
     return OAuthClient(str(inst["client_id"]), str(inst["client_secret"]), auth_uri, token_uri)
 
 

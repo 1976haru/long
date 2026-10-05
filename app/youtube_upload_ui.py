@@ -15,8 +15,13 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+from . import help_ui
 from . import youtube_upload_preview as preview_ui
+from .help_content import TOOLTIPS
+from .help_ui import InfoTip, show_usage
+from .settings import load_settings, update_settings
 from .tooling import release_tk_variables
+from .ui_text import friendly_error, friendly_status, is_beginner
 from .ui_scroll import ScrollFrame
 from .youtube_accounts import ProfileStore, verify_channel
 from .youtube_batch import (
@@ -37,6 +42,16 @@ from .youtube_comments import DEFAULT_FIRST_COMMENTS, TASK_LABELS, WAITING_PUBLI
 from .youtube_usage import usage_text
 
 SCHEDULE, NOW = "schedule", "now"
+UPLOAD_STEPS = ("채널 선택", "영상 선택", "날짜 선택", "미리보기", "예약 시작")
+LAST_PROFILE_KEY, LAST_TIME_KEY = "upload_last_profile", "upload_last_time"
+
+
+def default_upload_time() -> str:
+    """마지막으로 쓴 시간 → 처음 설정의 기본 시간 → 19:00."""
+    from .settings import load_settings
+    d = load_settings()
+    t = d.get(LAST_TIME_KEY) or (d.get("upload_defaults") or {}).get("time") or "19:00"
+    return t if isinstance(t, str) and len(t) == 5 and t[2] == ":" else "19:00"
 TIME_PRESETS = ("07:00", "09:00", "18:00", "19:00", "21:00")
 THUMB_NONE = "none"
 THUMB_STRATEGY = {THUMB_NONE: "없음", THUMB_FIXED: "고정 1개", THUMB_FOLDER: "폴더에서 순서대로"}
@@ -92,7 +107,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self.episode_var = tk.StringVar()
         self.publish_kind = tk.StringVar(value=SCHEDULE)
         self.pub_date = tk.StringVar()
-        self.pub_time = tk.StringVar(value="19:00")
+        self.pub_time = tk.StringVar(value=default_upload_time())
         self.interval = tk.StringVar(value=DAILY)
         self.every_days = tk.IntVar(value=3)
         self.detail_open = tk.BooleanVar(value=False)
@@ -108,6 +123,11 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self.privacy_now = tk.StringVar(value=_label(PRIVACY_LABELS, "private"))
         self.first_comment_on = tk.BooleanVar(value=False)
         self.first_comment_preset = tk.StringVar()
+        self.progress_head = tk.StringVar()
+        self.progress_text = tk.StringVar()
+        self.run_ids: list[str] = []  # 이번 [▶ 예약 업로드 시작]으로 올리는 작업
+        self.done_win = None
+        self.beginner = is_beginner()
         self.summary = tk.StringVar()
         self.detail = tk.StringVar()
         self.usage = tk.StringVar()
@@ -117,6 +137,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         if video_path:
             self.set_video(video_path, title)
         self.refresh_jobs()
+        self.pub_date.trace_add("write", lambda *a: self._refresh_steps())
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.after(300, self._pump)
 
@@ -130,9 +151,20 @@ class MultiChannelUploadWindow(tk.Toplevel):
         ttk.Label(top, text="③ 예약 업로드", font=("Segoe UI", 15, "bold")).pack(side="left")
         ttk.Button(top, text="YouTube 채널 관리", command=self.open_channels).pack(side="right")
         ttk.Button(top, text="💬 댓글 관리", command=self.open_comments).pack(side="right", padx=6)
+        ttk.Button(top, text="? 사용법", command=lambda: show_usage(self, "upload")).pack(side="right")
         ttk.Label(root, foreground="gray30", text=(
-            "채널 → 영상 → 예약 순서로 고르고 [미리보기]에서 확인한 뒤 대기열에 넣으세요. 업로드 직전마다 채널을 다시 "
-            "확인하고, 다르면 업로드하지 않습니다. 이 창을 닫아도 업로드는 계속됩니다."), wraplength=980).pack(anchor="w", pady=(0, 8))
+            "채널 → 영상 → 예약 순서로 고르고 [미리보기]에서 확인한 뒤 시작하세요. 업로드 직전마다 채널을 다시 "
+            "확인하고, 다르면 업로드하지 않습니다. 이 창을 닫아도 프로그램이 켜져 있으면 업로드는 계속됩니다."),
+            wraplength=980).pack(anchor="w", pady=(0, 6))
+        # 단계 표시 (현재 단계는 색 + '▶' 글자로 — 색만으로 구분하지 않음)
+        sf = ttk.Frame(root); sf.pack(fill="x", pady=(0, 8))
+        self.step_labels = []
+        for i, name in enumerate(UPLOAD_STEPS, 1):
+            if i > 1:
+                ttk.Label(sf, text="→", foreground="gray50").pack(side="left", padx=2)
+            lb = tk.Label(sf, text=f"STEP {i}\n{name}", justify="center", padx=10, pady=3, relief="groove", borderwidth=1)
+            lb.pack(side="left")
+            self.step_labels.append(lb)
 
         # ① 채널
         f1 = ttk.LabelFrame(root, text="① 채널", padding=8); f1.pack(fill="x")
@@ -178,6 +210,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         kr = ttk.Frame(f3); kr.pack(fill="x")
         ttk.Radiobutton(kr, text="예약 공개 (지정 시각에 공개)", variable=self.publish_kind, value=SCHEDULE,
                         command=self._on_kind).pack(side="left")
+        InfoTip(kr, TOOLTIPS["schedule"]).pack(side="left", padx=(2, 0))
         ttk.Radiobutton(kr, text="지금 올리기 (상세 설정의 공개 상태)", variable=self.publish_kind, value=NOW,
                         command=self._on_kind).pack(side="left", padx=12)
         dr = ttk.Frame(f3); dr.pack(fill="x", pady=(6, 0))
@@ -238,6 +271,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         tcb.bind("<<ComboboxSelected>>", lambda e: self._rematch())
         ttk.Entry(th, textvariable=self.thumb_source).pack(side="left", fill="x", expand=True, padx=4)
         ttk.Button(th, text="찾기", command=self._pick_thumb_source).pack(side="left")
+        InfoTip(th, TOOLTIPS["thumb"]).pack(side="left", padx=(4, 0))
         row(6, "썸네일 없을 때", th)  # 같은 이름 썸네일(001.mp4 ↔ 001.jpg)이 없을 때만 사용
         mr = ttk.Frame(df)
         ttk.Combobox(mr, textvariable=self.category, state="readonly", width=18,
@@ -245,11 +279,16 @@ class MultiChannelUploadWindow(tk.Toplevel):
         ttk.Label(mr, text="언어").pack(side="left", padx=(12, 2))
         ttk.Combobox(mr, textvariable=self.language, state="readonly", width=14,
                      values=[_label(LANGUAGES, k) for k in LANGUAGES]).pack(side="left")
-        ttk.Checkbutton(mr, text="아동용", variable=self.made_for_kids).pack(side="left", padx=12)
+        ttk.Checkbutton(mr, text="아동용", variable=self.made_for_kids).pack(side="left", padx=(12, 0))
+        InfoTip(mr, TOOLTIPS["kids"]).pack(side="left", padx=(2, 12))
         ttk.Label(mr, text="공개 상태 (지금 올리기)").pack(side="left", padx=(12, 2))
         ttk.Combobox(mr, textvariable=self.privacy_now, state="readonly", width=14,
                      values=[_label(PRIVACY_LABELS, k) for k in PRIVACY_LABELS]).pack(side="left")
         row(7, "카테고리", mr)
+        self.adv_row = (df.grid_slaves(row=7, column=0) + df.grid_slaves(row=7, column=1))
+        self.btn_adv = ttk.Button(df, text="▶ 고급 설정 (카테고리·언어·아동용·공개 상태)", command=self.toggle_advanced)
+        self.btn_adv.grid(row=11, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.advanced_open = False
         fc = ttk.Frame(df)
         ttk.Checkbutton(fc, text="공개 후 첫 댓글 자동등록", variable=self.first_comment_on).pack(side="left")
         ttk.Label(fc, text="댓글 템플릿").pack(side="left", padx=(16, 2))
@@ -294,14 +333,64 @@ class MultiChannelUploadWindow(tk.Toplevel):
         ttk.Button(tb, text="선택 삭제", command=self.remove_selected).pack(side="right")
         ttk.Button(tb, text="선택 전체", command=self.select_all).pack(side="right", padx=4)
 
+        # 진행 상태 (크게) — 업로드 중에만 보인다
+        self.progress_frame = pf = ttk.LabelFrame(root, text="업로드 진행", padding=8)
+        ttk.Label(pf, textvariable=self.progress_head, font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        self.progress_bar = ttk.Progressbar(pf, maximum=100)
+        self.progress_bar.pack(fill="x", pady=4)
+        ttk.Label(pf, textvariable=self.progress_text, justify="left").pack(anchor="w")
+        self._progress_anchor = ttk.Frame(root)
+        self._progress_anchor.pack(fill="x")
         ar = ttk.Frame(root); ar.pack(fill="x", pady=(8, 0))
         self.btn_start = ttk.Button(ar, text="▶ 예약 업로드 시작", command=self.start)
         self.btn_start.pack(side="left", fill="x", expand=True)
         self.btn_stop = ttk.Button(ar, text="■ 중지 (나중에 이어 올리기)", command=self.stop)
         self.btn_stop.pack(side="left", padx=(5, 0))
         ttk.Label(root, textvariable=self.summary).pack(anchor="w", pady=(4, 0))
-        ttk.Label(root, textvariable=self.usage, foreground="gray40", wraplength=980).pack(anchor="w")
+        self.lbl_usage = ttk.Label(root, textvariable=self.usage, foreground="gray40", wraplength=980)
+        self.lbl_usage.pack(anchor="w")
         self._on_kind()
+        self.apply_mode()
+
+    def apply_mode(self) -> None:
+        """초보자 모드: 고급 항목(카테고리·언어·아동용·공개 상태, API 사용량)을 접어 둔다."""
+        self.beginner = is_beginner()
+        if self.beginner:
+            self.lbl_usage.pack_forget()
+            show_adv = self.advanced_open
+            self.btn_adv.grid()
+        else:
+            if not self.lbl_usage.winfo_manager():
+                self.lbl_usage.pack(anchor="w")
+            show_adv = True
+            self.btn_adv.grid_remove()
+        for w in self.adv_row:
+            w.grid() if show_adv else w.grid_remove()
+
+    def toggle_advanced(self) -> None:
+        self.advanced_open = not self.advanced_open
+        self.btn_adv.configure(text="▼ 고급 설정 접기" if self.advanced_open else "▶ 고급 설정 (카테고리·언어·아동용·공개 상태)")
+        self.apply_mode()
+
+    def current_step(self) -> int:
+        """1 채널 → 2 영상 → 3 날짜 → 4 미리보기 → 5 예약 시작."""
+        if self.selected_profile() is None:
+            return 1
+        if not self.items:
+            return 5 if any(j.status == PENDING for j in self.q.snapshot()) else 2
+        if self.publish_kind.get() == SCHEDULE and not self.pub_date.get().strip():
+            return 3
+        return 4
+
+    def _refresh_steps(self) -> None:
+        cur = self.current_step()
+        for i, lb in enumerate(self.step_labels, 1):
+            name = UPLOAD_STEPS[i - 1]
+            if i == cur:
+                lb.configure(text=f"▶ STEP {i}\n{name}", bg="#2f6fdf", fg="white", font=("Segoe UI", 9, "bold"))
+            else:
+                lb.configure(text=f"{'✓' if i < cur else ''} STEP {i}\n{name}".strip(), bg="#eef3fd" if i < cur else "#f4f4f4",
+                             fg="#1d4fa8" if i < cur else "gray35", font=("Segoe UI", 9))
 
     def toggle_detail(self):
         if self.detail_open.get():
@@ -327,7 +416,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
         else:
             from .youtube_channels_ui import ChannelManagerWindow
             self.channel_win = ChannelManagerWindow(self, profiles=self.profiles, templates=self.templates,
-                                                    on_change=self.refresh_profiles)
+                                                    on_change=self.refresh_profiles,
+                                                    connect_guide=help_ui.ask_connect_guide)
         return self.channel_win
 
     def refresh_profiles(self) -> None:
@@ -335,8 +425,9 @@ class MultiChannelUploadWindow(tk.Toplevel):
         cur = self.selected_profile()
         self._profile_ids = [p.profile_id for p in profiles]
         self.cb_profile.configure(values=[p.label for p in profiles])
+        last = load_settings().get(LAST_PROFILE_KEY, "")  # 마지막으로 쓴 채널
         keep = cur.profile_id if cur and cur.profile_id in self._profile_ids else (
-            self._profile_ids[0] if self._profile_ids else "")
+            last if last in self._profile_ids else (self._profile_ids[0] if self._profile_ids else ""))
         self.profile.set(next((p.label for p in profiles if p.profile_id == keep), ""))
         if not profiles:
             self.tz_text.set("등록된 채널이 없습니다 → [YouTube 채널 관리]")
@@ -597,6 +688,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
             self.items_summary.set(f"{len(self.items)}개 · 총 {human_size(total)} · 썸네일 {thumbs}/{len(self.items)} · "
                                    f"{mbps} Mbps 기준 예상 약 {human_duration(estimate_seconds(total, mbps))} (참고용, 실제 속도에 따라 다름)")
         self._refresh_last_button()
+        if hasattr(self, "step_labels") and hasattr(self, "tree"):
+            self._refresh_steps()
 
     # ================= 예약 =================
     def _on_kind(self):
@@ -652,8 +745,25 @@ class MultiChannelUploadWindow(tk.Toplevel):
                 self.preview_win.destroy()
             except tk.TclError:
                 pass
-        self.preview_win = preview_ui.PreviewDialog(self, plan, on_confirm=self.enqueue, verify=verify)
+        self.preview_win = preview_ui.PreviewDialog(self, plan, on_confirm=self.enqueue, verify=verify,
+                                                    on_start=self.enqueue_and_start, on_reselect=self.reselect_channel)
         return self.preview_win
+
+    def enqueue_and_start(self, plan: BatchPlan):
+        """미리보기의 [맞습니다. 예약 업로드 시작]: 대기열에 넣고 바로 시작."""
+        jobs = self.enqueue(plan)
+        if jobs:
+            self.start()
+        return jobs
+
+    def reselect_channel(self) -> None:
+        """미리보기의 [채널 다시 선택]."""
+        self.scroll.canvas.yview_moveto(0.0)
+        self.cb_profile.focus_set()
+        try:
+            self.cb_profile.event_generate("<Down>")  # 목록 열기
+        except tk.TclError:
+            pass
 
     def enqueue(self, plan: BatchPlan):
         """미리보기에서 [N개 대기열에 추가]: 모두 검증한 뒤 한꺼번에 넣는다 (하나라도 실패하면 하나도 넣지 않음)."""
@@ -676,6 +786,10 @@ class MultiChannelUploadWindow(tk.Toplevel):
             return None
         if self.template_id:
             self.templates.remember(plan.profile_id, self.template_id)
+        last = {LAST_PROFILE_KEY: plan.profile_id}
+        if self.publish_kind.get() == SCHEDULE:
+            last[LAST_TIME_KEY] = self.pub_time.get().strip()
+        update_settings(**last)  # 다음에 같은 채널/시간으로 시작
         self.items = []
         self._refresh_items()
         self.refresh_jobs(select=jobs[0].job_id if jobs else None)
@@ -741,9 +855,47 @@ class MultiChannelUploadWindow(tk.Toplevel):
         if kind == "local" and not preview_ui.ask_bandwidth(self):  # Cloud LIVE는 PC 대역폭을 쓰지 않음 → 묻지 않음
             self.summary.set("이 PC에서 LIVE 송출 중이라 업로드를 시작하지 않았습니다. LIVE가 끝난 뒤 [▶ 예약 업로드 시작]을 누르세요.")
             return False
+        self.run_ids = [j.job_id for j in self.q.snapshot() if j.status == PENDING]
+        self._was_running = True
         self.q.start()
         self.refresh_jobs()
         return True
+
+    def _refresh_progress(self, jobs) -> None:
+        """'영상 3 / 10 · 현재: 03_가을카페.mp4 · 68% · 남은 영상 7개' (업로드 중에만 표시)."""
+        run = [j for j in jobs if j.job_id in self.run_ids]
+        active = next((j for j in run if j.status in ACTIVE_STATES), None)
+        if not self.q.running or not run:
+            if self.progress_frame.winfo_manager():
+                self.progress_frame.pack_forget()
+            return
+        if not self.progress_frame.winfo_manager():
+            self.progress_frame.pack(fill="x", pady=(8, 0), before=self._progress_anchor)
+        done = sum(j.status not in (PENDING, *ACTIVE_STATES) for j in run)
+        idx = done + (1 if active else 0)
+        self.progress_head.set(f"영상 {max(1, idx)} / {len(run)}")
+        overall = (done + (active.progress if active else 0.0)) / len(run)
+        self.progress_bar["value"] = overall * 100
+        if active:
+            self.progress_text.set(f"현재: {Path(active.video_path).name}   {active.progress * 100:.0f}%\n"
+                                   f"{friendly_status(active.status)}\n남은 영상: {len(run) - idx}개")
+        else:
+            self.progress_text.set(f"다음 영상을 준비하고 있습니다.\n남은 영상: {len(run) - done}개")
+
+    def _maybe_done(self, jobs) -> None:
+        """이번 실행이 끝나면 '✓ 예약 업로드가 완료되었습니다' + 다음 행동 버튼."""
+        if not self.run_ids or self.q.running or not getattr(self, "_was_running", False):
+            return
+        self._was_running = False
+        run = [j for j in jobs if j.job_id in self.run_ids]
+        if not run or self.q.cancel.is_set():  # 사용자가 [■ 중지] → 완료 창 대신 요약만
+            self.run_ids = []
+            return
+        ok = sum(j.status == COMPLETE for j in run)
+        aliases = ", ".join(dict.fromkeys(j.profile_alias for j in run))
+        self.done_win = help_ui.show_done(self, count=ok, failed=len(run) - ok, alias=aliases,
+                                          on_list=lambda: self.scroll.scroll_to(self.tree))
+        self.run_ids = []
 
     def stop(self):
         self.q.cancel.set()  # 현재 조각 전송 뒤 멈춘다 (UI를 막지 않도록 join하지 않음)
@@ -770,6 +922,9 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self.btn_start.configure(state="disabled" if running else "normal")
         self.btn_stop.configure(state="normal" if running else "disabled")
         self.usage.set(usage_text(self._clock))
+        self._refresh_progress(jobs)
+        self._maybe_done(jobs)
+        self._refresh_steps()
         self._on_select()
 
     def _on_select(self) -> None:
@@ -781,12 +936,16 @@ class MultiChannelUploadWindow(tk.Toplevel):
         parts = [f"{j.profile_alias} · {Path(j.video_path).name}"]
         if j.status == COMPLETE and j.publish_at_utc:
             parts.append(f"영상 예약 완료 · {j.publish_local_text()} 공개 예정")
-        if j.video_id:
+        if j.video_id and not self.beginner:
             parts.append(f"YouTube video ID {j.video_id}")
         if j.first_comment:
             parts.append("첫 댓글: " + self.first_comment_label(j, self._comment_store().task(j.job_id)))
         if j.error:
-            parts.append(j.error)
+            if self.beginner:  # 기술 내용 대신 '문제 → 해결'
+                fe = friendly_error(message=j.error)
+                parts.append(f"문제: {fe.problem} 해결: {fe.action}")
+            else:
+                parts.append(j.error)
         self.detail.set(" · ".join(parts))
 
     def _comment_store(self) -> CommentStore:
@@ -818,7 +977,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
             self.comments = CommentService(self.profiles, api_factory=self.q.api_factory, jobs=self.q.snapshot,
                                            clock=self._clock)
         p = self.selected_profile()
-        self.comment_win = CommentManagerWindow(self, service=self.comments, profile_id=p.profile_id if p else "")
+        self.comment_win = CommentManagerWindow(self, service=self.comments, profile_id=p.profile_id if p else "",
+                                                open_channels=self.open_channels)
         return self.comment_win
 
     def _pump(self) -> None:

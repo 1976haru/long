@@ -20,6 +20,9 @@ from .live_supervisor import busy_message
 from .live_ui import LiveWindow
 from .tooling import FFMPEG_GUARD, discover_ffmpeg, prevent_windows_sleep, release_tk_variables, remember_ffmpeg
 from .ui_scroll import ScrollFrame
+from .help_content import CARD_HELP, TOOLTIPS
+from .help_ui import InfoTip, ask_exit
+from .ui_text import first_run_done, is_beginner, set_beginner
 
 PRODUCT_NAME = "YouTube Playlist Studio"
 PRODUCT_TITLE = f"{PRODUCT_NAME} v0.3 (Playlist Long Video Maker)"  # 설정 폴더/EXE 이름은 그대로
@@ -76,7 +79,10 @@ class MainWindow(tk.Tk):
         self.comment_service = None  # 첫 댓글/새 댓글 확인 (프로그램이 켜져 있을 때만 동작)
         self.comment_win = None
         self.mode_cards = {}
+        self.card_help_links = {}
         self.mode_summary = tk.StringVar()
+        self.beginner = tk.BooleanVar(value=is_beginner())
+        self.help_win = self.wizard_win = self.check_win = self.welcome_win = None
 
         self.mode = tk.StringVar(value="rounds")
         self.rounds = tk.IntVar(value=10)
@@ -98,6 +104,7 @@ class MainWindow(tk.Tk):
         self.after(100, self._pump)
         self.after(300, self._refresh_summary)
         self.after(1500, self._start_comments)  # 앱 시작 catch-up: 밀린 첫 댓글 확인 + 새 댓글 1회 확인
+        self.after(700, self._maybe_welcome)  # 처음 실행이면 '처음 사용하시나요?'
 
     def _mode_cards(self, root):
         """상단 3개 모드 카드. ①은 지금 이 화면(기존 제작 UI 그대로), ②③은 별도 창을 연다."""
@@ -115,19 +122,107 @@ class MainWindow(tk.Tk):
             hd = tk.Frame(card, bg=bg); hd.pack(fill="x", padx=10, pady=(5, 0))
             tk.Label(hd, text=title, bg=bg, fg=fg, font=("Segoe UI", 13, "bold")).pack(side="left")
             tk.Label(hd, text=foot, bg=bg, fg=border if active else "#2f6fdf").pack(side="right")
-            ft = tk.Frame(card, bg=bg); ft.pack(fill="x", padx=10, pady=(0, 5))
+            ft = tk.Frame(card, bg=bg); ft.pack(fill="x", padx=10, pady=(0, 1))
             tk.Label(ft, text=desc, bg=bg, fg="gray25").pack(side="left")
+            hp = tk.Frame(card, bg=bg); hp.pack(fill="x", padx=10, pady=(0, 4))
+            why = tk.Label(hp, text="ⓘ 이 기능은 언제 쓰나요?", bg=bg, fg="#1d4fa8", cursor="hand2")
+            why.pack(side="left")
+            why.bind("<Button-1>", lambda e, k=key, t=title: (self._card_help(k, t), "break")[1])
+            self.card_help_links[key] = why
             if key == "live":
                 sched = tk.Label(ft, text="예약 LIVE", bg=bg, fg="#2f6fdf", cursor="hand2")
                 sched.pack(side="right")
                 sched.bind("<Button-1>", lambda e: (self._open_live_schedule(), "break")[1])
             if cmd:
-                for w in (card, hd, ft, *hd.winfo_children(), *ft.winfo_children()):
+                for w in (card, hd, ft, hp, *hd.winfo_children(), *ft.winfo_children()):
                     if w.bind("<Button-1>"):
                         continue
                     w.bind("<Button-1>", lambda e, c=cmd: c())
             self.mode_cards[key] = card
         ttk.Frame(root, height=6).pack(fill="x")
+
+    # ---------- 초보자 안내 ----------
+    def _card_help(self, key, title):
+        messagebox.showinfo(f"{title} — 이 기능은 언제 쓰나요?", CARD_HELP[key], parent=self)
+
+    def _maybe_welcome(self):
+        if not first_run_done():
+            self._open_welcome()
+
+    def _open_welcome(self):
+        from .help_ui import WelcomeDialog
+        w = self._alive(self.welcome_win)
+        if w is not None:
+            w.lift(); return w
+        self.welcome_win = WelcomeDialog(self, on_setup=self._open_wizard, on_quick=lambda: self._open_help("quick"))
+        return self.welcome_win
+
+    def _open_wizard(self):
+        from .help_ui import SetupWizard
+        w = self._alive(self.wizard_win)
+        if w is not None:
+            w.lift(); return w
+        q = self._get_upload_queue()
+        self.wizard_win = SetupWizard(self, profiles=q.profiles, ffmpeg_finder=lambda: discover_ffmpeg(self.app_root),
+                                      pick_ffmpeg=self._pick_ffmpeg_ok, on_open_upload=self._open_upload,
+                                      open_channels=lambda: self._open_upload().open_channels())
+        return self.wizard_win
+
+    def _pick_ffmpeg_ok(self):
+        self._pick_ffmpeg()
+        return bool(self.ffmpeg and self.ffprobe)
+
+    def _open_help(self, topic="quick"):
+        from .help_ui import HelpWindow
+        w = self._alive(self.help_win)
+        if w is not None:
+            w.show(topic); w.lift(); return w
+        self.help_win = HelpWindow(self, topic=topic, diagnostics=self._diagnostics)
+        return self.help_win
+
+    def _diagnostics(self):
+        from .diagnostics import build_report
+        from .youtube_comments import CommentStore
+        q = self._get_upload_queue()
+        store = self.comment_service.store if self.comment_service is not None else CommentStore()
+        pair = (self.ffmpeg, self.ffprobe) if self.ffmpeg and self.ffprobe else None
+        return build_report(profiles=q.profiles, ffmpeg_pair=pair, comment_store=store)
+
+    def _open_check(self):
+        from .help_ui import SettingsCheckWindow
+        from .youtube_comments import CommentStore
+        w = self._alive(self.check_win)
+        if w is not None:
+            w.refresh(); w.lift(); return w
+        q = self._get_upload_queue()
+        store = self.comment_service.store if self.comment_service is not None else CommentStore()
+        fixes = {"ffmpeg": self._pick_ffmpeg, "wizard": self._open_wizard,
+                 "channels": lambda: self._open_upload().open_channels(),
+                 "reconnect": lambda: self._open_upload().open_channels()}
+        self.check_win = SettingsCheckWindow(self, profiles=q.profiles, comment_store=store, fixes=fixes,
+                                             ffmpeg_ok=lambda: bool(self.ffmpeg and self.ffprobe) or bool(self._tools()))
+        return self.check_win
+
+    def _toggle_beginner(self):
+        set_beginner(bool(self.beginner.get()))
+        for w in (self._alive(self.upload_win), self._alive(self.comment_win)):
+            if w is not None and hasattr(w, "apply_mode"):
+                w.apply_mode()
+
+    def _running_work_lines(self):
+        """종료 확인용: 지금 진행 중인 작업 (없으면 빈 목록)."""
+        lines = []
+        q = self.upload_queue
+        if q is not None and q.running:
+            snap = q.snapshot()
+            done = sum(j.status in ("COMPLETE", "PARTIAL") for j in snap)
+            lines.append(f"영상 업로드: 진행 중 ({done} / {len(snap)})")
+        svc = self.comment_service
+        monitoring = bool(svc is not None and svc.running and svc.monitored_profiles())
+        if lines or monitoring:
+            lines.append("댓글 자동 확인: " + ("ON" if monitoring else "OFF"))
+            lines.append("LIVE: " + ("ON" if self._live_kind() else "OFF"))
+        return lines if (q is not None and q.running) or monitoring else []
 
     def _upload_counts(self):
         from .youtube_upload_queue import queue_counts
@@ -191,7 +286,13 @@ class MainWindow(tk.Tk):
         self.tool_text.pack(side="left")
         ttk.Button(tr, text="FFmpeg 설정", command=self._pick_ffmpeg).pack(side="right")
         ttk.Button(tr, text="💬 댓글 관리", command=self._open_comments).pack(side="right", padx=(0, 6))
-        ttk.Label(tr, textvariable=self.mode_summary, foreground="gray25").pack(side="right", padx=(0, 10))
+        hr0 = ttk.Frame(root); hr0.pack(fill="x", pady=(0, 6))
+        ttk.Button(hr0, text="? 처음 사용 가이드", command=self._open_welcome).pack(side="left")
+        ttk.Button(hr0, text="? 도움말", command=self._open_help).pack(side="left", padx=4)
+        ttk.Button(hr0, text="⚙ 설정 점검", command=self._open_check).pack(side="left")
+        ttk.Checkbutton(hr0, text="초보자 모드", variable=self.beginner, command=self._toggle_beginner).pack(side="left", padx=(12, 2))
+        InfoTip(hr0, TOOLTIPS["beginner"]).pack(side="left")
+        ttk.Label(hr0, textvariable=self.mode_summary, foreground="gray25").pack(side="right")
         self._mode_cards(root)
 
         f1 = ttk.LabelFrame(root, text="① SET 영상", padding=7)
@@ -473,7 +574,8 @@ class MainWindow(tk.Tk):
         if w is not None:
             w.deiconify(); w.lift(); w.focus_set(); return w
         from .youtube_comments_ui import CommentManagerWindow
-        self.comment_win = CommentManagerWindow(self, service=self._get_comment_service())
+        self.comment_win = CommentManagerWindow(self, service=self._get_comment_service(),
+                                                open_channels=lambda: self._open_upload().open_channels())
         return self.comment_win
 
     def _open_upload(self, video_path="", title=""):
@@ -583,7 +685,8 @@ class MainWindow(tk.Tk):
     def _close_after_live(self):
         if self.running and not messagebox.askyesno("작업 중","현재 작업을 중지하고 종료할까요?"):return
         uploading=self.upload_queue is not None and self.upload_queue.running
-        if uploading and not messagebox.askyesno("예약 업로드 중","예약 업로드를 중지하고 종료할까요?\n다음 실행 때 [▶ 예약 업로드 시작]을 누르면 받은 위치부터 이어서 올립니다."):return
+        work=self._running_work_lines()
+        if work and not ask_exit(self,work):return  # 종료하면 업로드/댓글 확인이 멈춘다고 정확히 안내
         if self.running:self.cancel.set()
         if uploading:self.upload_queue.stop(timeout=3.0)
         self._finish_close()
