@@ -31,7 +31,7 @@ from typing import Callable
 from .settings import load_settings, update_settings
 from .youtube_accounts import ChannelMismatchError, ChannelProfile, ProfileStore, build_profile_api, verify_channel
 from .youtube_api import YouTubeApiClient, YouTubeApiError
-from .youtube_metadata import BroadcastMetadata, MetadataError, parse_tags, validate_thumbnail
+from .youtube_metadata import BroadcastMetadata, MetadataError, parse_tags, validate_comment_text, validate_thumbnail
 from .youtube_oauth import OAuthError
 from .youtube_upload import (
     ApiRestrictedError, ResumableUploader, SessionExpired, UploadCancelled, UploadProgress, build_video_body,
@@ -141,6 +141,7 @@ class UploadJob:
     session_blob: str = field(default="", repr=False)  # DPAPI(base64) 업로드 세션 URL
     error: str = ""
     created_at: float = 0.0
+    first_comment: str = ""  # 공개된 뒤 자동으로 달 첫 댓글 (비어 있으면 사용 안 함 · youtube_comments가 처리)
 
     def metadata(self) -> BroadcastMetadata:
         return BroadcastMetadata(title=self.title, description=self.description, tags=list(self.tags),
@@ -242,7 +243,7 @@ class UploadQueue:
     def make_job(self, *, profile_id: str, video_path: str, title: str, description: str = "", tags="",
                  thumbnail_path: str = "", category_id: str | None = None, language: str | None = None,
                  made_for_kids: bool | None = None, privacy: str | None = None,
-                 publish_at: datetime | None = None) -> UploadJob:
+                 publish_at: datetime | None = None, first_comment: str = "") -> UploadJob:
         """입력 검증 후 작업 생성 (아직 대기열에 넣지 않음). 프로필 기본값을 빈 칸에 쓴다."""
         profile = self.profiles.get(profile_id)
         if profile is None:
@@ -258,6 +259,7 @@ class UploadQueue:
                                    privacy_status=privacy or profile.privacy,
                                    made_for_kids=profile.made_for_kids if made_for_kids is None else made_for_kids,
                                    default_language=profile.language if language is None else language).validate("영상 제목")
+            fc = validate_comment_text(first_comment) if (first_comment or "").strip() else ""
         except (YouTubeApiError, MetadataError) as e:
             raise QueueError(str(e)) from None
         return UploadJob(job_id=os.urandom(6).hex(), profile_id=profile.profile_id, channel_id=profile.channel_id,
@@ -265,7 +267,7 @@ class UploadQueue:
                          tags=md.tags, thumbnail_path=md.thumbnail_path, category_id=str(md.category_id),
                          language=md.default_language, made_for_kids=md.made_for_kids, privacy=md.privacy_status,
                          publish_at_utc=utc_iso(publish_at) if publish_at else "", timezone=profile.timezone,
-                         file_sig=file_signature(p), created_at=self.clock())
+                         file_sig=file_signature(p), created_at=self.clock(), first_comment=fc)
 
     def add(self, job: UploadJob) -> UploadJob:
         with self._lock:

@@ -72,7 +72,7 @@ class PreviewDialog(tk.Toplevel):
         info = ttk.Frame(root); info.pack(fill="x", pady=(6, 6))
         rows = (("채널", plan.alias), ("저장된 YouTube 채널", f"{plan.channel_title or '-'} ({plan.channel_id or '연결 안 됨'})"),
                 ("시간대", plan.timezone), ("영상", f"{len(plan.items)}개"),
-                ("썸네일", f"{plan.thumb_count}/{len(plan.items)}"))
+                ("썸네일", f"{plan.thumb_count}/{len(plan.items)}"), ("첫 댓글", plan.first_comment_text))
         for r, (k, v) in enumerate(rows):
             ttk.Label(info, text=k, width=18).grid(row=r, column=0, sticky="w")
             ttk.Label(info, text=v, font=("Segoe UI", 10, "bold")).grid(row=r, column=1, sticky="w")

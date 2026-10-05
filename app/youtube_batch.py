@@ -17,6 +17,7 @@ from pathlib import Path
 from .settings import load_settings, update_settings
 from .youtube_accounts import ChannelProfile, ProfileStore, new_profile_id
 from .youtube_api import YouTubeApiError
+from .youtube_comments import render_first_comment
 from .youtube_metadata import (
     WEEKDAYS_BY_LANGUAGE, MetadataError, MetadataTemplate, parse_tags, pick_thumbnail, render_template,
     validate_description, validate_thumbnail, validate_title,
@@ -269,6 +270,7 @@ class PlannedUpload:
     language: str = ""
     made_for_kids: bool = False
     privacy: str = "private"
+    first_comment: str = ""  # 공개된 뒤 자동으로 달 첫 댓글 (비어 있으면 없음)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -299,6 +301,21 @@ class BatchPlan:
     @property
     def thumb_count(self) -> int:
         return sum(bool(i.thumbnail_path) for i in self.items)
+
+    @property
+    def first_comment_count(self) -> int:
+        return sum(bool(i.first_comment) for i in self.items)
+
+    @property
+    def first_comment_text(self) -> str:
+        """미리보기 한 줄: '10/10 자동등록 예정 (공개 후)'."""
+        n, total = self.first_comment_count, len(self.items)
+        if not n:
+            return "사용 안 함"
+        when = "공개 후" if any(i.publish_at for i in self.items if i.first_comment) else "업로드·처리 후"
+        private_now = sum(1 for i in self.items if i.first_comment and not i.publish_at and i.privacy == "private")
+        tail = f" · 비공개 {private_now}개는 공개로 바꿀 때까지 대기" if private_now else ""
+        return f"{n}/{total} 자동등록 예정 ({when}){tail}"
 
 
 def build_plan(profile: ChannelProfile, items: list[BatchItem], template: MetadataTemplate, *,
@@ -346,6 +363,16 @@ def build_plan(profile: ChannelProfile, items: list[BatchItem], template: Metada
             pu.description = validate_description(render_template(template.description_template, **values))
         except ValueError as e:  # MetadataError 포함, 중괄호 오류
             pu.errors.append(str(e))
+        if template.first_comment_enabled:
+            try:
+                pu.first_comment = render_first_comment(
+                    template.first_comment_template, title=pu.title or Path(it.video_path).stem,
+                    channel=profile.channel_title or profile.alias, local_start=local, series=template.series,
+                    episode=it.episode, filename=Path(it.video_path).stem, language=language or "ko")
+            except ValueError as e:
+                pu.errors.append(f"첫 댓글: {e}")
+            if not when and pu.privacy == "private":
+                pu.warnings.append("비공개 영상에는 댓글을 달 수 없어, 공개/일부공개로 바꿀 때까지 첫 댓글이 대기합니다.")
         if ("{episode}" in (template.title_template + template.description_template)) and not it.episode:
             pu.warnings.append("회차 번호를 찾지 못했습니다 → [회차 지정]으로 입력하세요.")
         try:

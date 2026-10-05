@@ -20,7 +20,8 @@ from .youtube_accounts import (
 from .youtube_api import YouTubeApiError
 from .youtube_batch import UploadTemplateStore, clone_profile
 from .youtube_metadata import DEFAULT_CATEGORIES, LANGUAGES, PRIVACY_LABELS, TIMEZONES
-from .youtube_oauth import OAuthError, load_client_file
+from .youtube_comments import CommentStore
+from .youtube_oauth import COMMENT_SCOPES, OAuthError, load_client_file
 
 
 def _label(mapping: dict, key: str) -> str:
@@ -44,6 +45,7 @@ class ChannelManagerWindow(tk.Toplevel):
         self.templates = templates or UploadTemplateStore()
         self._template_ids: list[str] = []
         self.default_template = tk.StringVar()
+        self.comment_scope = tk.BooleanVar(value=False)  # 댓글 권한 부족이 확인된 채널이면 자동으로 켜진다
         self._connect = connect
         self._open_browser = open_browser
         self._pick_file = pick_file
@@ -121,6 +123,7 @@ class ChannelManagerWindow(tk.Toplevel):
         self.btn_connect.pack(side="left", padx=6)
         self.btn_disconnect = ttk.Button(act, text="연결 해제", command=self.disconnect_selected)
         self.btn_disconnect.pack(side="left")
+        ttk.Checkbutton(act, text="댓글 기능 권한도 함께 요청", variable=self.comment_scope).pack(side="left", padx=8)
         ttk.Button(act, text="닫기", command=self.destroy).pack(side="right")
         self.lbl_msg = ttk.Label(root, textvariable=self.message, justify="left", wraplength=800)
         self.lbl_msg.pack(anchor="w", pady=(8, 0))
@@ -186,7 +189,10 @@ class ChannelManagerWindow(tk.Toplevel):
         self.client_file.set(p.client_file)
         self.channel_text.set(f"✓ {p.channel_title} ({p.channel_id})" if p.channel_id else "연결 안 됨")
         self._load_templates(p)
-        self._say(f"'{p.alias}' 선택됨")
+        needs = CommentStore().settings_for(p).needs_reauth
+        self.comment_scope.set(bool(needs))
+        self._say(f"'{p.alias}' 선택됨" + (" · ⚠ 댓글 권한 부족: [Google 계정 연결]로 다시 승인하세요." if needs else ""),
+                  "darkorange" if needs else "")
         self._buttons()
 
     def new_profile(self) -> None:
@@ -298,6 +304,17 @@ class ChannelManagerWindow(tk.Toplevel):
             return
         self._say(f"브라우저에서 '{p.alias}' 채널 계정으로 로그인/허용하세요… (최대 5분)")
         profiles, connect, open_browser = self.profiles, self._connect, self._open_browser
+        kw = {"scope": COMMENT_SCOPES} if self.comment_scope.get() else {}  # 기본은 기존 scope 그대로
+
+        def work():
+            got = connect(profiles, p, path, open_browser=open_browser, **kw)
+            if kw:  # 댓글 권한까지 다시 승인됨 → 경고 해제
+                store = CommentStore()
+                cs = store.settings_for(got)
+                if cs.needs_reauth:
+                    cs.needs_reauth = False
+                    store.save_settings(cs)
+            return got
 
         def result(ok, v):
             if ok:
@@ -305,8 +322,7 @@ class ChannelManagerWindow(tk.Toplevel):
             if isinstance(v, (ProfileError, OAuthError, YouTubeApiError)):
                 return ("conn", False, str(v))
             return ("conn", False, f"연결 중 오류 ({type(v).__name__})")
-        self._worker = _background("youtube-profile-connect", self._q,
-                                   lambda: connect(profiles, p, path, open_browser=open_browser), result)
+        self._worker = _background("youtube-profile-connect", self._q, work, result)
         self._buttons()
 
     def _pump(self) -> None:

@@ -36,6 +36,10 @@ class FakeYouTube:
         self.refresh_channels: dict[str, dict] = {}  # refresh token → 채널 (다채널 OAuth)
         self.code_refresh: dict[str, str] = {}  # 인증 code → refresh token
         self.token_log: list[tuple[str, str]] = []  # (grant_type, refresh_token) 순서 기록
+        # 댓글: thread id → {"id", "video", "channel"(영상 채널), "moderation", "top": comment, "replies": [comment]}
+        self.threads: dict[str, dict] = {}
+        self.comments_disabled: set[str] = set()
+        self.comment_clock = None  # callable → epoch (없으면 time.time)
         fake = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -210,7 +214,100 @@ class FakeYouTube:
             return 200, {"items": [{"default": {"url": "https://i.ytimg.com/x.jpg"}}]}, {}
         return 404, {"error": {"code": 404, "errors": [{"reason": "notFound"}]}}, {}
 
+    # ---------- comments ----------
+    def _now_iso(self):
+        import time as _t
+        t = self.comment_clock() if self.comment_clock else _t.time()
+        return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(t))
+
+    def _comment(self, cid, text, author_channel, author, published, parent=""):
+        sn = {"textOriginal": text, "textDisplay": text, "authorDisplayName": author,
+              "authorChannelId": {"value": author_channel}, "publishedAt": published, "moderationStatus": "published"}
+        if parent:
+            sn["parentId"] = parent
+        return {"id": cid, "snippet": sn}
+
+    def video_channel(self, vid):
+        v = self.videos.get(vid)
+        return v["channel"] if v else ""
+
+    def add_viewer_comment(self, video_id, text, *, author_channel="UCviewer000000000000001", author="viewer",
+                           published=None, moderation="published", channel=None):
+        tid = self._id("thr")
+        top = self._comment(tid, text, author_channel, author, published or self._now_iso())
+        self.threads[tid] = {"id": tid, "video": video_id, "channel": channel or self.video_channel(video_id),
+                             "moderation": moderation, "top": top, "replies": []}
+        return tid
+
+    def add_reply(self, thread_id, text, *, author_channel, author="owner"):
+        cid = self._id("rep")
+        self.threads[thread_id]["replies"].append(
+            self._comment(cid, text, author_channel, author, self._now_iso(), thread_id))
+        return cid
+
+    def thread_view(self, t):
+        top = json.loads(json.dumps(t["top"]))
+        top["snippet"]["moderationStatus"] = t["moderation"]
+        return {"id": t["id"], "snippet": {"videoId": t["video"], "channelId": t["channel"], "topLevelComment": top,
+                                           "totalReplyCount": len(t["replies"]), "canReply": True},
+                "replies": {"comments": t["replies"][:5]}}  # 실제 API처럼 replies는 일부만
+
+    def comment_route(self, method, op, q, body):
+        token = getattr(self, "current_token", "")
+        me = self.channel_for(token)
+        if op == "commentThreads" and method == "GET":
+            ch = q.get("allThreadsRelatedToChannelId", "")
+            rows = [t for t in self.threads.values() if t["channel"] == ch
+                    and (q.get("moderationStatus", "published") != "published" or t["moderation"] == "published")]
+            rows.sort(key=lambda t: (t["top"]["snippet"]["publishedAt"], t["id"]), reverse=True)
+            start = int(q.get("pageToken") or 0)
+            n = int(q.get("maxResults", 20))
+            page = rows[start:start + n]
+            out = {"items": [self.thread_view(t) for t in page]}
+            if start + n < len(rows):
+                out["nextPageToken"] = str(start + n)
+            return 200, out
+        if op == "commentThreads" and method == "POST":
+            vid = body["snippet"]["videoId"]
+            v = self.videos.get(vid)
+            if v is None:
+                return self._err(404, "videoNotFound")
+            if vid in self.comments_disabled:
+                return self._err(403, "commentsDisabled")
+            if v["status"].get("privacyStatus") == "private":
+                return self._err(403, "forbidden")
+            tid = self._id("thr")
+            top = self._comment(tid, body["snippet"]["topLevelComment"]["snippet"]["textOriginal"], me["id"],
+                                me["title"], self._now_iso())
+            self.threads[tid] = {"id": tid, "video": vid, "channel": v["channel"], "moderation": "published",
+                                 "top": top, "replies": []}
+            return 200, self.thread_view(self.threads[tid])
+        if op == "comments" and method == "GET":
+            t = self.threads.get(q.get("parentId", ""))
+            return (200, {"items": list(t["replies"])}) if t else self._err(404, "commentNotFound")
+        if op == "comments" and method == "POST":
+            parent = body["snippet"]["parentId"]
+            t = self.threads.get(parent)
+            if t is None:
+                return self._err(404, "parentCommentNotFound")
+            if t["video"] in self.comments_disabled:
+                return self._err(403, "commentsDisabled")
+            cid = self.add_reply(parent, body["snippet"]["textOriginal"], author_channel=me["id"], author=me["title"])
+            return 200, t["replies"][-1] if t["replies"][-1]["id"] == cid else {"id": cid}
+        return None
+
+    def set_privacy(self, vid, privacy):
+        self.videos[vid]["status"] = {k: v for k, v in self.videos[vid]["status"].items() if k != "publishAt"}
+        self.videos[vid]["status"]["privacyStatus"] = privacy
+
+    def replies_to(self, thread_id):
+        return self.threads[thread_id]["replies"]
+
     def route(self, method, op, q, body):
+        if op in ("commentThreads", "comments"):
+            got = self.comment_route(method, op, q, body)
+            if got is not None:
+                return got
         if op == "videos" and method == "GET":
             v = self.videos.get(q.get("id", ""))
             if v is None and q.get("id") in self.broadcasts:

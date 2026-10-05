@@ -73,6 +73,8 @@ class MainWindow(tk.Tk):
         self.upload_win = None
         self.live_schedule_win = None
         self.upload_queue = None  # 예약 업로드 대기열: 창을 닫아도 업로드가 계속되도록 MainWindow가 가진다
+        self.comment_service = None  # 첫 댓글/새 댓글 확인 (프로그램이 켜져 있을 때만 동작)
+        self.comment_win = None
         self.mode_cards = {}
         self.mode_summary = tk.StringVar()
 
@@ -95,6 +97,7 @@ class MainWindow(tk.Tk):
         self._tools()
         self.after(100, self._pump)
         self.after(300, self._refresh_summary)
+        self.after(1500, self._start_comments)  # 앱 시작 catch-up: 밀린 첫 댓글 확인 + 새 댓글 1회 확인
 
     def _mode_cards(self, root):
         """상단 3개 모드 카드. ①은 지금 이 화면(기존 제작 UI 그대로), ②③은 별도 창을 연다."""
@@ -165,8 +168,9 @@ class MainWindow(tk.Tk):
             waiting = sum(j.status != "완료" for j in self.jobs)
             c = self._upload_counts()
             up = " · 업로드 중" if self.upload_queue is not None and self.upload_queue.running else ""
+            fc = self._first_comment_waiting()
             self.mode_summary.set(f"영상 제작 대기 {waiting} · {self._live_state_text()} · 예약 업로드 대기 {c['waiting']}{up}"
-                                  f" · 예약 완료 {c['done']}")
+                                  f" · 예약 완료 {c['done']}" + (f" · 첫 댓글 대기 {fc}" if fc else ""))
         except tk.TclError:
             return
         self.after(1500, self._refresh_summary)
@@ -186,6 +190,7 @@ class MainWindow(tk.Tk):
         self.tool_text = ttk.Label(tr, text="FFmpeg 확인 중...")
         self.tool_text.pack(side="left")
         ttk.Button(tr, text="FFmpeg 설정", command=self._pick_ffmpeg).pack(side="right")
+        ttk.Button(tr, text="💬 댓글 관리", command=self._open_comments).pack(side="right", padx=(0, 6))
         ttk.Label(tr, textvariable=self.mode_summary, foreground="gray25").pack(side="right", padx=(0, 10))
         self._mode_cards(root)
 
@@ -445,12 +450,39 @@ class MainWindow(tk.Tk):
             self.upload_queue = UploadQueue(ProfileStore())
         return self.upload_queue
 
+    def _get_comment_service(self):
+        if self.comment_service is None:
+            from .youtube_comments import CommentService
+            q = self._get_upload_queue()
+            self.comment_service = CommentService(q.profiles, jobs=q.snapshot)
+        return self.comment_service
+
+    def _start_comments(self):
+        try:
+            self._get_comment_service().start()
+        except Exception:  # 댓글 기능 문제로 메인 기능이 멈추지 않게
+            pass
+
+    def _first_comment_waiting(self):
+        from .youtube_comments import TASK_TERMINAL, CommentStore
+        store = self.comment_service.store if self.comment_service is not None else CommentStore()
+        return sum(t.status not in TASK_TERMINAL for t in store.tasks())
+
+    def _open_comments(self):
+        w = self._alive(self.comment_win)
+        if w is not None:
+            w.deiconify(); w.lift(); w.focus_set(); return w
+        from .youtube_comments_ui import CommentManagerWindow
+        self.comment_win = CommentManagerWindow(self, service=self._get_comment_service())
+        return self.comment_win
+
     def _open_upload(self, video_path="", title=""):
         w = self._alive(self.upload_win)
         if w is None:
             from .youtube_upload_ui import MultiChannelUploadWindow
             w = self.upload_win = MultiChannelUploadWindow(self, upload_queue=self._get_upload_queue(),
-                                                           live_guard=self._live_kind)
+                                                           live_guard=self._live_kind,
+                                                           comments=self._get_comment_service())
         else:
             w.deiconify(); w.lift(); w.focus_set()
         if video_path:
@@ -559,6 +591,7 @@ class MainWindow(tk.Tk):
     def _finish_close(self):
         w=self._live_window()
         if w:w.destroy()
-        for w in (self._alive(self.upload_win),self._alive(self.live_schedule_win)):
+        for w in (self._alive(self.upload_win),self._alive(self.live_schedule_win),self._alive(self.comment_win)):
             if w:w.destroy()
+        if self.comment_service is not None:self.comment_service.stop(timeout=3.0)
         self._save();self.destroy();release_tk_variables(self)

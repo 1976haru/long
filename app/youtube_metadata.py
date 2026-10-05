@@ -53,6 +53,18 @@ def validate_description(desc: str) -> str:
     return d
 
 
+COMMENT_MAX = 2000  # 첫 댓글/답글 (YouTube 한도보다 훨씬 짧게 — 긴 자동 댓글은 스팸처럼 보인다)
+
+
+def validate_comment_text(text: str, label: str = "첫 댓글") -> str:
+    t = (text or "").replace("\r\n", "\n").strip()
+    if not t:
+        raise MetadataError(f"{label} 내용을 입력하세요.")
+    if len(t) > COMMENT_MAX:
+        raise MetadataError(f"{label}은 {COMMENT_MAX}자 이하로 입력하세요 (현재 {len(t)}자).")
+    return t
+
+
 def parse_tags(text) -> list[str]:
     """쉼표로 나누기 → 앞뒤 공백 제거 → 빈 값 제거 → 중복 제거(대소문자 무시, 처음 것 유지)."""
     raw = text if isinstance(text, (list, tuple)) else str(text or "").replace("\n", ",").split(",")
@@ -245,6 +257,8 @@ class MetadataTemplate:
     made_for_kids: bool = False
     default_language: str = ""
     series: str = ""  # 예약 업로드 {series}
+    first_comment_enabled: bool = False  # 예약 업로드: 공개된 뒤 첫 댓글 자동등록
+    first_comment_template: str = ""  # 변수: {title} {channel} {date} {series} {episode} {filename}
 
     def validate(self) -> "MetadataTemplate":
         if not (self.name or "").strip():

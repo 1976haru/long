@@ -33,6 +33,7 @@ from .youtube_upload_queue import (
     ACTIVE_STATES, API_REVIEW_REQUIRED, BLOCKED, CANCELLED, COMPLETE, FAILED, MAX_JOBS, PARTIAL, PAUSED, PENDING,
     QueueError, UploadQueue,
 )
+from .youtube_comments import DEFAULT_FIRST_COMMENTS, TASK_LABELS, WAITING_PUBLIC, WAITING_PRIVACY_CHANGE, CommentStore
 from .youtube_usage import usage_text
 
 SCHEDULE, NOW = "schedule", "now"
@@ -58,7 +59,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
                  templates: UploadTemplateStore | None = None, channel_window: Callable | None = None,
                  pick_file: Callable = filedialog.askopenfilename, pick_files: Callable = filedialog.askopenfilenames,
                  pick_dir: Callable = filedialog.askdirectory, video_path: str = "", title: str = "",
-                 clock: Callable[[], float] | None = None, live_guard: Callable[[], str] | None = None):
+                 clock: Callable[[], float] | None = None, live_guard: Callable[[], str] | None = None,
+                 comments=None):
         super().__init__(master)
         self.title("③ 예약 업로드 · 여러 YouTube 채널")
         sh = self.winfo_screenheight()
@@ -71,6 +73,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self._pick_file, self._pick_files, self._pick_dir = pick_file, pick_files, pick_dir
         self._clock = clock or upload_queue.clock
         self._live_guard = live_guard
+        self.comments = comments  # CommentService (MainWindow가 가짐). 없으면 댓글 창을 열 때 만든다
+        self.comment_win = None
         self.channel_win = None
         self.preview_win = None
         self.dnd_enabled = False  # v1.1: 끌어놓기는 꺼 둠 (선택 버튼/폴더 추가는 항상 사용 가능)
@@ -102,6 +106,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self.language = tk.StringVar(value=_label(LANGUAGES, "ko"))
         self.made_for_kids = tk.BooleanVar(value=False)
         self.privacy_now = tk.StringVar(value=_label(PRIVACY_LABELS, "private"))
+        self.first_comment_on = tk.BooleanVar(value=False)
+        self.first_comment_preset = tk.StringVar()
         self.summary = tk.StringVar()
         self.detail = tk.StringVar()
         self.usage = tk.StringVar()
@@ -123,6 +129,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         top = ttk.Frame(root); top.pack(fill="x")
         ttk.Label(top, text="③ 예약 업로드", font=("Segoe UI", 15, "bold")).pack(side="left")
         ttk.Button(top, text="YouTube 채널 관리", command=self.open_channels).pack(side="right")
+        ttk.Button(top, text="💬 댓글 관리", command=self.open_comments).pack(side="right", padx=6)
         ttk.Label(root, foreground="gray30", text=(
             "채널 → 영상 → 예약 순서로 고르고 [미리보기]에서 확인한 뒤 대기열에 넣으세요. 업로드 직전마다 채널을 다시 "
             "확인하고, 다르면 업로드하지 않습니다. 이 창을 닫아도 업로드는 계속됩니다."), wraplength=980).pack(anchor="w", pady=(0, 8))
@@ -243,6 +250,19 @@ class MultiChannelUploadWindow(tk.Toplevel):
         ttk.Combobox(mr, textvariable=self.privacy_now, state="readonly", width=14,
                      values=[_label(PRIVACY_LABELS, k) for k in PRIVACY_LABELS]).pack(side="left")
         row(7, "카테고리", mr)
+        fc = ttk.Frame(df)
+        ttk.Checkbutton(fc, text="공개 후 첫 댓글 자동등록", variable=self.first_comment_on).pack(side="left")
+        ttk.Label(fc, text="댓글 템플릿").pack(side="left", padx=(16, 2))
+        self.cb_first_comment = ttk.Combobox(fc, textvariable=self.first_comment_preset, state="readonly", width=46)
+        self.cb_first_comment.pack(side="left")
+        self.cb_first_comment.bind("<<ComboboxSelected>>", lambda e: self._use_first_comment_preset())
+        row(8, "첫 댓글", fc)
+        self.txt_first_comment = tk.Text(df, height=3, wrap="word")
+        row(9, "", self.txt_first_comment)
+        ttk.Label(df, foreground="gray30", text=(
+            "예약 영상은 공개되기 전(비공개)에는 댓글을 달 수 없어, 공개된 뒤 자동으로 답니다. 프로그램이 꺼져 있었다면 "
+            "다시 켰을 때 등록합니다. 변수: {title} {channel} {date} {series} {episode} {filename}"),
+            wraplength=820, justify="left").grid(row=10, column=1, sticky="w")
         self._detail_anchor = ttk.Frame(root)
         self._detail_anchor.pack(fill="x")
 
@@ -251,9 +271,10 @@ class MultiChannelUploadWindow(tk.Toplevel):
         # ④ 대기열
         qf = ttk.LabelFrame(root, text=f"④ 예약 업로드 대기열 (최대 {MAX_JOBS}개 · 1개씩 순차 업로드)", padding=8)
         qf.pack(fill="both", expand=True, pady=(8, 0))
-        cols = ("n", "channel", "title", "publish", "state", "progress")
+        cols = ("n", "channel", "title", "publish", "state", "progress", "comment")
         self.tree = ttk.Treeview(qf, columns=cols, show="headings", height=8, selectmode="extended")
-        for c, h, w in zip(cols, ("#", "채널", "제목", "공개 시각", "상태", "진행"), (36, 170, 330, 170, 140, 60)):
+        for c, h, w in zip(cols, ("#", "채널", "제목", "공개 시각", "상태", "진행", "첫 댓글"),
+                           (36, 150, 280, 160, 120, 50, 170)):
             self.tree.heading(c, text=h)
             self.tree.column(c, width=w, anchor="w" if c in ("channel", "title") else "center")
         for st, color in STATE_COLORS.items():
@@ -387,10 +408,27 @@ class MultiChannelUploadWindow(tk.Toplevel):
             self.thumb_strategy.set(THUMB_STRATEGY[THUMB_FIXED]); self.thumb_source.set(t.thumbnail_paths[0])
         else:
             self.thumb_strategy.set(THUMB_STRATEGY[THUMB_NONE]); self.thumb_source.set("")
+        self.first_comment_on.set(bool(t.first_comment_enabled))
+        self.txt_first_comment.delete("1.0", "end")
+        self.txt_first_comment.insert("1.0", t.first_comment_template or "")
+        lang = t.default_language or (p.language if p else "ko")
+        self.cb_first_comment.configure(values=[s.replace("\n", " / ") for s in DEFAULT_FIRST_COMMENTS.get(lang, [])])
+        self.first_comment_preset.set("")
         names = list(self.cb_template.cget("values") or ())
         idx = self._template_ids.index(template_id) if template_id in self._template_ids else 0
         self.template_choice.set(names[idx] if idx < len(names) else "")
         self._rematch()
+
+    def _use_first_comment_preset(self) -> None:
+        values = list(self.cb_first_comment.cget("values") or ())
+        p = self.selected_profile()
+        lang = _key(LANGUAGES, self.language.get()) or (p.language if p else "ko")
+        presets = DEFAULT_FIRST_COMMENTS.get(lang, [])
+        v = self.first_comment_preset.get()
+        if v in values and values.index(v) < len(presets):
+            self.txt_first_comment.delete("1.0", "end")
+            self.txt_first_comment.insert("1.0", presets[values.index(v)])
+            self.first_comment_on.set(True)
 
     def form_template(self) -> MetadataTemplate:
         src = self.thumb_source.get().strip().strip('"')
@@ -403,7 +441,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
             thumbnail_folder=src if strategy == THUMB_FOLDER else "",
             category_id=_key(DEFAULT_CATEGORIES, self.category.get()), privacy_status=_key(PRIVACY_LABELS, self.privacy_now.get()),
             made_for_kids=bool(self.made_for_kids.get()), default_language=_key(LANGUAGES, self.language.get()),
-            series=self.series.get().strip())
+            series=self.series.get().strip(), first_comment_enabled=bool(self.first_comment_on.get()),
+            first_comment_template=self.txt_first_comment.get("1.0", "end").strip())
 
     def save_template(self):
         p = self.selected_profile()
@@ -624,7 +663,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
             jobs = [self.q.make_job(profile_id=plan.profile_id, video_path=it.video_path, title=it.title,
                                     description=it.description, tags=it.tags, thumbnail_path=it.thumbnail_path,
                                     category_id=it.category_id, language=it.language, made_for_kids=it.made_for_kids,
-                                    privacy=it.privacy, publish_at=it.publish_at) for it in plan.items]
+                                    privacy=it.privacy, publish_at=it.publish_at, first_comment=it.first_comment)
+                    for it in plan.items]
             if any(j.channel_id != plan.channel_id for j in jobs):
                 raise QueueError("미리보기 뒤 채널 연결이 바뀌었습니다. 다시 미리보기 하세요.")
             if len(self.q.jobs) + len(jobs) > MAX_JOBS:
@@ -714,10 +754,12 @@ class MultiChannelUploadWindow(tk.Toplevel):
         jobs = self.q.snapshot()
         for x in self.tree.get_children():
             self.tree.delete(x)
+        tasks = {t.task_id: t for t in self._comment_store().tasks()}
         for i, j in enumerate(jobs, 1):
             tag = "active" if j.status in ACTIVE_STATES else j.status
             self.tree.insert("", "end", iid=j.job_id, tags=(tag,), values=(
-                i, j.profile_alias, j.title, j.publish_local_text(), j.status_label, f"{j.progress * 100:.0f}%"))
+                i, j.profile_alias, j.title, j.publish_local_text(), j.status_label, f"{j.progress * 100:.0f}%",
+                self.first_comment_label(j, tasks.get(j.job_id))))
         keep = [k for k in keep if k and self.tree.exists(k)]
         if keep:
             self.tree.selection_set(keep)
@@ -737,11 +779,47 @@ class MultiChannelUploadWindow(tk.Toplevel):
             self.detail.set("")
             return
         parts = [f"{j.profile_alias} · {Path(j.video_path).name}"]
+        if j.status == COMPLETE and j.publish_at_utc:
+            parts.append(f"영상 예약 완료 · {j.publish_local_text()} 공개 예정")
         if j.video_id:
             parts.append(f"YouTube video ID {j.video_id}")
+        if j.first_comment:
+            parts.append("첫 댓글: " + self.first_comment_label(j, self._comment_store().task(j.job_id)))
         if j.error:
             parts.append(j.error)
         self.detail.set(" · ".join(parts))
+
+    def _comment_store(self) -> CommentStore:
+        return self.comments.store if self.comments is not None else CommentStore()
+
+    @staticmethod
+    def first_comment_label(job, task) -> str:
+        """'댓글 완료'를 미리 표시하지 않는다 — 실제로 등록된 뒤에만 '등록 완료'."""
+        if not job.first_comment:
+            return "-"
+        if task is not None:
+            return task.label
+        if job.status in (COMPLETE, PARTIAL):
+            return TASK_LABELS[WAITING_PUBLIC] if job.publish_at_utc else (
+                TASK_LABELS[WAITING_PRIVACY_CHANGE] if job.privacy == "private" else "업로드 후 등록 준비")
+        return "업로드 후 " + ("공개되면 자동등록" if job.publish_at_utc else "자동등록")
+
+    def open_comments(self):
+        if self.comment_win is not None:
+            try:
+                if self.comment_win.winfo_exists():
+                    self.comment_win.lift()
+                    return self.comment_win
+            except tk.TclError:
+                pass
+        from .youtube_comments import CommentService
+        from .youtube_comments_ui import CommentManagerWindow
+        if self.comments is None:
+            self.comments = CommentService(self.profiles, api_factory=self.q.api_factory, jobs=self.q.snapshot,
+                                           clock=self._clock)
+        p = self.selected_profile()
+        self.comment_win = CommentManagerWindow(self, service=self.comments, profile_id=p.profile_id if p else "")
+        return self.comment_win
 
     def _pump(self) -> None:
         if getattr(self, "_destroyed", False):
@@ -769,7 +847,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         if getattr(self, "_destroyed", False):
             return
         self._destroyed = True
-        for w in (self.channel_win, self.preview_win):
+        for w in (self.channel_win, self.preview_win, self.comment_win):
             if w is not None:
                 try:
                     w.destroy()

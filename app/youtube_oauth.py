@@ -31,6 +31,18 @@ from typing import Callable
 AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube"  # LIVE 생성/바인드/전환에 필요한 최소 scope
+# 댓글 API 공식 문서는 youtube.force-ssl을 명시한다. 기존 연결은 그대로 두고, 댓글 권한 부족이 확인된 채널을
+# 다시 연결할 때만 두 scope를 함께 요청한다 (모든 token을 강제로 재인증하지 않음).
+YOUTUBE_FORCE_SSL_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
+COMMENT_SCOPES = f"{YOUTUBE_SCOPE} {YOUTUBE_FORCE_SSL_SCOPE}"
+
+
+def has_comment_scope(saved: dict | None) -> bool | None:
+    """저장된 token의 scope 기록으로 댓글 권한 여부 추정. 기록이 없으면 None (모름 — 실제 호출 결과로 판단)."""
+    scope = str((saved or {}).get("scope", "") or "")
+    if not scope:
+        return None
+    return YOUTUBE_FORCE_SSL_SCOPE in scope.split()
 MASK = "********"
 TESTING_TOKEN_WARNING = ("Google OAuth 앱이 'Testing'(테스트) 상태이면 YouTube 연결은 7일 후 만료될 수 있습니다.\n"
                          "장기 자동 운영 전에 Google Cloud Console에서 OAuth 앱 게시 상태를 확인하세요.")

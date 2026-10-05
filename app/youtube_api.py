@@ -32,6 +32,7 @@ QUOTA_COSTS = {
     "liveBroadcasts.list": 1, "liveStreams.insert": 50, "liveStreams.list": 1, "channels.list": 1,
     "videos.list": 1, "videos.update": 50, "thumbnails.set": 50, "liveBroadcasts.update": 50,
     "liveBroadcasts.delete": 50, "videoCategories.list": 1, "videos.insert": 1600,
+    "commentThreads.list": 1, "commentThreads.insert": 50, "comments.list": 1, "comments.insert": 50,
 }
 # videos.update(part=snippet): 요청에 없는 기존 snippet 값은 삭제된다(공식 문서) → 읽은 값을 모두 다시 보낸다.
 SNIPPET_MUTABLE = ("title", "description", "categoryId", "tags", "defaultLanguage")
@@ -50,7 +51,33 @@ CONFIG_MESSAGES = {
     "invalidImage": "썸네일 이미지가 올바르지 않습니다.",
     "mediaBodyTooLarge": "썸네일 파일이 너무 큽니다 (50MB 이하).",
     "userBroadcastsExceedLimit": "YouTube 예약 방송 개수 한도에 도달했습니다. 지난 예약을 정리하세요.",
+    "commentsDisabled": "이 영상은 댓글 사용이 꺼져 있습니다.",
+    "commentNotFound": "YouTube에서 해당 댓글을 찾을 수 없습니다.",
+    "parentCommentNotFound": "답글을 달 댓글을 찾을 수 없습니다 (삭제되었을 수 있음).",
+    "processingFailure": "YouTube가 댓글을 처리하지 못했습니다.",
 }
+
+
+@dataclass(frozen=True)
+class YouTubeComment:
+    """댓글 1개 (top-level 또는 답글). 화면/저장용 값만."""
+    id: str
+    text: str
+    author: str
+    author_channel_id: str
+    published_at: str
+    parent_id: str = ""
+
+
+@dataclass(frozen=True)
+class YouTubeCommentThread:
+    id: str
+    video_id: str
+    top: YouTubeComment
+    total_reply_count: int = 0
+    replies: tuple = ()
+    moderation_status: str = "published"
+    can_reply: bool = True
 
 
 class YouTubeApiError(RuntimeError):
@@ -399,6 +426,51 @@ class YouTubeApiClient:
                           "videoCategories.list")
         return [(str(i.get("id")), str(i.get("snippet", {}).get("title", ""))) for i in d.get("items") or []
                 if i.get("snippet", {}).get("assignable")]
+
+    # ---------- comments (채널 전체 1회 조회 — 영상마다 polling하지 않음) ----------
+    @staticmethod
+    def _comment(item: dict, parent_id: str = "") -> YouTubeComment:
+        sn = item.get("snippet", {}) or {}
+        author = (sn.get("authorChannelId") or {}).get("value", "") if isinstance(sn.get("authorChannelId"), dict) else ""
+        return YouTubeComment(id=str(item.get("id", "")), text=str(sn.get("textOriginal", sn.get("textDisplay", "")) or ""),
+                              author=str(sn.get("authorDisplayName", "")), author_channel_id=str(author),
+                              published_at=str(sn.get("publishedAt", "")), parent_id=str(sn.get("parentId", parent_id)))
+
+    @classmethod
+    def _thread(cls, item: dict) -> YouTubeCommentThread:
+        sn = item.get("snippet", {}) or {}
+        top = cls._comment(sn.get("topLevelComment") or {})
+        replies = tuple(cls._comment(r, top.id) for r in ((item.get("replies") or {}).get("comments") or []))
+        mod = ((sn.get("topLevelComment") or {}).get("snippet") or {}).get("moderationStatus", "published")
+        return YouTubeCommentThread(id=str(item.get("id", "")), video_id=str(sn.get("videoId", "")), top=top,
+                                    total_reply_count=int(sn.get("totalReplyCount", 0) or 0), replies=replies,
+                                    moderation_status=str(mod or "published"), can_reply=bool(sn.get("canReply", True)))
+
+    def list_channel_comment_threads(self, channel_id: str, *, page_token: str = "",
+                                     max_results: int = 50) -> tuple[list[YouTubeCommentThread], str]:
+        """commentThreads.list(allThreadsRelatedToChannelId, order=time) → (스레드, nextPageToken)."""
+        params = {"part": "snippet,replies", "allThreadsRelatedToChannelId": channel_id, "order": "time",
+                  "moderationStatus": "published", "maxResults": str(max(1, min(100, int(max_results)))),
+                  "textFormat": "plainText"}
+        if page_token:
+            params["pageToken"] = page_token
+        d = self._request("GET", "commentThreads", params, None, "commentThreads.list")
+        return [self._thread(i) for i in d.get("items") or []], str(d.get("nextPageToken", "") or "")
+
+    def insert_top_level_comment(self, channel_id: str, video_id: str, text: str) -> YouTubeCommentThread:
+        body = {"snippet": {"channelId": channel_id, "videoId": video_id,
+                            "topLevelComment": {"snippet": {"textOriginal": text}}}}
+        return self._thread(self._request("POST", "commentThreads", {"part": "snippet"}, body, "commentThreads.insert"))
+
+    def insert_comment_reply(self, parent_id: str, text: str) -> YouTubeComment:
+        body = {"snippet": {"parentId": parent_id, "textOriginal": text}}
+        return self._comment(self._request("POST", "comments", {"part": "snippet"}, body, "comments.insert"), parent_id)
+
+    def list_comment_replies(self, parent_id: str, *, max_results: int = 20) -> list[YouTubeComment]:
+        d = self._request("GET", "comments", {"part": "snippet", "parentId": parent_id, "textFormat": "plainText",
+                                              "maxResults": str(max(1, min(100, int(max_results))))},
+                          None, "comments.list")
+        return [self._comment(i, parent_id) for i in d.get("items") or []]
 
     def set_thumbnail(self, video_id: str, image: bytes, mime: str) -> None:
         """thumbnails.set (media upload, 최대 50MB). 이미지 bytes는 로그에 남기지 않는다."""
