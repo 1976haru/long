@@ -227,7 +227,8 @@ def clone_profile(profiles: ProfileStore, templates: UploadTemplateStore, source
                          category_id=source.category_id, privacy=source.privacy, made_for_kids=source.made_for_kids)
     profiles.add(new)
     for tid, tpl in templates.for_profile(source.profile_id):
-        copied = templates.save(new.profile_id, replace(tpl))
+        # 재생목록은 원래 채널 것이므로 복제하지 않는다 (새 채널에서 다시 고름)
+        copied = templates.save(new.profile_id, replace(tpl, default_playlist_id="", default_playlist_title=""))
         if tid == source.default_template_id:
             new.default_template_id = copied
     if new.default_template_id:
@@ -242,6 +243,7 @@ class BatchItem:
     video_path: str
     thumb: ThumbMatch = field(default_factory=ThumbMatch)
     episode: str = ""
+    playlists: list | None = None  # 고급: 이 영상만 다른 재생목록 [(id, title)] (None = 공통 재생목록)
 
     @property
     def name(self) -> str:
@@ -271,6 +273,7 @@ class PlannedUpload:
     made_for_kids: bool = False
     privacy: str = "private"
     first_comment: str = ""  # 공개된 뒤 자동으로 달 첫 댓글 (비어 있으면 없음)
+    playlists: list = field(default_factory=list)  # [(playlist_id, title)]
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -286,6 +289,21 @@ class BatchPlan:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     language: str = ""
+    template_name: str = ""
+
+    @property
+    def playlist_ids(self) -> list[str]:
+        return list(dict.fromkeys(pid for i in self.items for pid, _ in i.playlists))
+
+    @property
+    def playlist_text(self) -> str:
+        """미리보기: '그의 이야기' / '재생목록에 넣지 않음' / '여러 개 (영상마다 다름)'."""
+        sets = {tuple(i.playlists) for i in self.items}
+        if not self.items or sets == {()}:
+            return "재생목록에 넣지 않음"
+        if len(sets) == 1:
+            return ", ".join(t for _, t in next(iter(sets)))
+        return "영상마다 다름 (" + ", ".join(dict.fromkeys(t for i in self.items for _, t in i.playlists)) + ")"
 
     @property
     def all_errors(self) -> list[str]:
@@ -321,11 +339,11 @@ class BatchPlan:
 
 def build_plan(profile: ChannelProfile, items: list[BatchItem], template: MetadataTemplate, *,
                times: list[datetime] | None, privacy_now: str, now: datetime, queued_paths: set[str] = frozenset(),
-               capacity: int = 100) -> BatchPlan:
+               capacity: int = 100, playlists: list | None = None) -> BatchPlan:
     """영상마다 제목/설명/태그를 템플릿으로 만들고 검증. times=None이면 지금 올리기(privacy_now)."""
     zone = get_zone(profile.timezone)
     plan = BatchPlan(profile.profile_id, profile.alias, profile.channel_title, profile.channel_id, profile.timezone, [],
-                     language=profile.language)
+                     language=profile.language, template_name=template.name)
     if not items:
         plan.errors.append("업로드할 영상을 추가하세요.")
     if not profile.channel_id:
@@ -349,7 +367,8 @@ def build_plan(profile: ChannelProfile, items: list[BatchItem], template: Metada
                            f"{local:%Y-%m-%d} ({weekdays[local.weekday()]}) {local:%H:%M}" if when else "지금 올리기",
                            tags=list(tags), category_id=str(template.category_id), language=language or "",
                            made_for_kids=bool(template.made_for_kids),
-                           privacy="private" if when else privacy_now)
+                           privacy="private" if when else privacy_now,
+                           playlists=list(it.playlists if it.playlists is not None else (playlists or [])))
         key = str(Path(it.video_path)).lower()
         if key in seen:
             pu.errors.append("같은 영상이 두 번 들어 있습니다.")

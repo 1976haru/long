@@ -22,10 +22,6 @@ TERMS = {
     "API_REVIEW_REQUIRED": "Google 설정 확인 필요",
     "Resumable upload": "업로드 중",
 }
-OAUTH_FILE_HELP = ("Google 연결 파일은 Google Cloud에서 받은 '데스크톱 앱용 JSON 파일'입니다.\n\n"
-                   "이 프로그램이 내 YouTube 채널에 영상을 올려도 되는지 Google에 물어볼 때 사용합니다. "
-                   "파일 안의 내용은 프로그램 설정에 복사하지 않고, 파일 위치만 기억합니다.\n\n"
-                   "다른 사람과 공유하거나 인터넷에 올리지 마세요.")
 CONNECT_STEPS = ("1. 인터넷 브라우저가 열립니다.", "2. 사용할 Google 계정으로 로그인합니다.",
                  "3. YouTube 채널을 선택합니다.", "4. [허용]을 누릅니다.", "5. 완료되면 이 프로그램으로 돌아옵니다.")
 CONNECTING_TEXT = "브라우저에서 Google 로그인을 완료해 주세요."
@@ -92,6 +88,10 @@ class FriendlyError:
 
 # (검사할 reason/문구, 문제, 해결, 행동)
 _RULES = (
+    (("재생목록 추가 실패",),
+     "업로드는 완료됐지만 재생목록에 넣지 못했습니다.", "영상은 그대로 있습니다. [재생목록만 다시 추가]를 누르세요.", A_RETRY_LATER),
+    (("playlistNotOwned", "재생목록이 현재 YouTube 채널의 것이 아닙니다"),
+     "선택한 재생목록이 현재 YouTube 채널의 것이 아닙니다.", "재생목록을 다시 고르세요 ([새로고침] 후 선택).", A_RESELECT),
     (("insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "INSUFFICIENT_PERMISSION", "다시 승인하세요"),
      "Google 연결 권한이 부족합니다.", "댓글 기능을 사용하려면 이 YouTube 채널을 한 번 다시 연결해야 합니다.", A_RECONNECT),
     (("channelMismatch", "CHANNEL_MISMATCH", "채널 불일치"),

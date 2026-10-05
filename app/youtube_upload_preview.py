@@ -14,7 +14,7 @@ from typing import Callable
 from .cloud_setup_ui import _background
 from .tooling import release_tk_variables
 from .youtube_accounts import ChannelMismatchError
-from .youtube_api import YouTubeApiError
+from .youtube_api import PlaylistOwnerError, YouTubeApiError
 from .youtube_batch import BatchPlan
 from .youtube_oauth import OAuthError
 from .help_ui import channel_kind_label
@@ -89,7 +89,8 @@ class PreviewDialog(tk.Toplevel):
         ttk.Label(root, text=channel_kind_label(plan.language), foreground="gray30").pack(anchor="w")
         first = next((i.publish_at for i in plan.items if i.publish_at), None)
         info = ttk.Frame(root); info.pack(fill="x", pady=(6, 6))
-        rows = [("영상", f"{len(plan.items)}개"),
+        rows = [("템플릿", plan.template_name or "(채널 기본값)"), ("재생목록", plan.playlist_text),
+                ("영상", f"{len(plan.items)}개"),
                 ("첫 예약", friendly_when(first, plan.timezone) if first else "지금 올리기"),
                 ("시간대", plan.timezone), ("썸네일", f"{plan.thumb_count}/{len(plan.items)}"),
                 ("첫 댓글", plan.first_comment_text)]
@@ -131,6 +132,8 @@ class PreviewDialog(tk.Toplevel):
                     return ("verify", "ok", f"{v.title} ✓ (방금 확인)")
                 if isinstance(v, ChannelMismatchError):
                     return ("verify", "mismatch", str(v))
+                if isinstance(v, PlaylistOwnerError):
+                    return ("verify", "playlist", str(v))
                 if isinstance(v, (YouTubeApiError, OAuthError)):
                     return ("verify", "unknown", str(v))
                 return ("verify", "unknown", f"확인 중 오류 ({type(v).__name__})")
@@ -155,7 +158,7 @@ class PreviewDialog(tk.Toplevel):
             lines.append(f"  … 외 {len(warns) - 8}개")
         self.problems.set("\n".join(lines))
         self.lbl_problems.configure(foreground="firebrick" if errs else "black")
-        ok = not errs and self.verify_state not in ("pending", "mismatch")
+        ok = not errs and self.verify_state not in ("pending", "mismatch", "playlist")
         self.btn_add.configure(state="normal" if ok else "disabled")
         self.btn_start.configure(state="normal" if ok else "disabled")
 
@@ -177,6 +180,10 @@ class PreviewDialog(tk.Toplevel):
             fe = friendly_error(message=text, reason="channelMismatch")
             self.extra_errors.append(f"{fe.problem} {fe.action}" + ("" if is_beginner() else f" ({text})"))
             self.btn_reselect.configure(text="▶ 채널 다시 선택")  # 해결 버튼을 눈에 띄게
+        elif state == "playlist":  # 다른 채널의 재생목록 → 추가 불가
+            self.verify_text.set("✗ 재생목록 확인 필요 — 추가할 수 없습니다")
+            self.lbl_verify.configure(foreground="firebrick")
+            self.extra_errors.append(text)
         else:
             self.verify_text.set("지금 확인하지 못했습니다 (업로드 직전에 다시 확인합니다)")
             self.lbl_verify.configure(foreground="darkorange")

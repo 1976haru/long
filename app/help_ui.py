@@ -16,8 +16,9 @@ from .cloud_setup_ui import _background
 from .diagnostics import FAIL, MARKS, OK, WARN, build_report, check_environment, check_settings, manual_path, open_file
 from .tooling import release_tk_variables
 from .ui_text import (
-    ACTION_LABELS, CONNECT_STEPS, CONNECTING_TEXT, OAUTH_FILE_HELP, FriendlyError, mark_first_run_done,
+    ACTION_LABELS, CONNECT_STEPS, CONNECTING_TEXT, FriendlyError, is_beginner, mark_first_run_done,
 )
+from .youtube_client_provider import has_bundled_client
 
 STUDIO_URL = "https://studio.youtube.com/"
 PRESETS = {  # [한국 채널]/[일본 채널] 자동 설정
@@ -163,13 +164,88 @@ def ask_connect_guide(master) -> bool:
     return bool(d.run())
 
 
-def show_oauth_help(master):
-    d = _Dialog(master, "Google 연결 파일이란?")
-    ttk.Label(d, text=OAUTH_FILE_HELP, wraplength=460, justify="left", padding=16).pack()
-    b = ttk.Button(d, text="닫기", command=d.close)
-    b.pack(pady=(0, 12))
-    _keys(d, d.close, d.close)
+def show_oauth_help(master, on_pick: Callable | None = None):
+    """[이 파일이 뭔가요?] → 단순 설명이 아니라 Google 연결 파일 만들기 도우미."""
+    return GoogleConnectionAssistant(master, on_pick=on_pick)
+
+
+def ask_connection_file(master, *, on_have: Callable, on_first: Callable):
+    """[Google 계정 처음 연결하기]: 'Google 연결 파일이 이미 있나요?'"""
+    d = _Dialog(master, "Google 계정 연결")
+    f = ttk.Frame(d, padding=18); f.pack()
+    ttk.Label(f, text="Google 계정 연결", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+    ttk.Label(f, text="Google 연결 파일이 이미 있나요?", font=("Segoe UI", 11)).pack(anchor="w", pady=(6, 12))
+    d.btn_have = ttk.Button(f, text="있어요 - 파일 선택", command=lambda: (d.close("have"), on_have()))
+    d.btn_have.pack(fill="x", ipady=4)
+    d.btn_first = ttk.Button(f, text="처음이에요 - 만드는 방법 보기", command=lambda: (d.close("first"), on_first()))
+    d.btn_first.pack(fill="x", ipady=4, pady=(6, 0))
+    ttk.Label(f, text="잘 모르겠으면 '처음이에요'를 누르세요.", foreground="gray40").pack(anchor="w", pady=(10, 0))
+    _keys(d, None, d.close)
+    d.btn_first.focus_set()
     return d
+
+
+class GoogleConnectionAssistant(tk.Toplevel):
+    """'Google 연결 파일 만들기' — 브라우저 옆에 두고 따라 하는 번호식 안내."""
+
+    def __init__(self, master, *, on_pick: Callable | None = None, open_url: Callable[[str], object] = webbrowser.open):
+        super().__init__(master)
+        self.title("Google 연결 파일 만들기")
+        sh = self.winfo_screenheight()
+        self.geometry(f"640x{max(460, min(680, sh - 120))}")
+        self.minsize(520, 420)
+        self._on_pick = on_pick
+        self._open_url = open_url
+        self.keep_on_top = tk.BooleanVar(value=False)  # 강제하지 않음 — 사용자가 선택
+        self.copied = tk.StringVar()
+        f = ttk.Frame(self, padding=14); f.pack(fill="both", expand=True)
+        ttk.Label(f, text="Google 연결 파일 만들기", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        ttk.Label(f, text=hc.GOOGLE_FILE_INTRO, justify="left", wraplength=590, foreground="gray25").pack(anchor="w", pady=(4, 8))
+        row = ttk.Frame(f); row.pack(fill="x")
+        ttk.Button(row, text="Google Cloud 열기", command=lambda: self._open_url(hc.GOOGLE_CLOUD_URL)).pack(side="left")
+        ttk.Button(row, text="Google 공식 설명 열기", command=lambda: self._open_url(hc.GOOGLE_OFFICIAL_URL)).pack(side="left", padx=6)
+        ttk.Button(row, text="설정 순서 복사", command=self.copy_steps).pack(side="left")
+        ttk.Checkbutton(f, text="브라우저를 보는 동안 안내창을 위에 표시", variable=self.keep_on_top,
+                        command=self._apply_top).pack(anchor="w", pady=(6, 0))
+        body = ttk.Frame(f); body.pack(fill="both", expand=True, pady=(8, 0))
+        self.text = tk.Text(body, wrap="word", height=14, font=("Segoe UI", 10), padx=8, pady=6)
+        sb = ttk.Scrollbar(body, orient="vertical", command=self.text.yview)
+        self.text.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.text.pack(fill="both", expand=True)
+        self.text.insert("1.0", hc.google_steps_text())
+        self.text.configure(state="disabled")
+        bottom = ttk.Frame(f); bottom.pack(fill="x", pady=(8, 0))
+        self.btn_pick = ttk.Button(bottom, text="다운로드한 연결 파일 선택", command=self.pick)
+        if on_pick:
+            self.btn_pick.pack(side="left", ipady=3)
+        ttk.Label(bottom, textvariable=self.copied, foreground="darkgreen").pack(side="left", padx=8)
+        ttk.Button(bottom, text="닫기", command=self.destroy).pack(side="right")
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        _keys(self, None, self.destroy)
+
+    def _apply_top(self):
+        self.attributes("-topmost", bool(self.keep_on_top.get()))
+
+    def copy_steps(self) -> str:
+        text = "Google 연결 파일 만들기\n\n" + hc.google_steps_text()
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.copied.set("✓ 설정 순서를 복사했습니다.")
+        return text
+
+    def pick(self):
+        cb = self._on_pick
+        self.destroy()
+        if cb:
+            cb()
+
+    def destroy(self):
+        if getattr(self, "_destroyed", False):
+            return
+        self._destroyed = True
+        super().destroy()
+        release_tk_variables(self)
 
 
 def ask_exit(master, lines: list[str]) -> bool:
@@ -381,14 +457,25 @@ class SetupWizard(tk.Toplevel):
                   foreground="gray35", justify="left", wraplength=620).pack(anchor="w")
         ttk.Label(box, textvariable=self.alias_msg, foreground="firebrick").pack(anchor="w")
         ttk.Separator(box).pack(fill="x", pady=6)
-        ttk.Label(box, text="Google 연결 파일이 필요합니다.\nGoogle Cloud에서 받은 '데스크톱 앱용 JSON 파일'입니다.",
-                  justify="left").pack(anchor="w")
-        fr = ttk.Frame(box); fr.pack(anchor="w", pady=6)
-        ttk.Button(fr, text=hc.BUTTONS["pick_oauth"], command=self.pick_client_file).pack(side="left")
-        ttk.Button(fr, text=hc.BUTTONS["what_oauth"], command=lambda: show_oauth_help(self)).pack(side="left", padx=6)
-        ttk.Label(box, textvariable=self.client_file, foreground="gray35").pack(anchor="w")
-        self.btn_connect = ttk.Button(box, text=hc.BUTTONS["connect"], command=self.start_connect)
-        self.btn_connect.pack(anchor="w", pady=(6, 0), ipady=3)
+        self.btn_connect = None
+        if has_bundled_client():  # 배포용 기본 연결 정보가 있으면 파일 선택 없이 바로 연결
+            ttk.Label(box, text="이 프로그램에 들어 있는 Google 연결 정보를 사용합니다.").pack(anchor="w")
+        elif is_beginner() and not self.client_file.get():  # 초보자: 파일부터 요구하지 않는다
+            ttk.Label(box, text="Google 계정을 처음 연결하나요? 아래 버튼을 누르면 차근차근 안내합니다.",
+                      justify="left").pack(anchor="w")
+            self.btn_first_connect = ttk.Button(box, text="Google 계정 처음 연결하기", command=self.start_first_connect)
+            self.btn_first_connect.pack(anchor="w", pady=(6, 0), ipady=4)
+        else:
+            ttk.Label(box, text="Google 연결 파일이 필요합니다.\nGoogle Cloud에서 받은 '데스크톱 앱용 JSON 파일'입니다.",
+                      justify="left").pack(anchor="w")
+            fr = ttk.Frame(box); fr.pack(anchor="w", pady=6)
+            ttk.Button(fr, text=hc.BUTTONS["pick_oauth"], command=self.pick_client_file).pack(side="left")
+            ttk.Button(fr, text=hc.BUTTONS["what_oauth"],
+                       command=lambda: show_oauth_help(self, on_pick=self.pick_client_file)).pack(side="left", padx=6)
+            ttk.Label(box, textvariable=self.client_file, foreground="gray35").pack(anchor="w")
+        if has_bundled_client() or self.client_file.get() or not is_beginner():
+            self.btn_connect = ttk.Button(box, text=hc.BUTTONS["connect"], command=self.start_connect)
+            self.btn_connect.pack(anchor="w", pady=(6, 0), ipady=3)
         ttk.Label(box, textvariable=self.connect_msg, font=("Segoe UI", 11, "bold"), wraplength=600).pack(anchor="w", pady=(6, 0))
         ttk.Label(box, textvariable=self.result_text, justify="left").pack(anchor="w")
         if p.channel_id:
@@ -446,6 +533,20 @@ class SetupWizard(tk.Toplevel):
         p = self._pick_file(parent=self, title=hc.BUTTONS["pick_oauth"], filetypes=[("JSON", "*.json"), ("모든 파일", "*.*")])
         if p:
             self.client_file.set(p)
+            if not getattr(self, "_destroyed", False):
+                keep = (self.connect_msg.get(), self.result_text.get())
+                self.render()  # 파일을 고르면 [Google 계정 연결] 버튼이 나온다
+                self.connect_msg.set(keep[0])
+                self.result_text.set(keep[1])
+
+    def start_first_connect(self):
+        """[Google 계정 처음 연결하기] → '파일이 이미 있나요?' → 있으면 선택 / 처음이면 만들기 도우미."""
+        if not self.apply_alias():
+            return None
+        self.file_dialog = ask_connection_file(
+            self, on_have=self.pick_client_file,
+            on_first=lambda: setattr(self, "assistant", GoogleConnectionAssistant(self, on_pick=self.pick_client_file)))
+        return self.file_dialog
 
     def toggle_advanced(self):
         self.show_advanced = not self.show_advanced
@@ -456,11 +557,12 @@ class SetupWizard(tk.Toplevel):
             return
         if not self.apply_alias():
             return
-        from .youtube_oauth import OAuthError, load_client_file
+        from .youtube_client_provider import BUNDLED_MARKER, resolve_client
+        from .youtube_oauth import OAuthError
         from .ui_text import friendly_error
-        path = self.client_file.get().strip()
+        path = self.client_file.get().strip() or (BUNDLED_MARKER if has_bundled_client() else "")
         try:
-            load_client_file(path)
+            resolve_client(path)
         except OAuthError as e:
             fe = friendly_error(e)
             self.connect_msg.set(f"⚠ {fe.problem}")

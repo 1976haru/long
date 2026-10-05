@@ -21,7 +21,8 @@ from .youtube_api import YouTubeApiError
 from .youtube_batch import UploadTemplateStore, clone_profile
 from .youtube_metadata import DEFAULT_CATEGORIES, LANGUAGES, PRIVACY_LABELS, TIMEZONES
 from .youtube_comments import CommentStore
-from .youtube_oauth import COMMENT_SCOPES, OAuthError, load_client_file
+from .youtube_oauth import COMMENT_SCOPES, OAuthError
+from .youtube_client_provider import BUNDLED_MARKER, has_bundled_client, resolve_client
 from .help_content import TOOLTIPS
 from .help_ui import InfoTip, show_oauth_help, show_usage
 from .ui_scroll import ScrollFrame
@@ -128,7 +129,8 @@ class ChannelManagerWindow(tk.Toplevel):
         cf = ttk.Frame(form)
         ttk.Entry(cf, textvariable=self.client_file).pack(side="left", fill="x", expand=True)
         ttk.Button(cf, text="Google 연결 파일 선택", command=self._pick).pack(side="left", padx=(4, 0))
-        ttk.Button(cf, text="이 파일이 뭔가요?", command=lambda: show_oauth_help(self)).pack(side="left", padx=(4, 0))
+        ttk.Button(cf, text="이 파일이 뭔가요?", command=lambda: show_oauth_help(self, on_pick=self._pick)).pack(
+            side="left", padx=(4, 0))
         row(6, "Google 연결 파일", cf)
         stf = ttk.Frame(form)
         ttk.Label(stf, textvariable=self.channel_text, justify="left").pack(side="left")
@@ -337,9 +339,9 @@ class ChannelManagerWindow(tk.Toplevel):
         p = self.save_form()
         if p is None:
             return
-        path = p.client_file
+        path = p.client_file or (BUNDLED_MARKER if has_bundled_client() else "")  # 배포용 기본 연결 정보
         try:
-            load_client_file(path)
+            resolve_client(path)
         except OAuthError as e:
             self._say(f"✗ Google 연결 파일: {e}", "firebrick")
             return

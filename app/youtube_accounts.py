@@ -22,8 +22,9 @@ from .settings import load_settings, update_settings
 from .youtube_api import YouTubeApiClient, YouTubeApiError, YouTubeChannelInfo
 from .youtube_metadata import DEFAULT_CATEGORY_ID, LANGUAGES, PRIVACY_LABELS
 from .youtube_oauth import (
-    YOUTUBE_SCOPE, OAuthClient, OAuthError, OAuthSession, YouTubeAuthStore, authorize, load_client_file, urllib_transport,
+    YOUTUBE_SCOPE, OAuthClient, OAuthError, OAuthSession, YouTubeAuthStore, authorize, urllib_transport,
 )
+from .youtube_client_provider import resolve_client
 from .youtube_schedule import get_zone
 
 SETTINGS_KEY = "channel_profiles"
@@ -193,7 +194,7 @@ def build_profile_api(profile: ChannelProfile, store: YouTubeAuthStore, *, trans
     if not store.has_saved():
         raise OAuthError(f"'{profile.alias}' 채널이 연결되어 있지 않습니다. [채널 관리]에서 Google 계정을 연결하세요.",
                          "invalid_grant")
-    client = client or load_client_file(profile.client_file)
+    client = client or resolve_client(profile.client_file)
     session = ProfileOAuthSession(client, store, transport=transport)
     kw = {"base_url": base_url} if base_url else {}
     return YouTubeApiClient(session, transport=transport, sleep=sleep, **kw)
@@ -216,7 +217,7 @@ def connect_profile(profiles: ProfileStore, profile: ChannelProfile, client_file
     이미 다른 채널로 연결된 프로필에 다른 채널 계정을 연결하면 차단한다 (실수로 채널이 바뀌는 것 방지).
     """
     profile.validate()
-    client = client or load_client_file(client_file)
+    client = client or resolve_client(client_file)
     tok = authorize(client, open_browser=open_browser, transport=transport, timeout=timeout, scope=scope)
     kw = {"base_url": api_base} if api_base else {}
     probe = OAuthSession(client, YouTubeAuthStore(Path("unused"), is_windows=False), transport=transport)

@@ -36,7 +36,8 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
     def s3():
         app.wizard_win.destroy()
         h = app._open_help("trouble")
-        ok("help", h.winfo_exists() and len(h.topics) == 8, h.title())
+        from . import help_content
+        ok("help", h.winfo_exists() and len(h.topics) == len(help_content.TOPICS) >= 10, h.title())
         m = diagnostics.manual_path()
         ok("manual", m is not None and m.is_file() and "Manual version" in m.read_text(encoding="utf-8"), m)
         report = app._diagnostics()

@@ -112,7 +112,9 @@ def _page(title: str, sections: list[tuple[str, str, str]], intro: str = "") -> 
 def quick_start_html() -> str:
     t = hc.topic("quick")
     flow = "STEP 1 채널 선택 → STEP 2 영상 선택 → STEP 3 날짜 선택 → STEP 4 미리보기 → STEP 5 예약 시작"
+    g = hc.topic("google_file")
     return _page("초보자 빠른 시작", [("quick", t.title, t.body), ("flow", "예약 업로드 흐름", flow),
+                                    ("google_file", g.title, g.body),
                                     ("help", "더 알고 싶을 때", f"프로그램 안의 {B('help')}에서 기능별 설명과 문제 해결을 볼 수 있습니다.\n"
                                                                f"각 창 위쪽의 {B('usage')}는 그 창의 사용법만 짧게 보여줍니다.")],
                  intro=f"처음이면 프로그램 메인의 {B('guide')} → {B('setup')}부터 하세요.")
@@ -122,8 +124,10 @@ def manual_html() -> str:
     t = {x.key: x for x in hc.TOPICS}
     sections = [
         ("intro", *EXTRA["intro"]), ("first", *EXTRA["first"]),
-        ("channels", "3. YouTube 채널 연결", t["channels"].body), ("long", "4. 영상 늘리기", t["long"].body),
-        ("upload", "5. 예약 업로드", t["upload"].body), ("batch", *EXTRA["batch"]), ("thumb", *EXTRA["thumb"]),
+        ("channels", "3. YouTube 채널 연결", t["channels"].body),
+        ("google_file", "3-1. Google 연결 파일 만들기", t["google_file"].body), ("long", "4. 영상 늘리기", t["long"].body),
+        ("upload", "5. 예약 업로드", t["upload"].body), ("batch", *EXTRA["batch"]),
+        ("playlists", "6-1. 재생목록 사용하기", t["playlists"].body), ("thumb", *EXTRA["thumb"]),
         ("live", "8. LIVE 방송", t["live"].body), ("live_schedule", *EXTRA["live_schedule"]),
         ("first_comment", *EXTRA["first_comment"]), ("reply", *EXTRA["reply"]), ("exit", *EXTRA["exit"]),
         ("trouble", "13. 오류 해결", t["trouble"].body), ("faq", "14. FAQ", t["faq"].body),
@@ -140,6 +144,7 @@ def trouble_html() -> str:
 
 기술적인 내용(HTTP 번호 등)은 [자세히 보기]를 눌렀을 때만 보입니다."""
     return _page("문제 해결", [("how", "오류 창 읽는 법", errors), ("trouble", t["trouble"].title, t["trouble"].body),
+                              ("google_file", t["google_file"].title, t["google_file"].body),
                               ("faq", t["faq"].title, t["faq"].body)])
 
 

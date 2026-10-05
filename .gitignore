@@ -32,5 +32,6 @@ soak_*.log
 # Google OAuth / YouTube: 절대 커밋 금지
 client_secret*.json
 oauth_client*.json
+bundled_oauth_client.json
 youtube_token*.json
 youtube_token.dat

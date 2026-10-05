@@ -30,7 +30,7 @@ from typing import Callable
 
 from .settings import load_settings, update_settings
 from .youtube_accounts import ChannelMismatchError, ChannelProfile, ProfileStore, build_profile_api, verify_channel
-from .youtube_api import YouTubeApiClient, YouTubeApiError
+from .youtube_api import PlaylistOwnerError, YouTubeApiClient, YouTubeApiError
 from .youtube_metadata import BroadcastMetadata, MetadataError, parse_tags, validate_comment_text, validate_thumbnail
 from .youtube_oauth import OAuthError
 from .youtube_upload import (
@@ -62,7 +62,7 @@ RETRYABLE_STATES = (PAUSED, FAILED, BLOCKED, PARTIAL, API_REVIEW_REQUIRED)
 STATE_LABELS = {
     PENDING: "대기", VERIFYING_CHANNEL: "채널 확인 중", CREATING_SESSION: "업로드 준비", UPLOADING: "업로드 중",
     PROCESSING: "처리 중", APPLYING_THUMBNAIL: "썸네일 적용", VERIFYING_SCHEDULE: "예약 확인", COMPLETE: "예약 완료",
-    PARTIAL: "일부 실패 (썸네일)", PAUSED: "일시 중지", CANCELLED: "취소됨", FAILED: "실패", BLOCKED: "차단 (채널 불일치)",
+    PARTIAL: "일부 실패 (썸네일/재생목록)", PAUSED: "일시 중지", CANCELLED: "취소됨", FAILED: "실패", BLOCKED: "차단 (채널 불일치)",
     API_REVIEW_REQUIRED: "Google 설정 확인 필요",
 }
 _INTERRUPT = (PAUSED, FAILED, BLOCKED)
@@ -142,6 +142,22 @@ class UploadJob:
     error: str = ""
     created_at: float = 0.0
     first_comment: str = ""  # 공개된 뒤 자동으로 달 첫 댓글 (비어 있으면 사용 안 함 · youtube_comments가 처리)
+    playlist_ids: list[str] = field(default_factory=list)  # 이 채널(내 채널)의 재생목록 — 업로드 후 마지막 단계에서 추가
+    playlist_titles: list[str] = field(default_factory=list)
+    playlist_items: dict = field(default_factory=dict)  # playlist_id → 항목 ID('already' 포함). 있으면 다시 추가하지 않음
+
+    @property
+    def playlists_pending(self) -> list[str]:
+        return [p for p in self.playlist_ids if p not in self.playlist_items]
+
+    def playlist_text(self) -> str:
+        if not self.playlist_ids:
+            return "-"
+        done = sum(p in self.playlist_items for p in self.playlist_ids)
+        names = ", ".join(self.playlist_titles) or f"{len(self.playlist_ids)}개"
+        if done == len(self.playlist_ids):
+            return f"재생목록 추가 완료 ({names})"
+        return f"{names} — 업로드 후 추가" if not self.video_id else f"재생목록 추가 대기/실패 ({names})"
 
     def metadata(self) -> BroadcastMetadata:
         return BroadcastMetadata(title=self.title, description=self.description, tags=list(self.tags),
@@ -243,7 +259,8 @@ class UploadQueue:
     def make_job(self, *, profile_id: str, video_path: str, title: str, description: str = "", tags="",
                  thumbnail_path: str = "", category_id: str | None = None, language: str | None = None,
                  made_for_kids: bool | None = None, privacy: str | None = None,
-                 publish_at: datetime | None = None, first_comment: str = "") -> UploadJob:
+                 publish_at: datetime | None = None, first_comment: str = "",
+                 playlists: list[tuple[str, str]] | None = None) -> UploadJob:
         """입력 검증 후 작업 생성 (아직 대기열에 넣지 않음). 프로필 기본값을 빈 칸에 쓴다."""
         profile = self.profiles.get(profile_id)
         if profile is None:
@@ -260,6 +277,7 @@ class UploadQueue:
                                    made_for_kids=profile.made_for_kids if made_for_kids is None else made_for_kids,
                                    default_language=profile.language if language is None else language).validate("영상 제목")
             fc = validate_comment_text(first_comment) if (first_comment or "").strip() else ""
+            pls = list(dict.fromkeys((str(i), str(t)) for i, t in (playlists or []) if i))  # 중복 없이
         except (YouTubeApiError, MetadataError) as e:
             raise QueueError(str(e)) from None
         return UploadJob(job_id=os.urandom(6).hex(), profile_id=profile.profile_id, channel_id=profile.channel_id,
@@ -267,7 +285,8 @@ class UploadQueue:
                          tags=md.tags, thumbnail_path=md.thumbnail_path, category_id=str(md.category_id),
                          language=md.default_language, made_for_kids=md.made_for_kids, privacy=md.privacy_status,
                          publish_at_utc=utc_iso(publish_at) if publish_at else "", timezone=profile.timezone,
-                         file_sig=file_signature(p), created_at=self.clock(), first_comment=fc)
+                         file_sig=file_signature(p), created_at=self.clock(), first_comment=fc,
+                         playlist_ids=[pid for pid, _ in pls], playlist_titles=[t for _, t in pls])
 
     def add(self, job: UploadJob) -> UploadJob:
         with self._lock:
@@ -370,6 +389,8 @@ class UploadQueue:
             api = self.api_factory(profile, self.profiles)
             verify_channel(api, job.channel_id)
             if not job.video_id:
+                for pid in job.playlists_pending:  # 다른 채널 재생목록이면 영상을 올리기 전에 차단
+                    api.ensure_own_playlist(pid, job.channel_id)
                 self._upload(api, job)
             warnings = []
             if job.thumbnail_path and job.thumbnail_done is not True:
@@ -384,9 +405,10 @@ class UploadQueue:
             self._transition(job, VERIFYING_SCHEDULE)
             verify_publish_at(api, job.video_id, publish_at=job.publish_at, privacy=job.privacy,
                               made_for_kids=job.made_for_kids)
+            warnings += self._add_to_playlists(api, job)
             self._transition(job, PARTIAL if warnings else COMPLETE, publish_verified=True, progress=1.0,
                              error="; ".join(warnings))
-        except ChannelMismatchError as e:
+        except (ChannelMismatchError, PlaylistOwnerError) as e:
             self._transition(job, BLOCKED, error=str(e))
         except ApiRestrictedError as e:
             self._transition(job, API_REVIEW_REQUIRED, error=str(e))
@@ -399,6 +421,20 @@ class UploadQueue:
         finally:
             if api is not None:
                 record_api_calls(getattr(api, "calls", []), self.clock)  # 이 프로그램 기준 사용량 (참고용)
+
+    def _add_to_playlists(self, api: YouTubeApiClient, job: UploadJob) -> list[str]:
+        """업로드가 끝난 영상(예약/비공개 포함)을 재생목록에 추가. 실패해도 영상은 지우지 않고 PARTIAL로 남긴다.
+        이미 추가한 재생목록은 건너뛰고, 'videoAlreadyInPlaylist'는 성공으로 본다 (재실행해도 중복 없음)."""
+        warnings = []
+        titles = dict(zip(job.playlist_ids, job.playlist_titles))
+        for pid in job.playlists_pending:
+            try:
+                api.ensure_own_playlist(pid, job.channel_id)  # 추가 직전 소유 확인
+                item = api.add_video_to_playlist(pid, job.video_id)
+                self._update(job, playlist_items={**job.playlist_items, pid: item})
+            except (YouTubeApiError, OAuthError) as e:
+                warnings.append(f"재생목록 추가 실패 ({titles.get(pid, pid)}): {e}")
+        return warnings
 
     def _upload(self, api: YouTubeApiClient, job: UploadJob) -> None:
         validate_video_file(job.video_path)

@@ -12,7 +12,7 @@ footer{margin-top:40px;color:#666;font-size:13px;border-top:1px solid #ddd;paddi
 .btn{background:#1f2a40;border-color:#36507f}.note{background:#2b2616;border-color:#6b5a2a}.flow{background:#1b2a1b;border-color:#355235}}</style></head>
 <body><h1>YouTube Playlist Studio 사용자 매뉴얼</h1>
 <p class="note">5분 만에 예약 업로드하기 — 아래 &#x27;5. 예약 업로드&#x27; 참고</p>
-<nav><a href="#intro">1. 프로그램 소개</a> <a href="#first">2. 처음 실행</a> <a href="#channels">3. YouTube 채널 연결</a> <a href="#long">4. 영상 늘리기</a> <a href="#upload">5. 예약 업로드</a> <a href="#batch">6. 여러 영상 한꺼번에 예약</a> <a href="#thumb">7. 썸네일 자동 연결</a> <a href="#live">8. LIVE 방송</a> <a href="#live_schedule">9. 예약 LIVE</a> <a href="#first_comment">10. 첫 댓글 자동등록</a> <a href="#reply">11. 댓글 자동답글</a> <a href="#exit">12. 안전하게 종료</a> <a href="#trouble">13. 오류 해결</a> <a href="#faq">14. FAQ</a></nav>
+<nav><a href="#intro">1. 프로그램 소개</a> <a href="#first">2. 처음 실행</a> <a href="#channels">3. YouTube 채널 연결</a> <a href="#google_file">3-1. Google 연결 파일 만들기</a> <a href="#long">4. 영상 늘리기</a> <a href="#upload">5. 예약 업로드</a> <a href="#batch">6. 여러 영상 한꺼번에 예약</a> <a href="#playlists">6-1. 재생목록 사용하기</a> <a href="#thumb">7. 썸네일 자동 연결</a> <a href="#live">8. LIVE 방송</a> <a href="#live_schedule">9. 예약 LIVE</a> <a href="#first_comment">10. 첫 댓글 자동등록</a> <a href="#reply">11. 댓글 자동답글</a> <a href="#exit">12. 안전하게 종료</a> <a href="#trouble">13. 오류 해결</a> <a href="#faq">14. FAQ</a></nav>
 <h2 id="intro">1. 프로그램 소개</h2>
 <pre>YouTube Playlist Studio는 세 가지 일을 한 프로그램에서 합니다.
 
@@ -47,6 +47,37 @@ footer{margin-top:40px;color:#666;font-size:13px;border-top:1px solid #ddd;paddi
 • 한국 채널과 일본 채널은 연결 정보가 따로 저장되어 섞이지 않습니다.
 • 비밀번호는 프로그램에 입력하지 않습니다. 로그인은 Google 화면에서만 합니다.
 • Google 앱이 &#x27;테스트&#x27; 상태이면 7일 뒤 연결이 끊길 수 있습니다. 그때는 <span class="btn">Google 계정 연결</span>을 다시 누르세요.</pre>
+<h2 id="google_file">3-1. Google 연결 파일 만들기</h2>
+<pre>이 파일은 YouTube Playlist Studio가 내 YouTube 채널에 업로드할 수 있도록
+Google에게 허락받기 위한 연결 파일입니다.
+Google 비밀번호가 들어 있는 파일은 아닙니다.
+
+하지만 다른 사람에게 보내거나 GitHub 같은 인터넷에 올리지 마세요.
+
+처음 연결할 때 <span class="btn">Google 계정 처음 연결하기</span> → <span class="btn">처음이에요 - 만드는 방법 보기</span>을 누르면 아래 순서가 담긴 도우미 창이 열립니다.
+도우미 창의 <span class="btn">Google Cloud 열기</span>로 브라우저를 열고, 창을 옆에 둔 채 따라 하세요. (<span class="btn">설정 순서 복사</span>로 순서를 복사할 수 있습니다.)
+
+STEP 1. Google Cloud 열기
+Google 계정으로 로그인하고 프로젝트를 하나 만들거나 기존 프로젝트를 선택하세요.
+
+STEP 2. YouTube Data API 사용
+&#x27;API 및 서비스&#x27;에서 YouTube Data API v3를 찾아 [사용] 또는 [Enable]을 누르세요.
+
+STEP 3. Google 앱 설정
+Google Auth Platform(또는 OAuth 동의 화면)에서 앱 이름과 지원 이메일을 정하세요.
+혼자 쓰는 테스트라면 &#x27;Testing&#x27;(테스트) 상태로 둬도 됩니다. 이때는 사용할 Google 계정을 &#x27;Test users&#x27;(테스트 사용자)에 추가해야 할 수 있습니다.
+
+STEP 4. OAuth Client 만들기
+Clients → Create client(클라이언트 만들기) → Application type: Desktop app(데스크톱 앱)
+이름 예: YouTube Playlist Studio → 만들기
+
+STEP 5. JSON 다운로드
+만든 Desktop client의 JSON 파일을 내려받으세요 (보통 &#x27;다운로드&#x27; 폴더에 저장됩니다).
+
+STEP 6. 프로그램으로 돌아오기
+이 프로그램에서 <span class="btn">다운로드한 연결 파일 선택</span>을 누르고 방금 받은 파일을 고르세요.
+
+이미 파일이 있으면 <span class="btn">있어요 - 파일 선택</span>을 누르세요.</pre>
 <h2 id="long">4. 영상 늘리기</h2>
 <pre>여러 곡 영상을 연결해서 1시간·3시간·10시간 같은 긴 영상을 만들 때 사용합니다.
 
@@ -77,6 +108,19 @@ STEP 1 채널 선택 → STEP 2 영상 선택 → STEP 3 날짜 선택 → STEP 
 4. <span class="btn">맞습니다. 예약 업로드 시작</span>을 누르면 대기열에 넣고 바로 업로드를 시작합니다.
 
 예: 영상 10개 · 첫 시작 10월 6일 19:00 · 매일 → 10월 6일 ~ 10월 15일 매일 19:00에 하나씩 공개됩니다.</pre>
+<h2 id="playlists">6-1. 재생목록 사용하기</h2>
+<pre>업로드한 영상을 같은 주제별로 모아두는 YouTube 재생목록입니다.
+선택하지 않아도 업로드는 됩니다.
+
+1. 예약 업로드에서 YouTube 채널을 선택하세요.
+2. &#x27;재생목록&#x27;에서 넣을 재생목록을 선택하세요. 목록이 비어 있으면 <span class="btn">새로고침</span>을 누르세요.
+3. 없으면 <span class="btn">+ 새로 만들기</span>로 만드세요. &#x27;이 템플릿의 기본 재생목록으로 저장&#x27;을 켜 두면 다음부터 자동으로 선택됩니다.
+4. 업로드하면 영상이 자동으로 그 재생목록에 들어갑니다 (예약 영상도 업로드가 끝나면 바로 들어갑니다).
+
+• 재생목록은 그 YouTube 채널의 것만 보여주고, 다른 채널의 재생목록이면 업로드하지 않습니다.
+• 재생목록 추가만 실패하면 영상은 그대로 두고 &#x27;일부 실패&#x27;로 표시합니다. <span class="btn">재생목록만 다시 추가</span>을 누르세요.
+• 같은 영상을 같은 재생목록에 두 번 넣지 않습니다.
+• 넣고 싶지 않으면 &#x27;재생목록에 넣지 않음&#x27;을 고르세요.</pre>
 <h2 id="thumb">7. 썸네일 자동 연결</h2>
 <pre>영상과 같은 이름의 사진을 자동으로 연결합니다.
 
@@ -125,7 +169,10 @@ STEP 1 채널 선택 → STEP 2 영상 선택 → STEP 3 날짜 선택 → STEP 
 • 내 PC LIVE 중에 종료하면 LIVE를 정상 종료한 뒤 닫습니다. 무료 Cloud LIVE는 기본으로 PC만 종료하고 방송은 계속됩니다.
 • 업로드가 끝난 예약 영상은 컴퓨터를 꺼도 YouTube가 정한 시간에 공개합니다.</pre>
 <h2 id="trouble">13. 오류 해결</h2>
-<pre>• FFmpeg를 찾지 못했습니다 → 메인의 [FFmpeg 설정]에서 ffmpeg.exe를 선택하세요 (같은 폴더에 ffprobe.exe 필요).
+<pre>• Google 연결 파일이 없습니다 → <span class="btn">Google 계정 처음 연결하기</span> → <span class="btn">처음이에요 - 만드는 방법 보기</span> (도움말 &#x27;⑦ Google 연결 파일 만들기&#x27;).
+• 선택한 재생목록이 현재 YouTube 채널의 것이 아닙니다 → 재생목록을 다시 고르세요 (<span class="btn">새로고침</span>).
+• 재생목록 추가 실패 → 영상은 그대로 있습니다. <span class="btn">재생목록만 다시 추가</span>을 누르세요.
+• FFmpeg를 찾지 못했습니다 → 메인의 [FFmpeg 설정]에서 ffmpeg.exe를 선택하세요 (같은 폴더에 ffprobe.exe 필요).
 • Google 연결이 끊겼습니다 → <span class="btn">YouTube 채널 관리</span>에서 그 채널의 <span class="btn">Google 계정 연결</span>을 다시 누르세요.
 • Google 연결 권한이 부족합니다 (댓글) → 그 채널을 &#x27;댓글 기능 권한도 함께 요청&#x27;을 켠 채 다시 연결하세요.
 • YouTube 채널이 다릅니다 → 예약 업로드에서 올바른 채널을 고르거나, 그 채널로 다시 연결하세요.

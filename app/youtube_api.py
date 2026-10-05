@@ -33,6 +33,7 @@ QUOTA_COSTS = {
     "videos.list": 1, "videos.update": 50, "thumbnails.set": 50, "liveBroadcasts.update": 50,
     "liveBroadcasts.delete": 50, "videoCategories.list": 1, "videos.insert": 1600,
     "commentThreads.list": 1, "commentThreads.insert": 50, "comments.list": 1, "comments.insert": 50,
+    "playlists.list": 1, "playlists.insert": 50, "playlistItems.insert": 50,
 }
 # videos.update(part=snippet): 요청에 없는 기존 snippet 값은 삭제된다(공식 문서) → 읽은 값을 모두 다시 보낸다.
 SNIPPET_MUTABLE = ("title", "description", "categoryId", "tags", "defaultLanguage")
@@ -56,6 +57,15 @@ CONFIG_MESSAGES = {
     "parentCommentNotFound": "답글을 달 댓글을 찾을 수 없습니다 (삭제되었을 수 있음).",
     "processingFailure": "YouTube가 댓글을 처리하지 못했습니다.",
 }
+
+
+@dataclass(frozen=True)
+class YouTubePlaylist:
+    id: str
+    title: str
+    channel_id: str
+    privacy: str = ""
+    item_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -92,6 +102,15 @@ class YouTubeApiError(RuntimeError):
     @property
     def retryable(self) -> bool:
         return self.kind == "transient"
+
+
+class PlaylistOwnerError(YouTubeApiError):
+    """선택한 재생목록이 지금 연결된 YouTube 채널의 것이 아니다 → 차단 (다시 시도하지 않음)."""
+
+    def __init__(self, title: str = ""):
+        super().__init__("선택한 재생목록이 현재 YouTube 채널의 것이 아닙니다."
+                         + (f" ({title})" if title else "") + " 재생목록을 다시 선택하세요.",
+                         kind="config", reason="playlistNotOwned")
 
 
 @dataclass(frozen=True)
@@ -426,6 +445,62 @@ class YouTubeApiClient:
                           "videoCategories.list")
         return [(str(i.get("id")), str(i.get("snippet", {}).get("title", ""))) for i in d.get("items") or []
                 if i.get("snippet", {}).get("assignable")]
+
+    # ---------- playlists (내 채널 재생목록) ----------
+    @staticmethod
+    def _playlist(item: dict) -> YouTubePlaylist:
+        sn = item.get("snippet", {}) or {}
+        return YouTubePlaylist(id=str(item.get("id", "")), title=str(sn.get("title", "")),
+                               channel_id=str(sn.get("channelId", "")),
+                               privacy=str((item.get("status") or {}).get("privacyStatus", "")),
+                               item_count=int((item.get("contentDetails") or {}).get("itemCount", 0) or 0))
+
+    def list_playlists(self, *, max_pages: int = 5) -> list[YouTubePlaylist]:
+        """playlists.list(mine=true): 이 연결(채널)이 가진 재생목록만. 최대 max_pages × 50개."""
+        out, token = [], ""
+        for _ in range(max_pages):
+            params = {"part": "snippet,status,contentDetails", "mine": "true", "maxResults": "50"}
+            if token:
+                params["pageToken"] = token
+            d = self._request("GET", "playlists", params, None, "playlists.list")
+            out += [self._playlist(i) for i in d.get("items") or []]
+            token = str(d.get("nextPageToken", "") or "")
+            if not token:
+                break
+        return out
+
+    def get_playlist(self, playlist_id: str) -> YouTubePlaylist | None:
+        d = self._request("GET", "playlists", {"part": "snippet,status,contentDetails", "id": playlist_id}, None,
+                          "playlists.list")
+        items = d.get("items") or []
+        return self._playlist(items[0]) if items else None
+
+    def ensure_own_playlist(self, playlist_id: str, channel_id: str) -> YouTubePlaylist:
+        """재생목록이 이 채널 것인지 확인 (아니면 PlaylistOwnerError)."""
+        pl = self.get_playlist(playlist_id)
+        if pl is None or not channel_id or pl.channel_id != channel_id:
+            raise PlaylistOwnerError(pl.title if pl else "")
+        return pl
+
+    def create_playlist(self, title: str, description: str = "", privacy: str = "public") -> YouTubePlaylist:
+        t = (title or "").strip()
+        if not t or len(t) > 150 or "<" in t or ">" in t:
+            raise YouTubeApiError("재생목록 이름을 확인하세요 (1~150자, < > 사용 불가).", kind="config", reason="invalidPlaylistTitle")
+        if privacy not in PRIVACY_VALUES:
+            raise YouTubeApiError("공개 상태가 올바르지 않습니다.", kind="config", reason="invalidPrivacy")
+        body = {"snippet": {"title": t, "description": (description or "")[:5000]}, "status": {"privacyStatus": privacy}}
+        return self._playlist(self._request("POST", "playlists", {"part": "snippet,status"}, body, "playlists.insert"))
+
+    def add_video_to_playlist(self, playlist_id: str, video_id: str) -> str:
+        """playlistItems.insert → 재생목록 항목 ID. 이미 들어 있으면(videoAlreadyInPlaylist) 성공으로 보고 'already'."""
+        body = {"snippet": {"playlistId": playlist_id, "resourceId": {"kind": "youtube#video", "videoId": video_id}}}
+        try:
+            d = self._request("POST", "playlistItems", {"part": "snippet"}, body, "playlistItems.insert")
+        except YouTubeApiError as e:
+            if e.reason == "videoAlreadyInPlaylist":
+                return "already"
+            raise
+        return str(d.get("id", "") or "added")
 
     # ---------- comments (채널 전체 1회 조회 — 영상마다 polling하지 않음) ----------
     @staticmethod

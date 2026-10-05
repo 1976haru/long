@@ -12,7 +12,7 @@ footer{margin-top:40px;color:#666;font-size:13px;border-top:1px solid #ddd;paddi
 .btn{background:#1f2a40;border-color:#36507f}.note{background:#2b2616;border-color:#6b5a2a}.flow{background:#1b2a1b;border-color:#355235}}</style></head>
 <body><h1>초보자 빠른 시작</h1>
 <p class="note">처음이면 프로그램 메인의 <span class="btn">? 처음 사용 가이드</span> → <span class="btn">처음부터 설정하기</span>부터 하세요.</p>
-<nav><a href="#quick">① 5분 빠른 시작</a> <a href="#flow">예약 업로드 흐름</a> <a href="#help">더 알고 싶을 때</a></nav>
+<nav><a href="#quick">① 5분 빠른 시작</a> <a href="#flow">예약 업로드 흐름</a> <a href="#google_file">⑦ Google 연결 파일 만들기</a> <a href="#help">더 알고 싶을 때</a></nav>
 <h2 id="quick">① 5분 빠른 시작</h2>
 <pre>5분 만에 예약 업로드하기
 
@@ -20,6 +20,7 @@ footer{margin-top:40px;color:#666;font-size:13px;border-top:1px solid #ddd;paddi
 
 2. YouTube 채널을 선택하세요.
    처음이면 <span class="btn">YouTube 채널 관리</span> → <span class="btn">＋ 새 채널</span> → <span class="btn">Google 계정 연결</span> 순서로 연결합니다.
+   Google 연결 파일이 없으면 <span class="btn">Google 계정 처음 연결하기</span> → <span class="btn">처음이에요 - 만드는 방법 보기</span>을 누르세요.
 
 3. <span class="btn">폴더 한꺼번에 추가</span>를 누르고 영상이 있는 폴더를 고르세요.
    같은 이름의 사진(001.mp4 ↔ 001.jpg)이 있으면 썸네일로 자동 연결됩니다.
@@ -33,6 +34,37 @@ footer{margin-top:40px;color:#666;font-size:13px;border-top:1px solid #ddd;paddi
 끝. 창을 닫아도 프로그램이 켜져 있는 동안 업로드는 계속됩니다.</pre>
 <h2 id="flow">예약 업로드 흐름</h2>
 <pre>STEP 1 채널 선택 → STEP 2 영상 선택 → STEP 3 날짜 선택 → STEP 4 미리보기 → STEP 5 예약 시작</pre>
+<h2 id="google_file">⑦ Google 연결 파일 만들기</h2>
+<pre>이 파일은 YouTube Playlist Studio가 내 YouTube 채널에 업로드할 수 있도록
+Google에게 허락받기 위한 연결 파일입니다.
+Google 비밀번호가 들어 있는 파일은 아닙니다.
+
+하지만 다른 사람에게 보내거나 GitHub 같은 인터넷에 올리지 마세요.
+
+처음 연결할 때 <span class="btn">Google 계정 처음 연결하기</span> → <span class="btn">처음이에요 - 만드는 방법 보기</span>을 누르면 아래 순서가 담긴 도우미 창이 열립니다.
+도우미 창의 <span class="btn">Google Cloud 열기</span>로 브라우저를 열고, 창을 옆에 둔 채 따라 하세요. (<span class="btn">설정 순서 복사</span>로 순서를 복사할 수 있습니다.)
+
+STEP 1. Google Cloud 열기
+Google 계정으로 로그인하고 프로젝트를 하나 만들거나 기존 프로젝트를 선택하세요.
+
+STEP 2. YouTube Data API 사용
+&#x27;API 및 서비스&#x27;에서 YouTube Data API v3를 찾아 [사용] 또는 [Enable]을 누르세요.
+
+STEP 3. Google 앱 설정
+Google Auth Platform(또는 OAuth 동의 화면)에서 앱 이름과 지원 이메일을 정하세요.
+혼자 쓰는 테스트라면 &#x27;Testing&#x27;(테스트) 상태로 둬도 됩니다. 이때는 사용할 Google 계정을 &#x27;Test users&#x27;(테스트 사용자)에 추가해야 할 수 있습니다.
+
+STEP 4. OAuth Client 만들기
+Clients → Create client(클라이언트 만들기) → Application type: Desktop app(데스크톱 앱)
+이름 예: YouTube Playlist Studio → 만들기
+
+STEP 5. JSON 다운로드
+만든 Desktop client의 JSON 파일을 내려받으세요 (보통 &#x27;다운로드&#x27; 폴더에 저장됩니다).
+
+STEP 6. 프로그램으로 돌아오기
+이 프로그램에서 <span class="btn">다운로드한 연결 파일 선택</span>을 누르고 방금 받은 파일을 고르세요.
+
+이미 파일이 있으면 <span class="btn">있어요 - 파일 선택</span>을 누르세요.</pre>
 <h2 id="help">더 알고 싶을 때</h2>
 <pre>프로그램 안의 <span class="btn">? 도움말</span>에서 기능별 설명과 문제 해결을 볼 수 있습니다.
 각 창 위쪽의 <span class="btn">? 사용법</span>는 그 창의 사용법만 짧게 보여줍니다.</pre>

@@ -23,7 +23,34 @@ BUTTONS = {
     "live_preset": "초보자 추천 설정", "live_schedule": "예약 LIVE", "check_comments": "지금 새 댓글 확인",
     "first_comment": "공개 후 첫 댓글 자동등록", "copy_diag": "진단 정보 복사", "usage": "? 사용법",
     "setup": "처음부터 설정하기", "quick": "5분 빠른 사용법", "later": "나중에 하기",
+    "first_connect": "Google 계정 처음 연결하기", "have_file": "있어요 - 파일 선택",
+    "first_time": "처음이에요 - 만드는 방법 보기", "open_cloud": "Google Cloud 열기",
+    "open_official": "Google 공식 설명 열기", "copy_steps": "설정 순서 복사", "pick_downloaded": "다운로드한 연결 파일 선택",
+    "playlist_new": "+ 새로 만들기", "playlist_refresh": "새로고침", "playlist_none": "재생목록에 넣지 않음",
+    "playlist_retry": "재생목록만 다시 추가", "playlist_multi": "여러 재생목록에 추가",
 }
+
+GOOGLE_CLOUD_URL = "https://console.cloud.google.com/"
+GOOGLE_OFFICIAL_URL = "https://developers.google.com/youtube/v3/guides/auth/installed-apps"
+GOOGLE_FILE_INTRO = ("이 파일은 YouTube Playlist Studio가 내 YouTube 채널에 업로드할 수 있도록\n"
+                     "Google에게 허락받기 위한 연결 파일입니다.\n"
+                     "Google 비밀번호가 들어 있는 파일은 아닙니다.\n\n"
+                     "하지만 다른 사람에게 보내거나 GitHub 같은 인터넷에 올리지 마세요.")
+GOOGLE_FILE_STEPS = (
+    ("Google Cloud 열기", "Google 계정으로 로그인하고 프로젝트를 하나 만들거나 기존 프로젝트를 선택하세요."),
+    ("YouTube Data API 사용", "'API 및 서비스'에서 YouTube Data API v3를 찾아 [사용] 또는 [Enable]을 누르세요."),
+    ("Google 앱 설정", "Google Auth Platform(또는 OAuth 동의 화면)에서 앱 이름과 지원 이메일을 정하세요.\n"
+                     "혼자 쓰는 테스트라면 'Testing'(테스트) 상태로 둬도 됩니다. 이때는 사용할 Google 계정을 "
+                     "'Test users'(테스트 사용자)에 추가해야 할 수 있습니다."),
+    ("OAuth Client 만들기", "Clients → Create client(클라이언트 만들기) → Application type: Desktop app(데스크톱 앱)\n"
+                           "이름 예: YouTube Playlist Studio → 만들기"),
+    ("JSON 다운로드", "만든 Desktop client의 JSON 파일을 내려받으세요 (보통 '다운로드' 폴더에 저장됩니다)."),
+    ("프로그램으로 돌아오기", "이 프로그램에서 [다운로드한 연결 파일 선택]을 누르고 방금 받은 파일을 고르세요."),
+)
+
+
+def google_steps_text() -> str:
+    return "\n\n".join(f"STEP {i}. {t}\n{d}" for i, (t, d) in enumerate(GOOGLE_FILE_STEPS, 1))
 
 
 def B(key: str) -> str:
@@ -45,6 +72,7 @@ QUICK_START = f"""5분 만에 예약 업로드하기
 
 2. YouTube 채널을 선택하세요.
    처음이면 {B('channels')} → {B('new_channel')} → {B('connect')} 순서로 연결합니다.
+   Google 연결 파일이 없으면 {B('first_connect')} → {B('first_time')}을 누르세요.
 
 3. {B('add_folder')}를 누르고 영상이 있는 폴더를 고르세요.
    같은 이름의 사진(001.mp4 ↔ 001.jpg)이 있으면 썸네일로 자동 연결됩니다.
@@ -76,7 +104,8 @@ FEATURE_USAGE = {  # 각 창의 [? 사용법] — 5단계 이하
         "자동답글은 기본으로 꺼져 있습니다 ('검토 후 답글'). 필요할 때만 '자동답글 (안전형)'을 켜세요.",
         "프로그램이 꺼져 있으면 댓글을 달 수 없습니다. 다시 켜면 밀린 작업을 확인합니다."]),
     "channels": ("YouTube 채널 연결 사용법", [
-        f"{B('new_channel')}을 누르고 별칭·언어·시간대를 정하세요.", f"{B('pick_oauth')}으로 Google 연결 파일을 고르세요.",
+        f"{B('new_channel')}을 누르고 별칭·언어·시간대를 정하세요.",
+        f"{B('pick_oauth')}으로 Google 연결 파일을 고르세요. 없으면 {B('what_oauth')} → 만드는 방법을 따라 하세요.",
         f"{B('connect')}을 누르면 브라우저가 열립니다.", "Google 계정으로 로그인하고 YouTube 채널을 고른 뒤 [허용]을 누르세요.",
         "연결된 채널 이름이 화면에 나오면 완료입니다."]),
 }
@@ -90,6 +119,7 @@ TOOLTIPS = {
                    "질문이나 링크가 있는 댓글은 자동으로 답하지 않고 검토 목록에 둡니다."),
     "first_comment": "예약 영상은 공개되기 전에는 댓글을 달 수 없어서, 공개된 뒤 자동으로 첫 댓글을 답니다.",
     "beginner": "초보자 모드에서는 어려운 기술 용어와 고급 설정을 숨깁니다. 끄면 고급 설정이 모두 보입니다.",
+    "playlist": "업로드한 영상을 같은 주제별로 모아두는 YouTube 재생목록입니다.\n선택하지 않아도 업로드는 됩니다.",
 }
 
 CARD_HELP = {
@@ -153,7 +183,28 @@ STEP 1 채널 선택 → STEP 2 영상 선택 → STEP 3 날짜 선택 → STEP 
 • 비밀번호는 프로그램에 입력하지 않습니다. 로그인은 Google 화면에서만 합니다.
 • Google 앱이 '테스트' 상태이면 7일 뒤 연결이 끊길 수 있습니다. 그때는 {B('connect')}을 다시 누르세요.""",
               ("채널", "연결", "Google", "로그인", "JSON", "연결 파일")),
-    HelpTopic("faq", "⑦ 자주 묻는 질문", """Q. 창을 닫으면 업로드가 멈추나요?
+    HelpTopic("google_file", "⑦ Google 연결 파일 만들기", f"""{GOOGLE_FILE_INTRO}
+
+처음 연결할 때 {B('first_connect')} → {B('first_time')}을 누르면 아래 순서가 담긴 도우미 창이 열립니다.
+도우미 창의 {B('open_cloud')}로 브라우저를 열고, 창을 옆에 둔 채 따라 하세요. ({B('copy_steps')}로 순서를 복사할 수 있습니다.)
+
+{google_steps_text()}
+
+이미 파일이 있으면 {B('have_file')}을 누르세요.""",
+              ("Google", "연결 파일", "JSON", "OAuth", "Cloud", "처음", "client")),
+    HelpTopic("playlists", "⑧ 재생목록 사용하기", f"""{TOOLTIPS['playlist']}
+
+1. 예약 업로드에서 YouTube 채널을 선택하세요.
+2. '재생목록'에서 넣을 재생목록을 선택하세요. 목록이 비어 있으면 {B('playlist_refresh')}을 누르세요.
+3. 없으면 {B('playlist_new')}로 만드세요. '이 템플릿의 기본 재생목록으로 저장'을 켜 두면 다음부터 자동으로 선택됩니다.
+4. 업로드하면 영상이 자동으로 그 재생목록에 들어갑니다 (예약 영상도 업로드가 끝나면 바로 들어갑니다).
+
+• 재생목록은 그 YouTube 채널의 것만 보여주고, 다른 채널의 재생목록이면 업로드하지 않습니다.
+• 재생목록 추가만 실패하면 영상은 그대로 두고 '일부 실패'로 표시합니다. {B('playlist_retry')}을 누르세요.
+• 같은 영상을 같은 재생목록에 두 번 넣지 않습니다.
+• 넣고 싶지 않으면 '{BUTTONS['playlist_none']}'을 고르세요.""",
+              ("재생목록", "플레이리스트", "playlist", "시리즈")),
+    HelpTopic("faq", "⑨ 자주 묻는 질문", """Q. 창을 닫으면 업로드가 멈추나요?
 A. 예약 업로드 창을 닫아도 프로그램이 켜져 있으면 계속됩니다. 프로그램 자체를 종료하면 멈추고, 다음에 [▶ 예약 업로드 시작]을 누르면 받은 곳부터 이어서 올립니다.
 
 Q. 컴퓨터를 꺼도 예약 공개가 되나요?
@@ -168,7 +219,10 @@ A. 썸네일 없이도 업로드됩니다. 나중에 YouTube Studio에서 바꿀
 Q. 영상이 비공개로만 올라가요.
 A. 'Google 설정 확인 필요'로 표시됩니다. 검수되지 않은 Google 프로젝트는 비공개로만 올릴 수 있습니다. 같은 영상을 다시 올리지 마세요.""",
               ("질문", "FAQ", "비공개", "끄면", "종료")),
-    HelpTopic("trouble", "⑧ 문제 해결", f"""• FFmpeg를 찾지 못했습니다 → 메인의 [FFmpeg 설정]에서 ffmpeg.exe를 선택하세요 (같은 폴더에 ffprobe.exe 필요).
+    HelpTopic("trouble", "⑩ 문제 해결", f"""• Google 연결 파일이 없습니다 → {B('first_connect')} → {B('first_time')} (도움말 '⑦ Google 연결 파일 만들기').
+• 선택한 재생목록이 현재 YouTube 채널의 것이 아닙니다 → 재생목록을 다시 고르세요 ({B('playlist_refresh')}).
+• 재생목록 추가 실패 → 영상은 그대로 있습니다. {B('playlist_retry')}을 누르세요.
+• FFmpeg를 찾지 못했습니다 → 메인의 [FFmpeg 설정]에서 ffmpeg.exe를 선택하세요 (같은 폴더에 ffprobe.exe 필요).
 • Google 연결이 끊겼습니다 → {B('channels')}에서 그 채널의 {B('connect')}을 다시 누르세요.
 • Google 연결 권한이 부족합니다 (댓글) → 그 채널을 '댓글 기능 권한도 함께 요청'을 켠 채 다시 연결하세요.
 • YouTube 채널이 다릅니다 → 예약 업로드에서 올바른 채널을 고르거나, 그 채널로 다시 연결하세요.

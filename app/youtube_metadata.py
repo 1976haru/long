@@ -259,6 +259,8 @@ class MetadataTemplate:
     series: str = ""  # 예약 업로드 {series}
     first_comment_enabled: bool = False  # 예약 업로드: 공개된 뒤 첫 댓글 자동등록
     first_comment_template: str = ""  # 변수: {title} {channel} {date} {series} {episode} {filename}
+    default_playlist_id: str = ""  # 예약 업로드: 이 템플릿을 고르면 자동 선택할 재생목록 (그 채널의 것)
+    default_playlist_title: str = ""
 
     def validate(self) -> "MetadataTemplate":
         if not (self.name or "").strip():

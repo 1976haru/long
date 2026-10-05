@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import queue
 import tkinter as tk
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
@@ -39,10 +40,11 @@ from .youtube_upload_queue import (
     QueueError, UploadQueue,
 )
 from .youtube_comments import DEFAULT_FIRST_COMMENTS, TASK_LABELS, WAITING_PUBLIC, WAITING_PRIVACY_CHANGE, CommentStore
-from .youtube_usage import usage_text
+from .youtube_usage import record_api_calls, usage_text
 
 SCHEDULE, NOW = "schedule", "now"
 UPLOAD_STEPS = ("채널 선택", "영상 선택", "날짜 선택", "미리보기", "예약 시작")
+NO_PLAYLIST = "(재생목록에 넣지 않음)"
 LAST_PROFILE_KEY, LAST_TIME_KEY = "upload_last_profile", "upload_last_time"
 
 
@@ -123,6 +125,15 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self.privacy_now = tk.StringVar(value=_label(PRIVACY_LABELS, "private"))
         self.first_comment_on = tk.BooleanVar(value=False)
         self.first_comment_preset = tk.StringVar()
+        self.playlist_choice = tk.StringVar()
+        self.playlist_msg = tk.StringVar()
+        self.selected_playlist: tuple[str, str] | None = None  # (id, 제목) — 이 채널 것
+        self.extra_playlists: list[tuple[str, str]] = []  # 고급: 추가 재생목록
+        self._playlists: dict[str, list] = {}  # profile_id → [YouTubePlaylist] (불러온 목록)
+        self._pl_options: list[tuple[str, str]] = [("", NO_PLAYLIST)]
+        self._pl_q: queue.Queue = queue.Queue()
+        self._pl_worker = None
+        self.new_pl_win = None
         self.progress_head = tk.StringVar()
         self.progress_text = tk.StringVar()
         self.run_ids: list[str] = []  # 이번 [▶ 예약 업로드 시작]으로 올리는 작업
@@ -176,6 +187,18 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self.cb_template.pack(side="right")
         self.cb_template.bind("<<ComboboxSelected>>", lambda e: self._on_template())
         ttk.Label(f1, text="템플릿").pack(side="right", padx=(0, 4))
+        # 재생목록 (선택 사항) — 그 채널이 가진 재생목록만
+        pr = ttk.Frame(root); pr.pack(fill="x", pady=(4, 0))
+        ttk.Label(pr, text="재생목록").pack(side="left", padx=(8, 4))
+        self.cb_playlist = ttk.Combobox(pr, textvariable=self.playlist_choice, state="readonly", width=34,
+                                        postcommand=self._ensure_playlists)
+        self.cb_playlist.pack(side="left")
+        self.cb_playlist.bind("<<ComboboxSelected>>", lambda e: self._on_playlist())
+        InfoTip(pr, TOOLTIPS["playlist"]).pack(side="left", padx=(2, 6))
+        ttk.Button(pr, text="새로고침", command=self.refresh_playlists).pack(side="left")
+        ttk.Button(pr, text="+ 새로 만들기", command=self.new_playlist).pack(side="left", padx=4)
+        self.btn_multi_pl = ttk.Button(pr, text="여러 재생목록에 추가", command=self.pick_extra_playlists)
+        ttk.Label(pr, textvariable=self.playlist_msg, foreground="gray35").pack(side="left", padx=6)
 
         # ② 영상
         f2 = ttk.LabelFrame(root, text="② 영상", padding=8); f2.pack(fill="x", pady=(8, 0))
@@ -195,6 +218,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self.items_tree.pack(fill="x", pady=(4, 0))
         ir = ttk.Frame(f2); ir.pack(fill="x", pady=(4, 0))
         ttk.Button(ir, text="썸네일 직접 지정", command=self.pick_item_thumbnail).pack(side="left")
+        self.btn_item_pl = ttk.Button(ir, text="선택 영상만 이 재생목록으로", command=self.assign_item_playlist)
         ttk.Label(ir, text="회차").pack(side="left", padx=(12, 2))
         ttk.Entry(ir, textvariable=self.episode_var, width=6).pack(side="left")
         ttk.Button(ir, text="선택 영상에 회차 지정 (여러 개면 1씩 증가)", command=self.assign_episode).pack(side="left", padx=4)
@@ -326,6 +350,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         ttk.Button(tb, text="▲", width=3, command=lambda: self._move(-1)).pack(side="left")
         ttk.Button(tb, text="▼", width=3, command=lambda: self._move(1)).pack(side="left", padx=(2, 8))
         ttk.Button(tb, text="다시 시도", command=self.retry_selected).pack(side="left")
+        ttk.Button(tb, text="재생목록만 다시 추가", command=self.retry_selected).pack(side="left", padx=(4, 0))
         ttk.Button(tb, text="취소", command=self.cancel_selected).pack(side="left", padx=4)
         ttk.Button(tb, text="삭제", command=self.remove_selected).pack(side="left")
         ttk.Button(tb, text="완료만 정리", command=self.clear_done).pack(side="right")
@@ -364,6 +389,11 @@ class MultiChannelUploadWindow(tk.Toplevel):
                 self.lbl_usage.pack(anchor="w")
             show_adv = True
             self.btn_adv.grid_remove()
+        for b, side in ((self.btn_multi_pl, "left"), (self.btn_item_pl, "left")):  # 고급: 여러 재생목록 / 영상별
+            if self.beginner:
+                b.pack_forget()
+            elif not b.winfo_manager():
+                b.pack(side=side, padx=4)
         for w in self.adv_row:
             w.grid() if show_adv else w.grid_remove()
 
@@ -499,6 +529,10 @@ class MultiChannelUploadWindow(tk.Toplevel):
             self.thumb_strategy.set(THUMB_STRATEGY[THUMB_FIXED]); self.thumb_source.set(t.thumbnail_paths[0])
         else:
             self.thumb_strategy.set(THUMB_STRATEGY[THUMB_NONE]); self.thumb_source.set("")
+        # 재생목록: 템플릿 기본값으로 (채널을 바꾸면 이전 채널의 재생목록은 남기지 않는다)
+        self.selected_playlist = (t.default_playlist_id, t.default_playlist_title) if t.default_playlist_id else None
+        self.extra_playlists = []
+        self._set_playlist_options()
         self.first_comment_on.set(bool(t.first_comment_enabled))
         self.txt_first_comment.delete("1.0", "end")
         self.txt_first_comment.insert("1.0", t.first_comment_template or "")
@@ -521,6 +555,155 @@ class MultiChannelUploadWindow(tk.Toplevel):
             self.txt_first_comment.insert("1.0", presets[values.index(v)])
             self.first_comment_on.set(True)
 
+    # ================= 재생목록 =================
+    def current_playlists(self) -> list[tuple[str, str]]:
+        out = ([self.selected_playlist] if self.selected_playlist else []) + list(self.extra_playlists)
+        return list(dict.fromkeys(out))
+
+    def _set_playlist_options(self) -> None:
+        p = self.selected_profile()
+        loaded = self._playlists.get(p.profile_id, []) if p else []
+        self._pl_options = [("", NO_PLAYLIST)] + [(x.id, x.title) for x in loaded]
+        if self.selected_playlist and self.selected_playlist[0] not in {i for i, _ in self._pl_options}:
+            self._pl_options.append(self.selected_playlist)  # 템플릿 기본값 (아직 목록을 안 불러옴)
+        self.cb_playlist.configure(values=[t for _, t in self._pl_options])
+        self.playlist_choice.set(self.selected_playlist[1] if self.selected_playlist else NO_PLAYLIST)
+
+    def _on_playlist(self) -> None:
+        values = list(self.cb_playlist.cget("values") or ())
+        v = self.playlist_choice.get()
+        i = values.index(v) if v in values else 0
+        pid, title = self._pl_options[i] if i < len(self._pl_options) else ("", NO_PLAYLIST)
+        self.selected_playlist = (pid, title) if pid else None
+
+    def _ensure_playlists(self) -> None:
+        """재생목록 칸을 처음 열 때 그 채널 목록을 한 번 불러온다."""
+        p = self.selected_profile()
+        if p is not None and p.profile_id not in self._playlists and not self._pl_busy:
+            self.refresh_playlists()
+
+    @property
+    def _pl_busy(self) -> bool:
+        return bool(self._pl_worker and self._pl_worker.is_alive())
+
+    def refresh_playlists(self):
+        """[새로고침]: 이 채널(실제 채널 확인 후)의 재생목록만 불러온다."""
+        p = self.selected_profile()
+        if p is None or not p.channel_id or self._pl_busy:
+            if p is not None and not p.channel_id:
+                self.playlist_msg.set("채널을 먼저 연결하세요.")
+            return None
+        q, profiles, pid = self.q, self.profiles, p.profile_id
+
+        def work():
+            api = q.api_factory(p, profiles)
+            verify_channel(api, p.channel_id)
+            try:
+                return api.list_playlists()
+            finally:
+                record_api_calls(api.calls, self._clock)
+        self.playlist_msg.set("재생목록 불러오는 중…")
+        self._pl_worker = help_ui._background("playlists-load", self._pl_q, work,
+                                              lambda ok, v: ("loaded", pid, ok, v))
+        return self._pl_worker
+
+    def new_playlist(self):
+        """[+ 새로 만들기] 작은 창."""
+        p = self.selected_profile()
+        if p is None or not p.channel_id:
+            messagebox.showinfo("재생목록", "YouTube 채널을 먼저 선택·연결하세요.", parent=self)
+            return None
+        self.new_pl_win = NewPlaylistDialog(self, on_create=self.create_playlist)
+        return self.new_pl_win
+
+    def create_playlist(self, title: str, description: str, privacy: str, save_default: bool):
+        p = self.selected_profile()
+        if p is None or self._pl_busy:
+            return None
+        q, profiles, pid = self.q, self.profiles, p.profile_id
+
+        def work():
+            api = q.api_factory(p, profiles)
+            verify_channel(api, p.channel_id)  # 만들기 전에도 실제 채널 확인
+            try:
+                return api.create_playlist(title, description, privacy)
+            finally:
+                record_api_calls(api.calls, self._clock)
+        self.playlist_msg.set("재생목록 만드는 중…")
+        self._pl_worker = help_ui._background("playlist-create", self._pl_q, work,
+                                              lambda ok, v: ("created", pid, ok, v, save_default))
+        return self._pl_worker
+
+    def _pump_playlists(self) -> None:
+        try:
+            while True:
+                ev = self._pl_q.get_nowait()
+                self._pl_worker = None
+                kind, pid, ok, v = ev[:4]
+                cur = self.selected_profile()
+                if not ok:
+                    fe = friendly_error(v)
+                    self.playlist_msg.set(f"⚠ {fe.problem}")
+                    continue
+                if cur is None or cur.profile_id != pid:
+                    continue  # 그 사이 채널을 바꿨으면 버린다 (다른 채널 재생목록 섞임 방지)
+                if kind == "loaded":
+                    self._playlists[pid] = list(v)
+                    self.playlist_msg.set(f"재생목록 {len(v)}개")
+                else:
+                    self._playlists.setdefault(pid, []).append(v)
+                    self.selected_playlist = (v.id, v.title)
+                    self.playlist_msg.set(f"✓ '{v.title}' 재생목록을 만들었습니다")
+                    if ev[4]:
+                        self._save_default_playlist()
+                self._set_playlist_options()
+        except queue.Empty:
+            pass
+
+    def _save_default_playlist(self) -> None:
+        """'이 템플릿의 기본 재생목록으로 저장' — 템플릿이 있으면 바로 저장, 없으면 지금 설정에만."""
+        p = self.selected_profile()
+        if p is None or not self.template_id:
+            self.summary.set("재생목록을 선택했습니다. [템플릿으로 저장]하면 다음부터 자동으로 선택됩니다.")
+            return
+        got = self.templates.get(self.template_id)
+        if got and got[0] == p.profile_id:
+            t = got[1]
+            t.default_playlist_id, t.default_playlist_title = self.selected_playlist
+            self.templates.save(p.profile_id, t, self.template_id)
+
+    def pick_extra_playlists(self):
+        """고급: [여러 재생목록에 추가] — 추가로 넣을 재생목록 고르기."""
+        p = self.selected_profile()
+        loaded = self._playlists.get(p.profile_id, []) if p else []
+        if not loaded:
+            self.refresh_playlists()
+            self.playlist_msg.set("재생목록을 불러온 뒤 다시 누르세요.")
+            return None
+        d = tk.Toplevel(self)
+        d.title("여러 재생목록에 추가")
+        d.transient(self)
+        lb = tk.Listbox(d, selectmode="multiple", width=40, height=min(12, len(loaded)), exportselection=False)
+        for i, x in enumerate(loaded):
+            lb.insert("end", x.title)
+            if (x.id, x.title) in self.extra_playlists:
+                lb.selection_set(i)
+        lb.pack(padx=10, pady=10)
+
+        def ok():
+            self.extra_playlists = [(loaded[i].id, loaded[i].title) for i in lb.curselection()]
+            self.playlist_msg.set(f"추가 재생목록 {len(self.extra_playlists)}개")
+            d.destroy()
+        ttk.Button(d, text="확인", command=ok).pack(pady=(0, 10))
+        d.lb, d.ok = lb, ok
+        return d
+
+    def assign_item_playlist(self):
+        """고급: 선택한 영상만 지금 고른 재생목록으로 (나머지는 공통 재생목록)."""
+        for idx in self._selected_items():
+            self.items[idx].playlists = self.current_playlists()
+        self._refresh_items()
+
     def form_template(self) -> MetadataTemplate:
         src = self.thumb_source.get().strip().strip('"')
         strategy = next((k for k, v in THUMB_STRATEGY.items() if v == self.thumb_strategy.get()), THUMB_NONE)
@@ -533,6 +716,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
             category_id=_key(DEFAULT_CATEGORIES, self.category.get()), privacy_status=_key(PRIVACY_LABELS, self.privacy_now.get()),
             made_for_kids=bool(self.made_for_kids.get()), default_language=_key(LANGUAGES, self.language.get()),
             series=self.series.get().strip(), first_comment_enabled=bool(self.first_comment_on.get()),
+            default_playlist_id=self.selected_playlist[0] if self.selected_playlist else "",
+            default_playlist_title=self.selected_playlist[1] if self.selected_playlist else "",
             first_comment_template=self.txt_first_comment.get("1.0", "end").strip())
 
     def save_template(self):
@@ -727,6 +912,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         queued = {str(Path(j.video_path)).lower() for j in snap if j.status != CANCELLED}
         now = datetime.fromtimestamp(self._clock(), timezone.utc)
         return build_plan(p, self.items, tpl, times=times, privacy_now=_key(PRIVACY_LABELS, self.privacy_now.get()),
+                          playlists=self.current_playlists(),
                           now=now, queued_paths=queued, capacity=MAX_JOBS - len(snap))
 
     def preview(self):
@@ -739,7 +925,14 @@ class MultiChannelUploadWindow(tk.Toplevel):
         verify = None
         if p is not None and p.channel_id:
             q, profiles, expected = self.q, self.profiles, p.channel_id
-            verify = lambda: verify_channel(q.api_factory(p, profiles), expected)  # noqa: E731
+            pids = plan.playlist_ids
+
+            def verify():  # 실제 채널 + 고른 재생목록이 그 채널 것인지
+                api = q.api_factory(p, profiles)
+                ch = verify_channel(api, expected)
+                for pid in pids:
+                    api.ensure_own_playlist(pid, expected)
+                return ch
         if self.preview_win is not None:
             try:
                 self.preview_win.destroy()
@@ -773,7 +966,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
             jobs = [self.q.make_job(profile_id=plan.profile_id, video_path=it.video_path, title=it.title,
                                     description=it.description, tags=it.tags, thumbnail_path=it.thumbnail_path,
                                     category_id=it.category_id, language=it.language, made_for_kids=it.made_for_kids,
-                                    privacy=it.privacy, publish_at=it.publish_at, first_comment=it.first_comment)
+                                    privacy=it.privacy, publish_at=it.publish_at, first_comment=it.first_comment,
+                                    playlists=it.playlists)
                     for it in plan.items]
             if any(j.channel_id != plan.channel_id for j in jobs):
                 raise QueueError("미리보기 뒤 채널 연결이 바뀌었습니다. 다시 미리보기 하세요.")
@@ -940,6 +1134,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
             parts.append(f"YouTube video ID {j.video_id}")
         if j.first_comment:
             parts.append("첫 댓글: " + self.first_comment_label(j, self._comment_store().task(j.job_id)))
+        if j.playlist_ids:
+            parts.append(j.playlist_text())
         if j.error:
             if self.beginner:  # 기술 내용 대신 '문제 → 해결'
                 fe = friendly_error(message=j.error)
@@ -992,6 +1188,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         except Exception:
             pass
         try:
+            self._pump_playlists()
             if changed or self.q.running != (str(self.btn_stop.cget("state")) == "normal"):
                 self.refresh_jobs()
         except tk.TclError:
@@ -1007,11 +1204,62 @@ class MultiChannelUploadWindow(tk.Toplevel):
         if getattr(self, "_destroyed", False):
             return
         self._destroyed = True
-        for w in (self.channel_win, self.preview_win, self.comment_win):
+        for w in (self.channel_win, self.preview_win, self.comment_win, self.new_pl_win):
             if w is not None:
                 try:
                     w.destroy()
                 except tk.TclError:
                     pass
+        super().destroy()
+        release_tk_variables(self)
+
+
+class NewPlaylistDialog(tk.Toplevel):
+    """[+ 새로 만들기]: 재생목록 이름 · 설명 · 공개 상태 · '이 템플릿의 기본 재생목록으로 저장'."""
+
+    def __init__(self, master, *, on_create: Callable):
+        super().__init__(master)
+        self.title("새 재생목록 만들기")
+        self.transient(master)
+        self.resizable(False, False)
+        self._on_create = on_create
+        self.name = tk.StringVar()
+        self.privacy = tk.StringVar(value=PRIVACY_LABELS["public"])
+        self.save_default = tk.BooleanVar(value=True)
+        self.msg = tk.StringVar()
+        f = ttk.Frame(self, padding=16); f.pack()
+        ttk.Label(f, text="재생목록 이름").grid(row=0, column=0, sticky="w")
+        e = ttk.Entry(f, textvariable=self.name, width=40)
+        e.grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(f, text="설명").grid(row=1, column=0, sticky="nw")
+        self.txt = tk.Text(f, height=3, width=40, wrap="word")
+        self.txt.grid(row=1, column=1, sticky="ew", pady=2)
+        ttk.Label(f, text="공개 상태").grid(row=2, column=0, sticky="w")
+        ttk.Combobox(f, textvariable=self.privacy, state="readonly", width=12,
+                     values=list(PRIVACY_LABELS.values())).grid(row=2, column=1, sticky="w", pady=2)
+        ttk.Checkbutton(f, text="이 템플릿의 기본 재생목록으로 저장", variable=self.save_default).grid(
+            row=3, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(f, textvariable=self.msg, foreground="firebrick").grid(row=4, column=1, sticky="w")
+        row = ttk.Frame(f); row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(row, text="만들기", command=self.create).pack(side="left")
+        ttk.Button(row, text="취소", command=self.destroy).pack(side="right")
+        self.bind("<Return>", lambda ev: self.create())
+        self.bind("<Escape>", lambda ev: self.destroy())
+        e.focus_set()
+
+    def create(self):
+        title = self.name.get().strip()
+        if not title:
+            self.msg.set("재생목록 이름을 입력하세요.")
+            return None
+        privacy = next((k for k, v in PRIVACY_LABELS.items() if v == self.privacy.get()), "public")
+        args = (title, self.txt.get("1.0", "end").strip(), privacy, bool(self.save_default.get()))
+        self.destroy()
+        return self._on_create(*args)
+
+    def destroy(self):
+        if getattr(self, "_destroyed", False):
+            return
+        self._destroyed = True
         super().destroy()
         release_tk_variables(self)

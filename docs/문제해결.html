@@ -12,7 +12,7 @@ footer{margin-top:40px;color:#666;font-size:13px;border-top:1px solid #ddd;paddi
 .btn{background:#1f2a40;border-color:#36507f}.note{background:#2b2616;border-color:#6b5a2a}.flow{background:#1b2a1b;border-color:#355235}}</style></head>
 <body><h1>문제 해결</h1>
 
-<nav><a href="#how">오류 창 읽는 법</a> <a href="#trouble">⑧ 문제 해결</a> <a href="#faq">⑦ 자주 묻는 질문</a></nav>
+<nav><a href="#how">오류 창 읽는 법</a> <a href="#trouble">⑩ 문제 해결</a> <a href="#google_file">⑦ Google 연결 파일 만들기</a> <a href="#faq">⑨ 자주 묻는 질문</a></nav>
 <h2 id="how">오류 창 읽는 법</h2>
 <pre>오류 창은 항상 두 부분으로 나옵니다.
 
@@ -20,8 +20,11 @@ footer{margin-top:40px;color:#666;font-size:13px;border-top:1px solid #ddd;paddi
   무엇을 하면 되나요?    예: 예약 업로드에서 올바른 채널을 다시 선택하세요.  <span class="btn">채널 다시 선택</span>
 
 기술적인 내용(HTTP 번호 등)은 [자세히 보기]를 눌렀을 때만 보입니다.</pre>
-<h2 id="trouble">⑧ 문제 해결</h2>
-<pre>• FFmpeg를 찾지 못했습니다 → 메인의 [FFmpeg 설정]에서 ffmpeg.exe를 선택하세요 (같은 폴더에 ffprobe.exe 필요).
+<h2 id="trouble">⑩ 문제 해결</h2>
+<pre>• Google 연결 파일이 없습니다 → <span class="btn">Google 계정 처음 연결하기</span> → <span class="btn">처음이에요 - 만드는 방법 보기</span> (도움말 &#x27;⑦ Google 연결 파일 만들기&#x27;).
+• 선택한 재생목록이 현재 YouTube 채널의 것이 아닙니다 → 재생목록을 다시 고르세요 (<span class="btn">새로고침</span>).
+• 재생목록 추가 실패 → 영상은 그대로 있습니다. <span class="btn">재생목록만 다시 추가</span>을 누르세요.
+• FFmpeg를 찾지 못했습니다 → 메인의 [FFmpeg 설정]에서 ffmpeg.exe를 선택하세요 (같은 폴더에 ffprobe.exe 필요).
 • Google 연결이 끊겼습니다 → <span class="btn">YouTube 채널 관리</span>에서 그 채널의 <span class="btn">Google 계정 연결</span>을 다시 누르세요.
 • Google 연결 권한이 부족합니다 (댓글) → 그 채널을 &#x27;댓글 기능 권한도 함께 요청&#x27;을 켠 채 다시 연결하세요.
 • YouTube 채널이 다릅니다 → 예약 업로드에서 올바른 채널을 고르거나, 그 채널로 다시 연결하세요.
@@ -29,7 +32,38 @@ footer{margin-top:40px;color:#666;font-size:13px;border-top:1px solid #ddd;paddi
 • 오늘 사용량 한도 → 내일 다시 시도하세요. 작업은 그대로 남아 있습니다.
 • 어디가 문제인지 모르겠으면 메인의 <span class="btn">⚙ 설정 점검</span>을 누르세요.
 • 도움을 요청할 때는 <span class="btn">진단 정보 복사</span>를 눌러 복사한 내용을 붙여넣으세요 (비밀값은 들어가지 않습니다).</pre>
-<h2 id="faq">⑦ 자주 묻는 질문</h2>
+<h2 id="google_file">⑦ Google 연결 파일 만들기</h2>
+<pre>이 파일은 YouTube Playlist Studio가 내 YouTube 채널에 업로드할 수 있도록
+Google에게 허락받기 위한 연결 파일입니다.
+Google 비밀번호가 들어 있는 파일은 아닙니다.
+
+하지만 다른 사람에게 보내거나 GitHub 같은 인터넷에 올리지 마세요.
+
+처음 연결할 때 <span class="btn">Google 계정 처음 연결하기</span> → <span class="btn">처음이에요 - 만드는 방법 보기</span>을 누르면 아래 순서가 담긴 도우미 창이 열립니다.
+도우미 창의 <span class="btn">Google Cloud 열기</span>로 브라우저를 열고, 창을 옆에 둔 채 따라 하세요. (<span class="btn">설정 순서 복사</span>로 순서를 복사할 수 있습니다.)
+
+STEP 1. Google Cloud 열기
+Google 계정으로 로그인하고 프로젝트를 하나 만들거나 기존 프로젝트를 선택하세요.
+
+STEP 2. YouTube Data API 사용
+&#x27;API 및 서비스&#x27;에서 YouTube Data API v3를 찾아 [사용] 또는 [Enable]을 누르세요.
+
+STEP 3. Google 앱 설정
+Google Auth Platform(또는 OAuth 동의 화면)에서 앱 이름과 지원 이메일을 정하세요.
+혼자 쓰는 테스트라면 &#x27;Testing&#x27;(테스트) 상태로 둬도 됩니다. 이때는 사용할 Google 계정을 &#x27;Test users&#x27;(테스트 사용자)에 추가해야 할 수 있습니다.
+
+STEP 4. OAuth Client 만들기
+Clients → Create client(클라이언트 만들기) → Application type: Desktop app(데스크톱 앱)
+이름 예: YouTube Playlist Studio → 만들기
+
+STEP 5. JSON 다운로드
+만든 Desktop client의 JSON 파일을 내려받으세요 (보통 &#x27;다운로드&#x27; 폴더에 저장됩니다).
+
+STEP 6. 프로그램으로 돌아오기
+이 프로그램에서 <span class="btn">다운로드한 연결 파일 선택</span>을 누르고 방금 받은 파일을 고르세요.
+
+이미 파일이 있으면 <span class="btn">있어요 - 파일 선택</span>을 누르세요.</pre>
+<h2 id="faq">⑨ 자주 묻는 질문</h2>
 <pre>Q. 창을 닫으면 업로드가 멈추나요?
 A. 예약 업로드 창을 닫아도 프로그램이 켜져 있으면 계속됩니다. 프로그램 자체를 종료하면 멈추고, 다음에 <span class="btn">▶ 예약 업로드 시작</span>을 누르면 받은 곳부터 이어서 올립니다.
 

@@ -138,9 +138,11 @@ def test_setup_wizard_four_steps_kr_preset_and_connect(root, tmp_path, quiet):
     p = w.choose_preset("kr")
     assert (p.alias, p.language, p.timezone) == ("내 한국 채널", "ko", "Asia/Seoul")
     body = texts(w.body)
-    assert "Google 연결 파일 선택" in body and "이 파일이 뭔가요?" in body
+    assert "Google 계정 처음 연결하기" in body and "Google 연결 파일 선택" not in body  # 초보자: 파일부터 요구하지 않음
+    assert w.btn_connect is None
     assert not any("OAuth" in x or "client_secret" in x or "scope" in x for x in body)  # 첫 화면에 기술 용어 없음
     w.pick_client_file()
+    assert w.btn_connect is not None and str(w.btn_connect.cget("text")) == "Google 계정 연결"
     w.start_connect()
     assert pump(root, lambda: w.connect_msg.get() == "✓ 연결 완료")
     assert "실제 YouTube 채널: 한국 시니어" in w.result_text.get() and "시간대: Asia/Seoul" in w.result_text.get()
@@ -467,7 +469,8 @@ def _walk(w):
 def test_help_center_navigation_search_and_version(root):
     from app.help_ui import HelpWindow
     w = HelpWindow(root, topic="quick", diagnostics=lambda: "diag ya29.SECRETTOKEN")
-    assert [t.key for t in w.topics] == [t.key for t in hc.TOPICS] and len(w.topics) == 8
+    assert [t.key for t in w.topics] == [t.key for t in hc.TOPICS] and len(w.topics) == 10
+    assert {"google_file", "playlists"} <= {t.key for t in w.topics}
     assert "5분 만에 예약 업로드하기" in w.text.get("1.0", "end")
     assert any("Manual version v1.3" in x for x in texts(w))
     for q, key in (("썸네일", "upload"), ("FFmpeg", "trouble"), ("댓글", "comments"), ("채널 연결", "channels")):

@@ -40,6 +40,8 @@ class FakeYouTube:
         self.threads: dict[str, dict] = {}
         self.comments_disabled: set[str] = set()
         self.comment_clock = None  # callable → epoch (없으면 time.time)
+        # 재생목록: id → {"id", "title", "channel", "privacy", "items": [video_id]}
+        self.playlists: dict[str, dict] = {}
         fake = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -303,7 +305,52 @@ class FakeYouTube:
     def replies_to(self, thread_id):
         return self.threads[thread_id]["replies"]
 
+    # ---------- playlists ----------
+    def add_playlist(self, title, channel_id, privacy="public"):
+        pid = self._id("PL")
+        self.playlists[pid] = {"id": pid, "title": title, "channel": channel_id, "privacy": privacy, "items": []}
+        return pid
+
+    def playlist_view(self, p):
+        return {"id": p["id"], "snippet": {"title": p["title"], "channelId": p["channel"]},
+                "status": {"privacyStatus": p["privacy"]}, "contentDetails": {"itemCount": len(p["items"])}}
+
+    def playlist_route(self, method, op, q, body):
+        me = self.channel_for(getattr(self, "current_token", ""))
+        if op == "playlists" and method == "GET":
+            if "id" in q:
+                rows = [p for p in self.playlists.values() if p["id"] == q["id"]]
+            else:
+                rows = [p for p in self.playlists.values() if p["channel"] == me["id"]]  # mine=true
+            start, n = int(q.get("pageToken") or 0), int(q.get("maxResults", 5))
+            out = {"items": [self.playlist_view(p) for p in rows[start:start + n]]}
+            if start + n < len(rows):
+                out["nextPageToken"] = str(start + n)
+            return 200, out
+        if op == "playlists" and method == "POST":
+            pid = self.add_playlist(body["snippet"]["title"], me["id"], body.get("status", {}).get("privacyStatus", "public"))
+            return 200, self.playlist_view(self.playlists[pid])
+        if op == "playlistItems" and method == "POST":
+            pid = body["snippet"]["playlistId"]
+            vid = body["snippet"]["resourceId"]["videoId"]
+            p = self.playlists.get(pid)
+            if p is None:
+                return self._err(404, "playlistNotFound")
+            if p["channel"] != me["id"]:
+                return self._err(403, "playlistItemsNotAccessible")
+            if vid not in self.videos and vid not in self.broadcasts:
+                return self._err(404, "videoNotFound")
+            if vid in p["items"]:
+                return self._err(409, "videoAlreadyInPlaylist")
+            p["items"].append(vid)
+            return 200, {"id": self._id("PLI"), "snippet": {"playlistId": pid, "resourceId": {"videoId": vid}}}
+        return None
+
     def route(self, method, op, q, body):
+        if op in ("playlists", "playlistItems"):
+            got = self.playlist_route(method, op, q, body)
+            if got is not None:
+                return got
         if op in ("commentThreads", "comments"):
             got = self.comment_route(method, op, q, body)
             if got is not None:
