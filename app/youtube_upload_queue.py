@@ -35,8 +35,9 @@ from .youtube_metadata import BroadcastMetadata, MetadataError, parse_tags, vali
 from .youtube_oauth import OAuthError
 from .youtube_upload import (
     ApiRestrictedError, ResumableUploader, SessionExpired, UploadCancelled, UploadProgress, build_video_body,
-    file_signature, parse_utc, utc_iso, validate_publish_at, validate_video_file, verify_publish_at,
+    file_signature, parse_utc, signature_matches, utc_iso, validate_publish_at, validate_video_file, verify_publish_at,
 )
+from .youtube_usage import record_api_calls
 
 SETTINGS_KEY = "upload_queue"
 MAX_JOBS = 100  # 요구: 최소 50 (UI도 같은 값 사용)
@@ -357,6 +358,7 @@ class UploadQueue:
     def run_job(self, job: UploadJob) -> None:
         """작업 1개 (예외를 밖으로 내지 않고 상태로 남긴다)."""
         self._transition(job, VERIFYING_CHANNEL, error="")
+        api = None
         try:
             profile = self.profiles.get(job.profile_id)
             if profile is None:
@@ -392,12 +394,15 @@ class UploadQueue:
             self._transition(job, FAILED, error=str(e))
         except Exception as e:  # 예상 밖 오류도 다음 작업은 계속 (메시지에 내부 값/URL을 넣지 않음)
             self._transition(job, FAILED, error=f"업로드 오류 ({type(e).__name__})")
+        finally:
+            if api is not None:
+                record_api_calls(getattr(api, "calls", []), self.clock)  # 이 프로그램 기준 사용량 (참고용)
 
     def _upload(self, api: YouTubeApiClient, job: UploadJob) -> None:
         validate_video_file(job.video_path)
         session = self._session_url(job)
-        if job.file_sig and file_signature(job.video_path) != job.file_sig:
-            raise YouTubeApiError("영상 파일이 등록 후 바뀌었습니다. 작업을 지우고 다시 등록하세요.",
+        if not signature_matches(job.video_path, job.file_sig):
+            raise YouTubeApiError("예약 등록 후 영상 파일이 변경되었습니다. 작업을 지우고 다시 등록하세요.",
                                   kind="config", reason="fileChanged")
         validate_publish_at(job.publish_at, datetime.fromtimestamp(self.clock(), timezone.utc))
         body = build_video_body(job.metadata(), job.publish_at)

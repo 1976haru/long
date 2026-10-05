@@ -9,6 +9,8 @@
 """
 from __future__ import annotations
 
+import email.utils
+import hashlib
 import json
 import os
 import threading
@@ -107,6 +109,25 @@ def build_video_body(md: BroadcastMetadata, publish_at: datetime | None) -> dict
     return {"snippet": snippet, "status": status}
 
 
+RETRY_AFTER_MAX = 15 * 60  # 비정상적으로 긴 Retry-After는 15분으로 제한 (중지 버튼은 그 사이에도 동작)
+
+
+def parse_retry_after(value: str, clock: Callable[[], float] = time.time) -> float | None:
+    """HTTP Retry-After: 초(정수) 또는 HTTP 날짜. 없거나 해석할 수 없으면 None (→ 기존 backoff)."""
+    v = str(value or "").strip()
+    if not v:
+        return None
+    if v.isdigit():
+        return float(min(int(v), RETRY_AFTER_MAX))
+    try:
+        dt = email.utils.parsedate_to_datetime(v)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if dt is None or dt.tzinfo is None:
+        return None
+    return float(min(max(0.0, dt.timestamp() - clock()), RETRY_AFTER_MAX))
+
+
 @dataclass
 class UploadProgress:
     sent: int
@@ -120,10 +141,11 @@ class UploadProgress:
 class ResumableUploader:
     def __init__(self, api: YouTubeApiClient, *, transport=http_transport, chunk_size: int = CHUNK_SIZE,
                  sleep: Callable[[float], None] = time.sleep, backoff=RETRY_BACKOFF, timeout: float = 120.0,
-                 cancel: threading.Event | None = None, max_failures: int = 6):
+                 cancel: threading.Event | None = None, max_failures: int = 6, clock: Callable[[], float] = time.time):
         if chunk_size <= 0 or chunk_size % (256 * 1024):
             raise ValueError("chunk_size must be a multiple of 256 KiB")
         self.api = api
+        self.clock = clock
         self.transport = transport
         self.chunk_size = chunk_size
         self.sleep = sleep
@@ -155,8 +177,10 @@ class ResumableUploader:
             return {}
         return d if isinstance(d, dict) else {}
 
-    def _raise(self, status: int, raw: bytes) -> None:
-        raise YouTubeApiClient._error(status, self._json(raw))
+    def _raise(self, status: int, raw: bytes, rh: dict | None = None) -> None:
+        e = YouTubeApiClient._error(status, self._json(raw))
+        e.retry_after = parse_retry_after((rh or {}).get("retry-after", ""), self.clock)
+        raise e
 
     def start_session(self, total: int, body: dict, mime: str = "video/mp4") -> str:
         url = (f"{self.api.upload_base_url}/videos?"
@@ -197,7 +221,7 @@ class ResumableUploader:
             return self._range_end(rh), None
         if status in (404, 410):
             raise SessionExpired()
-        self._raise(status, raw)
+        self._raise(status, raw, rh)
         return 0, None  # pragma: no cover
 
     def upload(self, path, body: dict, *, session_url: str = "", on_session: Callable[[str], None] | None = None,
@@ -243,14 +267,15 @@ class ResumableUploader:
                     elif status in (404, 410):
                         raise SessionExpired()
                     else:
-                        self._raise(status, raw)
+                        self._raise(status, raw, rh)
                 except YouTubeApiError as e:
                     if not e.retryable:
                         raise
                     failures += 1
                     if failures > self.max_failures:
                         raise
-                    self.sleep(self.backoff[min(failures - 1, len(self.backoff) - 1)])
+                    wait = getattr(e, "retry_after", None)  # 서버가 Retry-After를 주면 그 값을 우선
+                    self.sleep(wait if wait is not None else self.backoff[min(failures - 1, len(self.backoff) - 1)])
                     need_query = True
         if not done.get("id"):
             raise YouTubeApiError("업로드 응답에 영상 ID가 없습니다.", kind="transient", reason="noVideoId")
@@ -305,7 +330,24 @@ def verify_publish_at(api: YouTubeApiClient, video_id: str, *, publish_at: datet
                           kind="config", reason="publishAtMismatch")
 
 
+FINGERPRINT_EDGE = 1024 * 1024  # 앞/뒤 1MB만 해시 (대용량 영상 전체를 매번 읽지 않는다)
+
+
 def file_signature(path) -> str:
-    """업로드 재개 전 파일이 바뀌지 않았는지 확인용 (크기 + 수정 시각)."""
+    """업로드 시작/재개 전 파일이 바뀌지 않았는지 확인용: 크기 + 수정 시각(ns) + 앞 1MB·뒤 1MB SHA-256."""
     st = os.stat(path)
-    return f"{st.st_size}:{int(st.st_mtime)}"
+    with open(path, "rb") as f:
+        head = hashlib.sha256(f.read(FINGERPRINT_EDGE)).hexdigest()[:32]
+        f.seek(max(0, st.st_size - FINGERPRINT_EDGE))
+        tail = hashlib.sha256(f.read(FINGERPRINT_EDGE)).hexdigest()[:32]
+    return f"v2:{st.st_size}:{st.st_mtime_ns}:{head}:{tail}"
+
+
+def signature_matches(path, saved: str) -> bool:
+    """saved가 없으면 비교하지 않는다. 이전 버전 형식(크기:초)으로 저장된 작업도 그대로 비교한다."""
+    if not saved:
+        return True
+    if not saved.startswith("v2:"):
+        st = os.stat(path)
+        return saved == f"{st.st_size}:{int(st.st_mtime)}"
+    return file_signature(path) == saved

@@ -1,8 +1,11 @@
 """③ 예약 업로드 창 — 한국·일본 등 여러 YouTube 채널에 완성 영상을 예약 업로드 (대기열, 1개씩 순차).
 
-흐름: 채널 선택 → 영상/제목/태그/썸네일 → 예약 공개 시각(채널 시간대) → [대기열에 추가] → [▶ 업로드 시작]
+간편 흐름: ① 채널 → ② 영상 (1개 / 폴더 한꺼번에) → ③ 예약 (첫 날짜·시각·간격) → [미리보기] → [N개 대기열에 추가]
+상세 설정(▼)에서만 제목·설명·태그·썸네일 방식·카테고리·언어·아동용·공개 상태를 바꾼다 (채널별 템플릿으로 저장).
+
+- 채널을 바꾸면 그 채널의 마지막/기본 템플릿을 다시 적용한다 → 이전 채널의 설명/태그가 남아 잘못 올라가지 않는다.
 - 업로드 대기열(UploadQueue)은 MainWindow가 가진다 → 이 창을 닫아도 업로드는 계속되고, 다시 열면 상태가 보인다.
-- 화면에는 업로드 세션 URL/token을 표시하지 않는다.
+- 화면에는 업로드 세션 URL/token을 표시하지 않는다. 영상/썸네일 파일은 읽기만 한다 (이동/삭제/이름 변경 없음).
 """
 from __future__ import annotations
 
@@ -12,119 +15,263 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+from . import youtube_upload_preview as preview_ui
 from .tooling import release_tk_variables
-from .youtube_accounts import ProfileStore
-from .youtube_schedule import ScheduleError, get_zone, local_to_utc
-from .youtube_upload_queue import ACTIVE_STATES, MAX_JOBS, QueueError, UploadQueue
+from .ui_scroll import ScrollFrame
+from .youtube_accounts import ProfileStore, verify_channel
+from .youtube_batch import (
+    DAILY, EVERY_2_DAYS, EVERY_N_DAYS, INTERVAL_LABELS, SPEEDS_MBPS, WEEKDAYS, WEEKLY, BatchItem, BatchPlan,
+    ThumbMatch, UploadTemplateStore, build_plan, episode_from_filename, estimate_seconds, human_duration, human_size,
+    last_folder, match_all, profile_defaults_template, remember_folder, scan_folder, schedule_times,
+)
+from .youtube_metadata import (
+    DEFAULT_CATEGORIES, LANGUAGES, PRIVACY_LABELS, TEMPLATE_VARIABLES, THUMB_FIXED, THUMB_FOLDER, MetadataError,
+    MetadataTemplate,
+)
+from .youtube_schedule import ScheduleError, get_zone
+from .youtube_upload_queue import (
+    ACTIVE_STATES, API_REVIEW_REQUIRED, BLOCKED, CANCELLED, COMPLETE, FAILED, MAX_JOBS, PARTIAL, PAUSED, PENDING,
+    QueueError, UploadQueue,
+)
+from .youtube_usage import usage_text
 
-SCHEDULE = "schedule"
-PUBLISH_MODES = {SCHEDULE: "예약 공개 (지정 시각에 공개)", "private": "지금 비공개로 올리기",
-                 "unlisted": "지금 일부공개로 올리기", "public": "지금 공개로 올리기"}
+SCHEDULE, NOW = "schedule", "now"
+TIME_PRESETS = ("07:00", "09:00", "18:00", "19:00", "21:00")
+THUMB_NONE = "none"
+THUMB_STRATEGY = {THUMB_NONE: "없음", THUMB_FIXED: "고정 1개", THUMB_FOLDER: "폴더에서 순서대로"}
+# 상태 색 (항상 글자와 함께 — 색만으로 구분하지 않음)
+STATE_COLORS = {PENDING: "black", COMPLETE: "darkgreen", PARTIAL: "darkorange", BLOCKED: "firebrick",
+                FAILED: "firebrick", API_REVIEW_REQUIRED: "purple", PAUSED: "darkorange", CANCELLED: "gray45"}
+ACTIVE_COLOR = "#1d4fa8"
+
+
+def _label(mapping: dict, key: str) -> str:
+    return f"{mapping.get(key, key)} ({key})" if key else mapping.get(key, "")
+
+
+def _key(mapping: dict, label: str) -> str:
+    return next((k for k in mapping if _label(mapping, k) == label), label.strip())
 
 
 class MultiChannelUploadWindow(tk.Toplevel):
     def __init__(self, master, *, upload_queue: UploadQueue, profiles: ProfileStore | None = None,
-                 channel_window: Callable | None = None, pick_file: Callable = filedialog.askopenfilename,
-                 video_path: str = "", title: str = "", clock: Callable[[], float] | None = None):
+                 templates: UploadTemplateStore | None = None, channel_window: Callable | None = None,
+                 pick_file: Callable = filedialog.askopenfilename, pick_files: Callable = filedialog.askopenfilenames,
+                 pick_dir: Callable = filedialog.askdirectory, video_path: str = "", title: str = "",
+                 clock: Callable[[], float] | None = None, live_guard: Callable[[], str] | None = None):
         super().__init__(master)
         self.title("③ 예약 업로드 · 여러 YouTube 채널")
-        self.geometry("1000x780")
-        self.minsize(880, 680)
+        sh = self.winfo_screenheight()
+        self.geometry(f"1040x{max(520, min(900, sh - 90))}")
+        self.minsize(820, 480)
         self.q = upload_queue
         self.profiles = profiles or upload_queue.profiles
+        self.templates = templates or UploadTemplateStore()
         self._channel_window_factory = channel_window
-        self._pick_file = pick_file
+        self._pick_file, self._pick_files, self._pick_dir = pick_file, pick_files, pick_dir
         self._clock = clock or upload_queue.clock
+        self._live_guard = live_guard
         self.channel_win = None
+        self.preview_win = None
+        self.dnd_enabled = False  # v1.1: 끌어놓기는 꺼 둠 (선택 버튼/폴더 추가는 항상 사용 가능)
         self._profile_ids: list[str] = []
+        self._template_ids: list[str] = []
+        self.template_id = ""
+        self.items: list[BatchItem] = []
 
         self.profile = tk.StringVar()
         self.tz_text = tk.StringVar()
-        self.video = tk.StringVar(value=video_path)
-        self.video_title = tk.StringVar(value=title)
-        self.tags = tk.StringVar()
-        self.thumbnail = tk.StringVar()
-        self.publish_mode = tk.StringVar(value=PUBLISH_MODES[SCHEDULE])
+        self.template_choice = tk.StringVar()
+        self.recursive = tk.BooleanVar(value=False)
+        self.items_summary = tk.StringVar()
+        self.speed = tk.StringVar(value=f"{SPEEDS_MBPS[1]} Mbps")
+        self.episode_var = tk.StringVar()
+        self.publish_kind = tk.StringVar(value=SCHEDULE)
         self.pub_date = tk.StringVar()
-        self.pub_time = tk.StringVar(value="18:00")
+        self.pub_time = tk.StringVar(value="19:00")
+        self.interval = tk.StringVar(value=DAILY)
+        self.every_days = tk.IntVar(value=3)
+        self.detail_open = tk.BooleanVar(value=False)
+        self.template_name = tk.StringVar()
+        self.title_template = tk.StringVar(value="{filename}")
+        self.tags = tk.StringVar()
+        self.series = tk.StringVar()
+        self.thumb_strategy = tk.StringVar(value=THUMB_STRATEGY[THUMB_NONE])
+        self.thumb_source = tk.StringVar()
+        self.category = tk.StringVar(value=_label(DEFAULT_CATEGORIES, "10"))
+        self.language = tk.StringVar(value=_label(LANGUAGES, "ko"))
+        self.made_for_kids = tk.BooleanVar(value=False)
+        self.privacy_now = tk.StringVar(value=_label(PRIVACY_LABELS, "private"))
         self.summary = tk.StringVar()
         self.detail = tk.StringVar()
+        self.usage = tk.StringVar()
 
         self._ui()
         self.refresh_profiles()
+        if video_path:
+            self.set_video(video_path, title)
         self.refresh_jobs()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.after(300, self._pump)
 
-    # ---------- 화면 ----------
+    # ================= 화면 =================
     def _ui(self):
-        root = ttk.Frame(self, padding=12)
+        self.scroll = ScrollFrame(self)
+        self.scroll.pack(fill="both", expand=True)
+        root = ttk.Frame(self.scroll.body, padding=12)
         root.pack(fill="both", expand=True)
         top = ttk.Frame(root); top.pack(fill="x")
         ttk.Label(top, text="③ 예약 업로드", font=("Segoe UI", 15, "bold")).pack(side="left")
         ttk.Button(top, text="YouTube 채널 관리", command=self.open_channels).pack(side="right")
         ttk.Label(root, foreground="gray30", text=(
-            "한국·일본 등 여러 채널에 예약 업로드합니다. 업로드 직전마다 채널을 다시 확인하고, "
-            "다르면 업로드하지 않습니다. 이 창을 닫아도 업로드는 계속됩니다.")).pack(anchor="w", pady=(0, 8))
+            "채널 → 영상 → 예약 순서로 고르고 [미리보기]에서 확인한 뒤 대기열에 넣으세요. 업로드 직전마다 채널을 다시 "
+            "확인하고, 다르면 업로드하지 않습니다. 이 창을 닫아도 업로드는 계속됩니다."), wraplength=980).pack(anchor="w", pady=(0, 8))
 
-        form = ttk.LabelFrame(root, text="① 업로드할 영상", padding=8)
-        form.pack(fill="x")
-        form.columnconfigure(1, weight=1)
-
-        def row(r, text, widget):
-            ttk.Label(form, text=text, width=12).grid(row=r, column=0, sticky="nw", pady=2)
-            widget.grid(row=r, column=1, sticky="ew", pady=2)
-        ch = ttk.Frame(form)
-        self.cb_profile = ttk.Combobox(ch, textvariable=self.profile, state="readonly", width=40)
+        # ① 채널
+        f1 = ttk.LabelFrame(root, text="① 채널", padding=8); f1.pack(fill="x")
+        self.cb_profile = ttk.Combobox(f1, textvariable=self.profile, state="readonly", width=40)
         self.cb_profile.pack(side="left")
         self.cb_profile.bind("<<ComboboxSelected>>", lambda e: self._on_profile())
-        ttk.Label(ch, textvariable=self.tz_text, foreground="gray30").pack(side="left", padx=8)
-        row(0, "채널", ch)
-        vf = ttk.Frame(form)
-        ttk.Entry(vf, textvariable=self.video).pack(side="left", fill="x", expand=True)
-        ttk.Button(vf, text="찾기", command=self._pick_video).pack(side="left", padx=(4, 0))
-        row(1, "영상 파일", vf)
-        row(2, "제목", ttk.Entry(form, textvariable=self.video_title))
-        self.txt_desc = tk.Text(form, height=4, wrap="word")
-        row(3, "설명", self.txt_desc)
-        row(4, "태그", ttk.Entry(form, textvariable=self.tags))
-        tf = ttk.Frame(form)
-        ttk.Entry(tf, textvariable=self.thumbnail).pack(side="left", fill="x", expand=True)
-        ttk.Button(tf, text="찾기", command=self._pick_thumb).pack(side="left", padx=(4, 0))
-        row(5, "썸네일 (선택)", tf)
-        pf = ttk.Frame(form)
-        self.cb_mode = ttk.Combobox(pf, textvariable=self.publish_mode, state="readonly", width=28,
-                                    values=list(PUBLISH_MODES.values()))
-        self.cb_mode.pack(side="left")
-        self.cb_mode.bind("<<ComboboxSelected>>", lambda e: self._on_mode())
-        ttk.Label(pf, text="날짜").pack(side="left", padx=(12, 2))
-        self.ent_date = ttk.Entry(pf, textvariable=self.pub_date, width=12)
-        self.ent_date.pack(side="left")
-        ttk.Label(pf, text="시각").pack(side="left", padx=(8, 2))
-        self.ent_time = ttk.Entry(pf, textvariable=self.pub_time, width=7)
-        self.ent_time.pack(side="left")
-        ttk.Label(pf, text="(채널 시간대 기준 · 예: 2026-10-06 18:00)", foreground="gray30").pack(side="left", padx=6)
-        row(6, "공개", pf)
-        ttk.Button(form, text="＋ 예약 업로드 대기열에 추가", command=self.add_job).grid(row=7, column=0, columnspan=2,
-                                                                                 sticky="ew", pady=(6, 0))
+        ttk.Label(f1, textvariable=self.tz_text, foreground="gray30").pack(side="left", padx=8)
+        self.cb_template = ttk.Combobox(f1, textvariable=self.template_choice, state="readonly", width=26)
+        self.cb_template.pack(side="right")
+        self.cb_template.bind("<<ComboboxSelected>>", lambda e: self._on_template())
+        ttk.Label(f1, text="템플릿").pack(side="right", padx=(0, 4))
 
-        qf = ttk.LabelFrame(root, text=f"② 예약 업로드 대기열 (최대 {MAX_JOBS}개 · 1개씩 순차 업로드)", padding=8)
+        # ② 영상
+        f2 = ttk.LabelFrame(root, text="② 영상", padding=8); f2.pack(fill="x", pady=(8, 0))
+        br = ttk.Frame(f2); br.pack(fill="x")
+        ttk.Button(br, text="영상 선택", command=self.pick_videos).pack(side="left")
+        ttk.Button(br, text="폴더 한꺼번에 추가", command=self.pick_folder).pack(side="left", padx=4)
+        self.btn_last = ttk.Button(br, text="최근 폴더 다시 불러오기", command=self.reload_last_folder)
+        self.btn_last.pack(side="left")
+        ttk.Checkbutton(br, text="하위 폴더 포함 (고급)", variable=self.recursive).pack(side="left", padx=8)
+        ttk.Button(br, text="전체 비우기", command=self.clear_items).pack(side="right")
+        ttk.Button(br, text="선택 빼기", command=self.remove_items).pack(side="right", padx=4)
+        cols = ("n", "video", "thumb", "episode", "size")
+        self.items_tree = ttk.Treeview(f2, columns=cols, show="headings", height=5, selectmode="extended")
+        for c, h, w in zip(cols, ("#", "영상", "썸네일", "회차", "크기"), (40, 360, 280, 70, 90)):
+            self.items_tree.heading(c, text=h)
+            self.items_tree.column(c, width=w, anchor="w" if c in ("video", "thumb") else "center")
+        self.items_tree.pack(fill="x", pady=(4, 0))
+        ir = ttk.Frame(f2); ir.pack(fill="x", pady=(4, 0))
+        ttk.Button(ir, text="썸네일 직접 지정", command=self.pick_item_thumbnail).pack(side="left")
+        ttk.Label(ir, text="회차").pack(side="left", padx=(12, 2))
+        ttk.Entry(ir, textvariable=self.episode_var, width=6).pack(side="left")
+        ttk.Button(ir, text="선택 영상에 회차 지정 (여러 개면 1씩 증가)", command=self.assign_episode).pack(side="left", padx=4)
+        sr = ttk.Frame(f2); sr.pack(fill="x", pady=(4, 0))
+        ttk.Label(sr, textvariable=self.items_summary).pack(side="left")
+        cb = ttk.Combobox(sr, textvariable=self.speed, state="readonly", width=9, values=[f"{s} Mbps" for s in SPEEDS_MBPS])
+        cb.pack(side="right")
+        cb.bind("<<ComboboxSelected>>", lambda e: self._refresh_items())
+        ttk.Label(sr, text="참고 업로드 속도").pack(side="right", padx=(0, 4))
+
+        # ③ 예약
+        f3 = ttk.LabelFrame(root, text="③ 예약", padding=8); f3.pack(fill="x", pady=(8, 0))
+        kr = ttk.Frame(f3); kr.pack(fill="x")
+        ttk.Radiobutton(kr, text="예약 공개 (지정 시각에 공개)", variable=self.publish_kind, value=SCHEDULE,
+                        command=self._on_kind).pack(side="left")
+        ttk.Radiobutton(kr, text="지금 올리기 (상세 설정의 공개 상태)", variable=self.publish_kind, value=NOW,
+                        command=self._on_kind).pack(side="left", padx=12)
+        dr = ttk.Frame(f3); dr.pack(fill="x", pady=(6, 0))
+        ttk.Label(dr, text="첫 날짜").pack(side="left")
+        self.ent_date = ttk.Entry(dr, textvariable=self.pub_date, width=12)
+        self.ent_date.pack(side="left", padx=(2, 2))
+        self.sched_widgets = [self.ent_date]
+        for text, days in (("오늘", 0), ("내일", 1)):
+            b = ttk.Button(dr, text=text, width=5, command=lambda d=days: self.set_day(d))
+            b.pack(side="left")
+            self.sched_widgets.append(b)
+        ttk.Label(dr, text="시각").pack(side="left", padx=(12, 2))
+        self.ent_time = ttk.Entry(dr, textvariable=self.pub_time, width=7)
+        self.ent_time.pack(side="left", padx=(0, 2))
+        self.sched_widgets.append(self.ent_time)
+        for t in TIME_PRESETS:
+            b = ttk.Button(dr, text=t, width=6, command=lambda v=t: self.pub_time.set(v))
+            b.pack(side="left")
+            self.sched_widgets.append(b)
+        vr = ttk.Frame(f3); vr.pack(fill="x", pady=(6, 0))
+        ttk.Label(vr, text="여러 영상 간격").pack(side="left")
+        for key in (DAILY, WEEKDAYS, EVERY_2_DAYS, WEEKLY, EVERY_N_DAYS):
+            rb = ttk.Radiobutton(vr, text=INTERVAL_LABELS[key], variable=self.interval, value=key)
+            rb.pack(side="left", padx=(8, 0))
+            self.sched_widgets.append(rb)
+        sp = ttk.Spinbox(vr, from_=1, to=365, width=5, textvariable=self.every_days)
+        sp.pack(side="left", padx=(2, 0))
+        self.sched_widgets.append(sp)
+        ttk.Label(vr, text="일").pack(side="left")
+        ttk.Label(f3, foreground="gray30", text="날짜·시각은 선택한 채널의 시간대 기준입니다 (한국 Asia/Seoul, 일본 Asia/Tokyo).").pack(anchor="w", pady=(4, 0))
+
+        # 상세 설정 (기본 접힘)
+        self.btn_detail = ttk.Button(root, text="▼ 제목·설명·태그·썸네일 상세 설정", command=self.toggle_detail)
+        self.btn_detail.pack(fill="x", pady=(8, 0))
+        self.detail_frame = df = ttk.LabelFrame(root, text="상세 설정 (채널별 템플릿)", padding=8)
+        df.columnconfigure(1, weight=1)
+
+        def row(r, text, widget):
+            ttk.Label(df, text=text, width=14).grid(row=r, column=0, sticky="nw", pady=2)
+            widget.grid(row=r, column=1, sticky="ew", pady=2)
+        tr = ttk.Frame(df)
+        ttk.Entry(tr, textvariable=self.template_name, width=30).pack(side="left")
+        ttk.Button(tr, text="템플릿으로 저장", command=self.save_template).pack(side="left", padx=4)
+        ttk.Button(tr, text="템플릿 삭제", command=self.delete_template).pack(side="left")
+        row(0, "템플릿 이름", tr)
+        row(1, "제목", ttk.Entry(df, textvariable=self.title_template))
+        ttk.Label(df, foreground="gray30", text="변수: " + " ".join("{" + v + "}" for v in TEMPLATE_VARIABLES
+                                                                  if v not in ("month", "day", "session"))).grid(
+            row=2, column=1, sticky="w")
+        self.txt_desc = tk.Text(df, height=4, wrap="word")
+        row(3, "설명", self.txt_desc)
+        row(4, "태그", ttk.Entry(df, textvariable=self.tags))
+        row(5, "시리즈 {series}", ttk.Entry(df, textvariable=self.series))
+        th = ttk.Frame(df)
+        tcb = ttk.Combobox(th, textvariable=self.thumb_strategy, state="readonly", width=16,
+                           values=list(THUMB_STRATEGY.values()))
+        tcb.pack(side="left")
+        tcb.bind("<<ComboboxSelected>>", lambda e: self._rematch())
+        ttk.Entry(th, textvariable=self.thumb_source).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Button(th, text="찾기", command=self._pick_thumb_source).pack(side="left")
+        row(6, "썸네일 없을 때", th)  # 같은 이름 썸네일(001.mp4 ↔ 001.jpg)이 없을 때만 사용
+        mr = ttk.Frame(df)
+        ttk.Combobox(mr, textvariable=self.category, state="readonly", width=18,
+                     values=[_label(DEFAULT_CATEGORIES, k) for k in DEFAULT_CATEGORIES]).pack(side="left")
+        ttk.Label(mr, text="언어").pack(side="left", padx=(12, 2))
+        ttk.Combobox(mr, textvariable=self.language, state="readonly", width=14,
+                     values=[_label(LANGUAGES, k) for k in LANGUAGES]).pack(side="left")
+        ttk.Checkbutton(mr, text="아동용", variable=self.made_for_kids).pack(side="left", padx=12)
+        ttk.Label(mr, text="공개 상태 (지금 올리기)").pack(side="left", padx=(12, 2))
+        ttk.Combobox(mr, textvariable=self.privacy_now, state="readonly", width=14,
+                     values=[_label(PRIVACY_LABELS, k) for k in PRIVACY_LABELS]).pack(side="left")
+        row(7, "카테고리", mr)
+        self._detail_anchor = ttk.Frame(root)
+        self._detail_anchor.pack(fill="x")
+
+        ttk.Button(root, text="▶ 미리보기 후 대기열에 추가", command=self.preview).pack(fill="x", pady=(8, 0))
+
+        # ④ 대기열
+        qf = ttk.LabelFrame(root, text=f"④ 예약 업로드 대기열 (최대 {MAX_JOBS}개 · 1개씩 순차 업로드)", padding=8)
         qf.pack(fill="both", expand=True, pady=(8, 0))
         cols = ("n", "channel", "title", "publish", "state", "progress")
-        self.tree = ttk.Treeview(qf, columns=cols, show="headings", height=8, selectmode="browse")
-        for c, h, w in zip(cols, ("#", "채널", "제목", "공개 시각", "상태", "진행"), (36, 170, 330, 170, 130, 60)):
+        self.tree = ttk.Treeview(qf, columns=cols, show="headings", height=8, selectmode="extended")
+        for c, h, w in zip(cols, ("#", "채널", "제목", "공개 시각", "상태", "진행"), (36, 170, 330, 170, 140, 60)):
             self.tree.heading(c, text=h)
             self.tree.column(c, width=w, anchor="w" if c in ("channel", "title") else "center")
+        for st, color in STATE_COLORS.items():
+            self.tree.tag_configure(st, foreground=color)
+        self.tree.tag_configure("active", foreground=ACTIVE_COLOR)
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
-        ttk.Label(qf, textvariable=self.detail, foreground="gray30", wraplength=900, justify="left").pack(anchor="w")
+        ttk.Label(qf, textvariable=self.detail, foreground="gray30", wraplength=960, justify="left").pack(anchor="w")
         tb = ttk.Frame(qf); tb.pack(fill="x", pady=(4, 0))
         ttk.Button(tb, text="▲", width=3, command=lambda: self._move(-1)).pack(side="left")
         ttk.Button(tb, text="▼", width=3, command=lambda: self._move(1)).pack(side="left", padx=(2, 8))
         ttk.Button(tb, text="다시 시도", command=self.retry_selected).pack(side="left")
         ttk.Button(tb, text="취소", command=self.cancel_selected).pack(side="left", padx=4)
         ttk.Button(tb, text="삭제", command=self.remove_selected).pack(side="left")
-        ttk.Button(tb, text="완료 정리", command=self.clear_done).pack(side="right")
+        ttk.Button(tb, text="완료만 정리", command=self.clear_done).pack(side="right")
+        ttk.Button(tb, text="실패만 다시 시도", command=self.retry_failed).pack(side="right", padx=4)
+        ttk.Button(tb, text="선택 삭제", command=self.remove_selected).pack(side="right")
+        ttk.Button(tb, text="선택 전체", command=self.select_all).pack(side="right", padx=4)
 
         ar = ttk.Frame(root); ar.pack(fill="x", pady=(8, 0))
         self.btn_start = ttk.Button(ar, text="▶ 예약 업로드 시작", command=self.start)
@@ -132,9 +279,20 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self.btn_stop = ttk.Button(ar, text="■ 중지 (나중에 이어 올리기)", command=self.stop)
         self.btn_stop.pack(side="left", padx=(5, 0))
         ttk.Label(root, textvariable=self.summary).pack(anchor="w", pady=(4, 0))
-        self._on_mode()
+        ttk.Label(root, textvariable=self.usage, foreground="gray40", wraplength=980).pack(anchor="w")
+        self._on_kind()
 
-    # ---------- 채널 ----------
+    def toggle_detail(self):
+        if self.detail_open.get():
+            self.detail_frame.pack_forget()
+            self.detail_open.set(False)
+            self.btn_detail.configure(text="▼ 제목·설명·태그·썸네일 상세 설정")
+        else:
+            self.detail_frame.pack(fill="x", pady=(4, 0), before=self._detail_anchor)
+            self.detail_open.set(True)
+            self.btn_detail.configure(text="▲ 상세 설정 접기")
+
+    # ================= 채널 / 템플릿 =================
     def open_channels(self):
         if self.channel_win is not None:
             try:
@@ -147,11 +305,12 @@ class MultiChannelUploadWindow(tk.Toplevel):
             self.channel_win = self._channel_window_factory(self, on_change=self.refresh_profiles)
         else:
             from .youtube_channels_ui import ChannelManagerWindow
-            self.channel_win = ChannelManagerWindow(self, profiles=self.profiles, on_change=self.refresh_profiles)
+            self.channel_win = ChannelManagerWindow(self, profiles=self.profiles, templates=self.templates,
+                                                    on_change=self.refresh_profiles)
         return self.channel_win
 
     def refresh_profiles(self) -> None:
-        profiles = [p for p in self.profiles.all()]
+        profiles = self.profiles.all()
         cur = self.selected_profile()
         self._profile_ids = [p.profile_id for p in profiles]
         self.cb_profile.configure(values=[p.label for p in profiles])
@@ -160,13 +319,9 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self.profile.set(next((p.label for p in profiles if p.profile_id == keep), ""))
         if not profiles:
             self.tz_text.set("등록된 채널이 없습니다 → [YouTube 채널 관리]")
-        self._on_profile()
+        self._on_profile(reapply=cur is None or cur.profile_id != keep)
         if not self.pub_date.get():
-            self._default_date("Asia/Seoul")
-
-    def _default_date(self, tz: str) -> None:
-        now = datetime.fromtimestamp(self._clock(), timezone.utc).astimezone(get_zone(tz))
-        self.pub_date.set((now.date() + timedelta(days=1)).isoformat())
+            self.set_day(1)
 
     def selected_profile(self):
         values = list(self.cb_profile.cget("values") or ())
@@ -181,82 +336,327 @@ class MultiChannelUploadWindow(tk.Toplevel):
             self.profile.set(p.label)
             self._on_profile()
 
-    def _on_profile(self) -> None:
+    def _on_profile(self, reapply: bool = True) -> None:
         p = self.selected_profile()
         if p is None:
+            self._set_template_choices(None)
             return
         self.tz_text.set(f"시간대 {p.timezone}" + ("" if p.channel_id else " · ⚠ 연결 안 됨"))
-        if not self.pub_date.get():
-            self._default_date(p.timezone)
+        if reapply or not self._template_ids:
+            self._set_template_choices(p)
+            picked = self.templates.pick_for(p)
+            self.apply_template(*(picked or ("", profile_defaults_template(p))))
 
-    def _on_mode(self) -> None:
-        st = "normal" if self._mode() == SCHEDULE else "disabled"
-        self.ent_date.configure(state=st)
-        self.ent_time.configure(state=st)
+    def _set_template_choices(self, profile) -> None:
+        own = self.templates.for_profile(profile.profile_id) if profile else []
+        self._template_ids = [""] + [tid for tid, _ in own]
+        self.cb_template.configure(values=["(채널 기본값)"] + [t.name for _, t in own])
 
-    def _mode(self) -> str:
-        return next((k for k, v in PUBLISH_MODES.items() if v == self.publish_mode.get()), SCHEDULE)
+    def _on_template(self) -> None:
+        p = self.selected_profile()
+        values = list(self.cb_template.cget("values") or ())
+        i = values.index(self.template_choice.get()) if self.template_choice.get() in values else 0
+        tid = self._template_ids[i] if i < len(self._template_ids) else ""
+        if p is None:
+            return
+        got = self.templates.get(tid) if tid else None
+        if got and got[0] == p.profile_id:
+            self.apply_template(tid, got[1])
+            self.templates.remember(p.profile_id, tid)
+        else:
+            self.apply_template("", profile_defaults_template(p))
+            self.templates.remember(p.profile_id, "")
 
-    def _pick_video(self):
-        p = self._pick_file(parent=self, title="업로드할 영상 선택", filetypes=[("MP4", "*.mp4"), ("모든 파일", "*.*")])
+    def apply_template(self, template_id: str, t: MetadataTemplate) -> None:
+        """폼 전체를 이 템플릿 값으로 바꾼다 (이전 채널/템플릿 값을 남기지 않음)."""
+        self.template_id = template_id
+        self.template_name.set(t.name)
+        self.title_template.set(t.title_template or "{filename}")
+        self.txt_desc.delete("1.0", "end")
+        self.txt_desc.insert("1.0", t.description_template or "")
+        self.tags.set(", ".join(t.tags) if isinstance(t.tags, list) else str(t.tags or ""))
+        self.series.set(t.series)
+        p = self.selected_profile()
+        self.category.set(_label(DEFAULT_CATEGORIES, str(t.category_id)))
+        self.language.set(_label(LANGUAGES, t.default_language if t.default_language else (p.language if p else "")))
+        self.made_for_kids.set(bool(t.made_for_kids))
+        self.privacy_now.set(_label(PRIVACY_LABELS, t.privacy_status))
+        if t.thumbnail_mode == THUMB_FOLDER and t.thumbnail_folder:
+            self.thumb_strategy.set(THUMB_STRATEGY[THUMB_FOLDER]); self.thumb_source.set(t.thumbnail_folder)
+        elif t.thumbnail_paths:
+            self.thumb_strategy.set(THUMB_STRATEGY[THUMB_FIXED]); self.thumb_source.set(t.thumbnail_paths[0])
+        else:
+            self.thumb_strategy.set(THUMB_STRATEGY[THUMB_NONE]); self.thumb_source.set("")
+        names = list(self.cb_template.cget("values") or ())
+        idx = self._template_ids.index(template_id) if template_id in self._template_ids else 0
+        self.template_choice.set(names[idx] if idx < len(names) else "")
+        self._rematch()
+
+    def form_template(self) -> MetadataTemplate:
+        src = self.thumb_source.get().strip().strip('"')
+        strategy = next((k for k, v in THUMB_STRATEGY.items() if v == self.thumb_strategy.get()), THUMB_NONE)
+        return MetadataTemplate(
+            name=self.template_name.get().strip() or "기본", title_template=self.title_template.get(),
+            description_template=self.txt_desc.get("1.0", "end").rstrip("\n"), tags=self.tags.get(),
+            thumbnail_mode=THUMB_FOLDER if strategy == THUMB_FOLDER else THUMB_FIXED,
+            thumbnail_paths=[src] if strategy == THUMB_FIXED and src else [],
+            thumbnail_folder=src if strategy == THUMB_FOLDER else "",
+            category_id=_key(DEFAULT_CATEGORIES, self.category.get()), privacy_status=_key(PRIVACY_LABELS, self.privacy_now.get()),
+            made_for_kids=bool(self.made_for_kids.get()), default_language=_key(LANGUAGES, self.language.get()),
+            series=self.series.get().strip())
+
+    def save_template(self):
+        p = self.selected_profile()
+        if p is None:
+            messagebox.showwarning("템플릿", "채널을 먼저 선택하세요.", parent=self)
+            return None
+        if not self.template_name.get().strip():
+            messagebox.showwarning("템플릿", "템플릿 이름을 입력하세요 (예: 한국 시니어 / 가을 샹송).", parent=self)
+            return None
+        try:
+            tid = self.templates.save(p.profile_id, self.form_template(), self.template_id)
+        except (MetadataError, ValueError) as e:
+            messagebox.showerror("템플릿", str(e), parent=self)
+            return None
+        self.templates.remember(p.profile_id, tid)
+        self._set_template_choices(p)
+        got = self.templates.get(tid)
+        self.apply_template(tid, got[1])
+        self.summary.set(f"✓ 템플릿 '{got[1].name}' 저장 ({p.alias})")
+        return tid
+
+    def delete_template(self):
+        p = self.selected_profile()
+        if p is None or not self.template_id:
+            return
+        if messagebox.askyesno("템플릿 삭제", f"'{self.template_name.get()}' 템플릿을 삭제할까요?", parent=self):
+            self.templates.delete(self.template_id)
+            if p.default_template_id == self.template_id:
+                p.default_template_id = ""
+                self.profiles.save(p)
+            self.templates.remember(p.profile_id, "")
+            self._set_template_choices(p)
+            self.apply_template("", profile_defaults_template(p))
+
+    def _pick_thumb_source(self):
+        if self.thumb_strategy.get() == THUMB_STRATEGY[THUMB_FOLDER]:
+            p = self._pick_dir(parent=self, title="썸네일 폴더 선택")
+        else:
+            p = self._pick_file(parent=self, title="썸네일 선택", filetypes=[("이미지", "*.jpg *.jpeg *.png"), ("모든 파일", "*.*")])
         if p:
-            self.video.set(p)
-            if not self.video_title.get().strip():
-                self.video_title.set(Path(p).stem)
+            self.thumb_source.set(p)
+            self._rematch()
 
-    def _pick_thumb(self):
-        p = self._pick_file(parent=self, title="썸네일 선택", filetypes=[("이미지", "*.jpg *.jpeg *.png"), ("모든 파일", "*.*")])
-        if p:
-            self.thumbnail.set(p)
+    # ================= 영상 목록 =================
+    def add_videos(self, paths) -> int:
+        have = {str(Path(i.video_path)).lower() for i in self.items}
+        added = 0
+        for raw in paths:
+            p = Path(str(raw))
+            if str(p).lower() in have:
+                continue
+            have.add(str(p).lower())
+            self.items.append(BatchItem(str(p), episode=episode_from_filename(p.name)))
+            added += 1
+        self._rematch()
+        return added
 
     def set_video(self, path: str, title: str = "") -> None:
-        self.video.set(path)
-        self.video_title.set(title or Path(path).stem)
+        """①에서 [예약 업로드로 보내기]: 그 영상 1개로 시작 (제목은 템플릿 {filename} 등으로 만든다)."""
+        self.items = []
+        self.add_videos([path])
 
-    # ---------- 대기열 ----------
-    def _publish_at(self, tz: str) -> datetime:
+    def pick_videos(self):
+        paths = self._pick_files(parent=self, title="업로드할 영상 선택", filetypes=[("MP4", "*.mp4"), ("영상", "*.mov *.m4v *.mkv"), ("모든 파일", "*.*")])
+        if paths:
+            self.add_videos(list(paths))
+
+    def add_folder(self, folder) -> int:
+        try:
+            found = scan_folder(folder, recursive=bool(self.recursive.get()))
+        except ValueError as e:
+            messagebox.showerror("폴더", str(e), parent=self)
+            return 0
+        remember_folder(folder)
+        n = self.add_videos(found)
+        self.summary.set(f"폴더에서 영상 {len(found)}개 찾음 · 새로 추가 {n}개 (파일은 옮기거나 바꾸지 않습니다)")
+        self._refresh_last_button()
+        return n
+
+    def pick_folder(self):
+        d = self._pick_dir(parent=self, title="영상 폴더 선택", initialdir=last_folder() or None)
+        if d:
+            self.add_folder(d)
+
+    def reload_last_folder(self):
+        d = last_folder()
+        if not d:
+            messagebox.showinfo("최근 폴더", "최근에 쓴 영상 폴더가 없습니다.", parent=self)
+            return 0
+        return self.add_folder(d)
+
+    def _refresh_last_button(self):
+        self.btn_last.configure(state="normal" if last_folder() else "disabled")
+
+    def _selected_items(self) -> list[int]:
+        return sorted(self.items_tree.index(i) for i in self.items_tree.selection())
+
+    def remove_items(self):
+        for idx in reversed(self._selected_items()):
+            self.items.pop(idx)
+        self._rematch()
+
+    def clear_items(self):
+        self.items = []
+        self._rematch()
+
+    def pick_item_thumbnail(self):
+        sel = self._selected_items()
+        if not sel:
+            messagebox.showinfo("썸네일", "영상 목록에서 영상을 선택하세요.", parent=self)
+            return
+        p = self._pick_file(parent=self, title="썸네일 선택", filetypes=[("이미지", "*.jpg *.jpeg *.png"), ("모든 파일", "*.*")])
+        if p:
+            for idx in sel:
+                self.items[idx].thumb = ThumbMatch(p, "manual")
+            self._refresh_items()
+
+    def assign_episode(self):
+        sel = self._selected_items()
+        v = self.episode_var.get().strip()
+        if not sel or not v:
+            return
+        for k, idx in enumerate(sel):
+            self.items[idx].episode = str(int(v) + k) if v.isdigit() else v
+        self._refresh_items()
+
+    def _rematch(self):
+        """같은 이름 썸네일 → 템플릿 방식 순서로 다시 맞춘다. 직접 지정한 썸네일은 그대로 둔다."""
+        try:
+            tpl = self.form_template()
+        except tk.TclError:
+            return
+        auto = match_all([i.video_path for i in self.items], tpl)
+        for it, m in zip(self.items, auto):
+            if it.thumb.status != "manual":
+                it.thumb = m
+        self._refresh_items()
+
+    def _refresh_items(self):
+        for x in self.items_tree.get_children():
+            self.items_tree.delete(x)
+        total = 0
+        for i, it in enumerate(self.items, 1):
+            size = it.size
+            total += size
+            self.items_tree.insert("", "end", values=(i, it.name, it.thumb.label, it.episode or "-", human_size(size)))
+        if not self.items:
+            self.items_summary.set("영상을 선택하거나 폴더를 한꺼번에 추가하세요.")
+        else:
+            mbps = int(self.speed.get().split()[0]) if self.speed.get() else SPEEDS_MBPS[1]
+            thumbs = sum(bool(i.thumb.path) for i in self.items)
+            self.items_summary.set(f"{len(self.items)}개 · 총 {human_size(total)} · 썸네일 {thumbs}/{len(self.items)} · "
+                                   f"{mbps} Mbps 기준 예상 약 {human_duration(estimate_seconds(total, mbps))} (참고용, 실제 속도에 따라 다름)")
+        self._refresh_last_button()
+
+    # ================= 예약 =================
+    def _on_kind(self):
+        st = "normal" if self.publish_kind.get() == SCHEDULE else "disabled"
+        for w in self.sched_widgets:
+            w.configure(state=st)
+
+    def _zone_now(self):
+        p = self.selected_profile()
+        return datetime.fromtimestamp(self._clock(), timezone.utc).astimezone(get_zone(p.timezone if p else "Asia/Seoul"))
+
+    def set_day(self, days_from_today: int):
+        self.pub_date.set((self._zone_now().date() + timedelta(days=days_from_today)).isoformat())
+
+    def schedule(self, count: int) -> list[datetime] | None:
+        if self.publish_kind.get() != SCHEDULE:
+            return None
+        p = self.selected_profile()
         try:
             d = date.fromisoformat(self.pub_date.get().strip())
             h, m = self.pub_time.get().strip().split(":")
             t = dtime(int(h), int(m))
-        except ValueError:
-            raise ScheduleError("예약 날짜/시각 형식이 올바르지 않습니다 (예: 2026-10-06, 18:00).") from None
-        return local_to_utc(d, t, tz)
+            every = int(self.every_days.get())
+        except (ValueError, tk.TclError):
+            raise ScheduleError("예약 날짜/시각 형식이 올바르지 않습니다 (예: 2026-10-06, 19:00).") from None
+        return schedule_times(d, t, p.timezone, count, self.interval.get(), every)
 
-    def add_job(self):
+    def build_plan(self) -> BatchPlan:
         p = self.selected_profile()
         if p is None:
-            messagebox.showwarning("채널", "채널을 선택하세요. 없으면 [YouTube 채널 관리]에서 등록하세요.", parent=self)
-            return None
-        mode = self._mode()
+            raise QueueError("채널을 선택하세요. 없으면 [YouTube 채널 관리]에서 등록하세요.")
+        tpl = self.form_template()
+        times = self.schedule(len(self.items))
+        snap = self.q.snapshot()
+        queued = {str(Path(j.video_path)).lower() for j in snap if j.status != CANCELLED}
+        now = datetime.fromtimestamp(self._clock(), timezone.utc)
+        return build_plan(p, self.items, tpl, times=times, privacy_now=_key(PRIVACY_LABELS, self.privacy_now.get()),
+                          now=now, queued_paths=queued, capacity=MAX_JOBS - len(snap))
+
+    def preview(self):
         try:
-            publish_at = self._publish_at(p.timezone) if mode == SCHEDULE else None
-            job = self.q.make_job(profile_id=p.profile_id, video_path=self.video.get(), title=self.video_title.get(),
-                                  description=self.txt_desc.get("1.0", "end").strip(), tags=self.tags.get(),
-                                  thumbnail_path=self.thumbnail.get(),
-                                  privacy="private" if mode == SCHEDULE else mode, publish_at=publish_at)
-            self.q.add(job)
-        except (QueueError, ScheduleError, ValueError) as e:
+            plan = self.build_plan()
+        except (QueueError, ScheduleError, MetadataError, ValueError) as e:
             messagebox.showerror("예약 업로드", str(e), parent=self)
             return None
-        self.video.set("")
-        self.video_title.set("")
-        self.refresh_jobs(select=job.job_id)
-        return job
+        p = self.selected_profile()
+        verify = None
+        if p is not None and p.channel_id:
+            q, profiles, expected = self.q, self.profiles, p.channel_id
+            verify = lambda: verify_channel(q.api_factory(p, profiles), expected)  # noqa: E731
+        if self.preview_win is not None:
+            try:
+                self.preview_win.destroy()
+            except tk.TclError:
+                pass
+        self.preview_win = preview_ui.PreviewDialog(self, plan, on_confirm=self.enqueue, verify=verify)
+        return self.preview_win
 
-    def _selected_job(self) -> str:
-        sel = self.tree.selection()
-        return sel[0] if sel else ""
+    def enqueue(self, plan: BatchPlan):
+        """미리보기에서 [N개 대기열에 추가]: 모두 검증한 뒤 한꺼번에 넣는다 (하나라도 실패하면 하나도 넣지 않음)."""
+        if not plan.ok:
+            return None
+        try:
+            jobs = [self.q.make_job(profile_id=plan.profile_id, video_path=it.video_path, title=it.title,
+                                    description=it.description, tags=it.tags, thumbnail_path=it.thumbnail_path,
+                                    category_id=it.category_id, language=it.language, made_for_kids=it.made_for_kids,
+                                    privacy=it.privacy, publish_at=it.publish_at) for it in plan.items]
+            if any(j.channel_id != plan.channel_id for j in jobs):
+                raise QueueError("미리보기 뒤 채널 연결이 바뀌었습니다. 다시 미리보기 하세요.")
+            if len(self.q.jobs) + len(jobs) > MAX_JOBS:
+                raise QueueError(f"예약 업로드 대기열은 최대 {MAX_JOBS}개입니다.")
+            for j in jobs:
+                self.q.add(j)
+        except QueueError as e:
+            messagebox.showerror("예약 업로드", str(e), parent=self)
+            return None
+        if self.template_id:
+            self.templates.remember(plan.profile_id, self.template_id)
+        self.items = []
+        self._refresh_items()
+        self.refresh_jobs(select=jobs[0].job_id if jobs else None)
+        self.summary.set(f"✓ {len(jobs)}개를 대기열에 추가했습니다. [▶ 예약 업로드 시작]을 누르세요.")
+        return jobs
+
+    # ================= 대기열 =================
+    def _selected_jobs(self) -> list[str]:
+        return list(self.tree.selection())
 
     def _act(self, fn, *args) -> None:
-        jid = self._selected_job()
-        if not jid:
-            return
-        try:
-            fn(jid, *args)
-        except QueueError as e:
-            messagebox.showwarning("예약 업로드", str(e), parent=self)
-        self.refresh_jobs(select=jid)
+        sel = self._selected_jobs()
+        errors = []
+        for jid in sel:
+            try:
+                fn(jid, *args)
+            except QueueError as e:
+                errors.append(str(e))
+        if errors:
+            messagebox.showwarning("예약 업로드", "\n".join(dict.fromkeys(errors)), parent=self)
+        self.refresh_jobs(select=sel[0] if sel else None)
 
     def retry_selected(self):
         self._act(self.q.retry)
@@ -265,50 +665,74 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self._act(self.q.cancel_job)
 
     def remove_selected(self):
-        jid = self._selected_job()
-        if jid and messagebox.askyesno("삭제", "선택한 작업을 대기열에서 지울까요? (YouTube에 올라간 영상은 지우지 않습니다)",
+        sel = self._selected_jobs()
+        if sel and messagebox.askyesno("삭제", f"선택한 {len(sel)}개를 대기열에서 지울까요? (YouTube에 올라간 영상은 지우지 않습니다)",
                                        parent=self):
             self._act(self.q.remove)
 
+    def select_all(self):
+        self.tree.selection_set(self.tree.get_children())
+
+    def retry_failed(self):
+        n = 0
+        for j in self.q.snapshot():
+            if j.status == FAILED:
+                self.q.retry(j.job_id)
+                n += 1
+        self.refresh_jobs()
+        self.summary.set(f"실패 {n}개를 다시 대기로 바꿨습니다." if n else "실패한 작업이 없습니다.")
+
     def _move(self, delta: int):
-        self._act(self.q.move, delta)
+        sel = self._selected_jobs()
+        if len(sel) == 1:
+            self._act(self.q.move, delta)
 
     def clear_done(self):
-        self.q.clear_done()
+        for j in self.q.snapshot():
+            if j.status == COMPLETE:
+                self.q.remove(j.job_id)
         self.refresh_jobs()
 
     def start(self):
-        if not any(j.status == "PENDING" for j in self.q.snapshot()):
+        if not any(j.status == PENDING for j in self.q.snapshot()):
             messagebox.showinfo("예약 업로드", "대기 중인 작업이 없습니다. 실패/중지 작업은 [다시 시도]를 누르세요.", parent=self)
-            return
+            return False
+        kind = self._live_guard() if self._live_guard else ""
+        if kind == "local" and not preview_ui.ask_bandwidth(self):  # Cloud LIVE는 PC 대역폭을 쓰지 않음 → 묻지 않음
+            self.summary.set("이 PC에서 LIVE 송출 중이라 업로드를 시작하지 않았습니다. LIVE가 끝난 뒤 [▶ 예약 업로드 시작]을 누르세요.")
+            return False
         self.q.start()
         self.refresh_jobs()
+        return True
 
     def stop(self):
         self.q.cancel.set()  # 현재 조각 전송 뒤 멈춘다 (UI를 막지 않도록 join하지 않음)
         self.summary.set("중지 중… 다시 시작하면 받은 위치부터 이어서 올립니다.")
 
     def refresh_jobs(self, select: str | None = None) -> None:
-        sel = select if select is not None else self._selected_job()
+        keep = [select] if select else self._selected_jobs()
         jobs = self.q.snapshot()
         for x in self.tree.get_children():
             self.tree.delete(x)
         for i, j in enumerate(jobs, 1):
-            self.tree.insert("", "end", iid=j.job_id, values=(
+            tag = "active" if j.status in ACTIVE_STATES else j.status
+            self.tree.insert("", "end", iid=j.job_id, tags=(tag,), values=(
                 i, j.profile_alias, j.title, j.publish_local_text(), j.status_label, f"{j.progress * 100:.0f}%"))
-        if sel and self.tree.exists(sel):
-            self.tree.selection_set(sel)
+        keep = [k for k in keep if k and self.tree.exists(k)]
+        if keep:
+            self.tree.selection_set(keep)
         c = self.q.counts()
         running = self.q.running
         self.summary.set(f"대기 {c['waiting']} · 예약 완료 {c['done']} · 확인 필요 {c['attention']} · 전체 {c['total']}/{MAX_JOBS}"
                          + (" · 업로드 중" if running else ""))
         self.btn_start.configure(state="disabled" if running else "normal")
         self.btn_stop.configure(state="normal" if running else "disabled")
+        self.usage.set(usage_text(self._clock))
         self._on_select()
 
     def _on_select(self) -> None:
-        jid = self._selected_job()
-        j = next((x for x in self.q.snapshot() if x.job_id == jid), None)
+        sel = self._selected_jobs()
+        j = next((x for x in self.q.snapshot() if sel and x.job_id == sel[0]), None)
         if j is None:
             self.detail.set("")
             return
@@ -345,10 +769,11 @@ class MultiChannelUploadWindow(tk.Toplevel):
         if getattr(self, "_destroyed", False):
             return
         self._destroyed = True
-        if self.channel_win is not None:
-            try:
-                self.channel_win.destroy()
-            except tk.TclError:
-                pass
+        for w in (self.channel_win, self.preview_win):
+            if w is not None:
+                try:
+                    w.destroy()
+                except tk.TclError:
+                    pass
         super().destroy()
         release_tk_variables(self)

@@ -136,10 +136,20 @@ def upload_window(root, env, ps, **kw):
 
 def fill(w, profile, video, title, day, at="18:00"):
     w.select_profile(profile.profile_id)
-    w.video.set(str(video))
-    w.video_title.set(title)
+    w.clear_items()
+    w.add_videos([str(video)])
+    w.title_template.set(title)
     w.pub_date.set(day)
     w.pub_time.set(at)
+
+
+def add_via_preview(root, w):
+    """[미리보기] → 실제 채널 확인이 끝날 때까지 기다림 → [N개 대기열에 추가]."""
+    dlg = w.preview()
+    if dlg is None:
+        return None
+    assert pump(root, lambda: dlg.verify_state != "pending", timeout=20)
+    return dlg.confirm()
 
 
 def test_upload_window_kr_jp_schedule_and_run(root, studio, fake, tmp_path, quiet):
@@ -149,19 +159,22 @@ def test_upload_window_kr_jp_schedule_and_run(root, studio, fake, tmp_path, quie
     tomorrow = (datetime.fromtimestamp(env.clock(), timezone.utc) + timedelta(days=1)).date().isoformat()
     fill(w, kr, video, "한국 영상", tomorrow, "18:00")
     w.tags.set("샹송, 올드팝")
-    w.thumbnail.set(str(jpeg(tmp_path / "t.jpg")))
-    assert w.add_job() is not None
-    fill(w, jp, video, "日本の動画", tomorrow, "18:00")
-    assert w.add_job() is not None
+    w.items[0].thumb.path, w.items[0].thumb.status = str(jpeg(tmp_path / "t.jpg")), "manual"
+    assert add_via_preview(root, w)
+    fill(w, jp, video, "日本の動画", tomorrow, "18:00")  # 같은 영상 → 경고만 (차단 아님)
+    assert add_via_preview(root, w)
     a, b = q.snapshot()
     assert a.publish_local_text().endswith("18:00 Asia/Seoul") and b.publish_local_text().endswith("18:00 Asia/Tokyo")
     assert a.publish_at_utc == b.publish_at_utc == tomorrow + "T09:00:00Z"  # KST/JST 모두 UTC+9 · 채널 시간대 기준 18:00
-    assert w.video.get() == ""  # 추가 후 다음 영상 입력 준비
-    # 잘못된 날짜 / 지난 시각
+    assert (a.title, b.title) == ("한국 영상", "日本の動画") and a.tags == ["샹송", "올드팝"]
+    assert w.items == []  # 추가 후 다음 영상 입력 준비
+    # 잘못된 날짜 / 지난 시각 → 미리보기 전에/미리보기에서 차단
     fill(w, kr, video, "x", "2026/10/06")
-    assert w.add_job() is None and "형식" in str(quiet[-1])
+    assert w.preview() is None and "형식" in str(quiet[-1])
     fill(w, kr, video, "x", "2020-01-01")
-    assert w.add_job() is None
+    dlg = w.preview()
+    assert dlg.errors and str(dlg.btn_add.cget("state")) == "disabled" and dlg.confirm() is None
+    dlg.destroy()
     w.start()
     assert pump(root, lambda: all(j.status == COMPLETE for j in q.snapshot()) and not q.running, timeout=30)
     assert pump(root, lambda: str(w.btn_start.cget("state")) == "normal")
@@ -178,13 +191,13 @@ def test_upload_window_kr_jp_schedule_and_run(root, studio, fake, tmp_path, quie
 
 def test_upload_window_shows_blocked_wrong_channel(root, studio, fake):
     env, ps, kr, jp, video = studio
-    env.accounts[kr.profile_id] = (JP, "tok-wrong")
     w, q = upload_window(root, env, ps)
-    w.publish_mode.set("지금 비공개로 올리기")
-    w._on_mode()
+    w.publish_kind.set("now")
+    w._on_kind()
     assert str(w.ent_date.cget("state")) == "disabled"
     fill(w, kr, video, "차단될 영상", "")
-    job = w.add_job()
+    job = add_via_preview(root, w)[0]
+    env.accounts[kr.profile_id] = (JP, "tok-wrong")  # 미리보기 뒤에 계정이 바뀌어도 업로드 직전 확인에서 차단
     w.start()
     assert pump(root, lambda: q.snapshot()[0].status == BLOCKED and not q.running, timeout=20)
     assert pump(root, lambda: w.tree.set(job.job_id, "state") == "차단 (채널 불일치)")
@@ -272,7 +285,8 @@ def test_send_finished_video_to_upload(app, tmp_path, quiet):
     assert app._send_to_upload() is None and "완료된 영상만" in str(quiet[-1])
     app.qtree.selection_set(items[1])
     w = app._send_to_upload()
-    assert w is not None and w.video.get() == str(out) and w.video_title.get() == "SET_10회차_FINAL"
+    assert w is not None and [i.video_path for i in w.items] == [str(out)]
+    assert w.title_template.get() == "{filename}"  # 제목 기본값 = 파일 이름 (SET_10회차_FINAL)
     assert [j.status for j in app.jobs] == ["대기", "완료"]  # 제작 대기열은 그대로
 
 

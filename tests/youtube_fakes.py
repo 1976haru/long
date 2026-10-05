@@ -184,10 +184,12 @@ class FakeYouTube:
             if a != have:
                 return 308, None, ack
             if self.upload_fail:
-                _, status, keep = self.upload_fail.popleft()
+                item = self.upload_fail.popleft()  # ("chunk", status, keep_bytes[, headers])
+                _, status, keep = item[:3]
                 if keep:
                     s["data"] += raw
-                return status, {"error": {"code": status, "errors": [{"reason": "backendError"}]}}, {}
+                return status, {"error": {"code": status, "errors": [{"reason": "backendError"}]}}, (
+                    item[3] if len(item) > 3 else {})
             s["data"] += raw
             if len(s["data"]) < s["total"]:
                 return 308, None, {"Range": f"bytes=0-{len(s['data']) - 1}"}

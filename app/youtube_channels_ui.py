@@ -18,6 +18,7 @@ from .youtube_accounts import (
     ChannelProfile, ProfileError, ProfileStore, connect_profile, disconnect_profile, new_profile_id,
 )
 from .youtube_api import YouTubeApiError
+from .youtube_batch import UploadTemplateStore, clone_profile
 from .youtube_metadata import DEFAULT_CATEGORIES, LANGUAGES, PRIVACY_LABELS, TIMEZONES
 from .youtube_oauth import OAuthError, load_client_file
 
@@ -33,13 +34,16 @@ def _key(mapping: dict, label: str) -> str:
 class ChannelManagerWindow(tk.Toplevel):
     def __init__(self, master, *, profiles: ProfileStore | None = None, connect: Callable[..., ChannelProfile] = connect_profile,
                  open_browser: Callable[[str], object] = webbrowser.open, pick_file: Callable = filedialog.askopenfilename,
-                 on_change: Callable[[], None] | None = None):
+                 on_change: Callable[[], None] | None = None, templates: UploadTemplateStore | None = None):
         super().__init__(master)
         self.title("YouTube 채널 관리")
-        self.geometry("860x600")
+        self.geometry(f"860x{max(520, min(660, self.winfo_screenheight() - 90))}")
         self.minsize(760, 520)
         self.transient(master)
         self.profiles = profiles or ProfileStore()
+        self.templates = templates or UploadTemplateStore()
+        self._template_ids: list[str] = []
+        self.default_template = tk.StringVar()
         self._connect = connect
         self._open_browser = open_browser
         self._pick_file = pick_file
@@ -81,6 +85,8 @@ class ChannelManagerWindow(tk.Toplevel):
         self.tree.bind("<<TreeviewSelect>>", lambda e: self._on_select())
         tb = ttk.Frame(root); tb.pack(fill="x", pady=(4, 8))
         ttk.Button(tb, text="＋ 새 채널", command=self.new_profile).pack(side="left")
+        self.btn_clone = ttk.Button(tb, text="복제 (설정만, 연결은 복제 안 함)", command=self.clone_selected)
+        self.btn_clone.pack(side="left", padx=6)
         self.btn_delete = ttk.Button(tb, text="채널 삭제", command=self.delete_selected)
         self.btn_delete.pack(side="right")
 
@@ -105,6 +111,8 @@ class ChannelManagerWindow(tk.Toplevel):
         ttk.Button(cf, text="찾기", command=self._pick).pack(side="left", padx=(4, 0))
         row(6, "OAuth JSON", cf)
         row(7, "연결 상태", ttk.Label(form, textvariable=self.channel_text))
+        self.cb_default_template = ttk.Combobox(form, textvariable=self.default_template, state="readonly")
+        row(8, "기본 업로드 템플릿", self.cb_default_template)
 
         act = ttk.Frame(root); act.pack(fill="x", pady=(8, 0))
         self.btn_save = ttk.Button(act, text="저장", command=self.save_form)
@@ -145,8 +153,21 @@ class ChannelManagerWindow(tk.Toplevel):
         st = "disabled" if self.busy else "normal"
         self.btn_save.configure(state=st)
         self.btn_connect.configure(state=st)
-        for b in (self.btn_delete, self.btn_disconnect):
+        for b in (self.btn_delete, self.btn_disconnect, self.btn_clone):
             b.configure(state="normal" if has and not self.busy else "disabled")
+
+    def _load_templates(self, profile: ChannelProfile | None) -> None:
+        own = self.templates.for_profile(profile.profile_id) if profile else []
+        self._template_ids = [""] + [tid for tid, _ in own]
+        names = ["(없음 · 채널 기본값)"] + [t.name for _, t in own]
+        self.cb_default_template.configure(values=names)
+        cur = profile.default_template_id if profile else ""
+        self.default_template.set(names[self._template_ids.index(cur)] if cur in self._template_ids else names[0])
+
+    def _template_choice(self) -> str:
+        names = list(self.cb_default_template.cget("values") or ())
+        v = self.default_template.get()
+        return self._template_ids[names.index(v)] if v in names and names.index(v) < len(self._template_ids) else ""
 
     def _on_select(self) -> None:
         sel = self.tree.selection()
@@ -164,6 +185,7 @@ class ChannelManagerWindow(tk.Toplevel):
         self.made_for_kids.set(bool(p.made_for_kids))
         self.client_file.set(p.client_file)
         self.channel_text.set(f"✓ {p.channel_title} ({p.channel_id})" if p.channel_id else "연결 안 됨")
+        self._load_templates(p)
         self._say(f"'{p.alias}' 선택됨")
         self._buttons()
 
@@ -180,6 +202,7 @@ class ChannelManagerWindow(tk.Toplevel):
         self.made_for_kids.set(False)
         self.client_file.set("")
         self.channel_text.set("연결 안 됨")
+        self._load_templates(None)
         self._say("별칭(예: 🇰🇷 한국 시니어, 🇯🇵 CHILI LAB)과 언어/시간대를 입력하고 [저장]하세요.")
         self._buttons()
 
@@ -197,8 +220,31 @@ class ChannelManagerWindow(tk.Toplevel):
             language=_key(LANGUAGES, self.language.get()), timezone=self.timezone.get().strip(),
             category_id=_key(DEFAULT_CATEGORIES, self.category.get()), privacy=_key(PRIVACY_LABELS, self.privacy.get()),
             made_for_kids=bool(self.made_for_kids.get()),
-            client_file=self.client_file.get().strip().strip('"') or (cur.client_file if cur else ""))
+            client_file=self.client_file.get().strip().strip('"') or (cur.client_file if cur else ""),
+            default_template_id=self._template_choice() if cur else "")
         return p.validate()
+
+    def clone_selected(self) -> ChannelProfile | None:
+        """설정만 복제 → 새 별칭으로 바로 고칠 수 있게 선택. 채널 ID/이름, OAuth JSON, token은 복제하지 않는다."""
+        src = self.profiles.get(self.selected_id) if self.selected_id else None
+        if src is None or self.busy:
+            return None
+        names = {p.alias for p in self.profiles.all()}
+        alias = f"{src.alias} 복사본"
+        k = 2
+        while alias in names:
+            alias = f"{src.alias} 복사본 {k}"
+            k += 1
+        try:
+            new = clone_profile(self.profiles, self.templates, src, alias)
+        except (ProfileError, ValueError) as e:
+            self._say(f"✗ {e}", "firebrick")
+            return None
+        self.refresh(new.profile_id)
+        self._on_select()
+        self._say(f"✓ '{src.alias}' 설정을 복제했습니다. 별칭/언어를 바꾸고 [저장] → [Google 계정 연결]을 하세요.", "darkgreen")
+        self._changed()
+        return new
 
     def save_form(self) -> ChannelProfile | None:
         if self.busy:

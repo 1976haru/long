@@ -14,8 +14,12 @@ DESCRIPTION_MAX = 5000
 TAGS_TOTAL_MAX = 500  # YouTube 태그 전체 길이 한도
 THUMBNAIL_MAX_BYTES = 50 * 1024 * 1024  # thumbnails.set 공식 최대
 THUMBNAIL_RECOMMENDED = (1280, 720)
-TEMPLATE_VARIABLES = ("date", "month", "day", "weekday", "session", "channel")
+TEMPLATE_VARIABLES = ("date", "yyyy", "mm", "dd", "month", "day", "weekday", "session", "channel",
+                      "series", "episode", "n", "filename")
 WEEKDAYS_KO = ("월", "화", "수", "목", "금", "토", "일")
+WEEKDAYS_BY_LANGUAGE = {"ko": WEEKDAYS_KO, "ja": ("月", "火", "水", "木", "金", "土", "日"),
+                        "en": ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
+                        "fr": ("lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim.")}
 PRIVACY_LABELS = {"public": "공개", "unlisted": "일부공개", "private": "비공개"}
 # 친숙한 이름 → YouTube categoryId (기본값). 실제 목록은 videoCategories.list로도 받을 수 있다.
 DEFAULT_CATEGORIES = {"10": "음악", "24": "엔터테인먼트", "22": "인물/블로그", "29": "비영리/사회운동"}
@@ -88,15 +92,20 @@ def check_template(text: str) -> None:
                             + "  (사용 가능: " + " ".join("{" + v + "}" for v in TEMPLATE_VARIABLES) + ")")
 
 
-def render_template(text: str, *, local_start: datetime, session: int, channel: str = "") -> str:
-    """local_start는 시간대가 있는(aware) 현지 시각. {session}은 2자리 (01, 02 …)."""
+def render_template(text: str, *, local_start: datetime, session: int, channel: str = "", series: str = "",
+                    episode: str = "", n: int | None = None, filename: str = "", language: str = "ko") -> str:
+    """local_start는 시간대가 있는(aware) 현지 시각. {session}은 2자리 (01, 02 …), {n}은 순번 (1, 2 …).
+    {weekday}는 채널 언어 기준 (한국어 '화', 일본어 '火'). {filename}은 확장자 없는 파일 이름."""
     if local_start.tzinfo is None:
         raise MetadataError("시간대 없는 날짜는 사용할 수 없습니다.")
     check_template(text)
+    weekdays = WEEKDAYS_BY_LANGUAGE.get(language or "ko", WEEKDAYS_KO)
     values = {
-        "date": local_start.strftime("%Y.%m.%d"), "month": local_start.strftime("%m"),
-        "day": local_start.strftime("%d"), "weekday": WEEKDAYS_KO[local_start.weekday()],
-        "session": f"{session:02d}", "channel": channel or "",
+        "date": local_start.strftime("%Y.%m.%d"), "yyyy": local_start.strftime("%Y"), "mm": local_start.strftime("%m"),
+        "dd": local_start.strftime("%d"), "month": local_start.strftime("%m"),
+        "day": local_start.strftime("%d"), "weekday": weekdays[local_start.weekday()],
+        "session": f"{session:02d}", "channel": channel or "", "series": series or "", "episode": episode or "",
+        "n": str(session if n is None else n), "filename": filename or "",
     }
     return (text or "").format(**values)
 
@@ -235,6 +244,7 @@ class MetadataTemplate:
     privacy_status: str = "unlisted"
     made_for_kids: bool = False
     default_language: str = ""
+    series: str = ""  # 예약 업로드 {series}
 
     def validate(self) -> "MetadataTemplate":
         if not (self.name or "").strip():

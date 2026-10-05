@@ -19,6 +19,10 @@ from .settings import load_settings, save_settings, update_settings
 from .live_supervisor import busy_message
 from .live_ui import LiveWindow
 from .tooling import FFMPEG_GUARD, discover_ffmpeg, prevent_windows_sleep, release_tk_variables, remember_ffmpeg
+from .ui_scroll import ScrollFrame
+
+PRODUCT_NAME = "YouTube Playlist Studio"
+PRODUCT_TITLE = f"{PRODUCT_NAME} v0.3 (Playlist Long Video Maker)"  # 설정 폴더/EXE 이름은 그대로
 
 
 @dataclass
@@ -51,9 +55,11 @@ class MainWindow(tk.Tk):
     def __init__(self, app_root: Path):
         super().__init__()
         self.app_root = Path(app_root)
-        self.title("Playlist Long Video Maker v0.3")
-        self.geometry("1080x990")
-        self.minsize(930, 850)
+        self.title(PRODUCT_TITLE)
+        # 작은 화면(1366×768)에서도 열리도록 화면 높이에 맞춘다. 내용은 세로 스크롤로 끝까지 닿는다.
+        sh = self.winfo_screenheight()
+        self.geometry(f"1080x{max(560, min(990, sh - 90))}")
+        self.minsize(820, 520)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         self.ffmpeg = None
@@ -124,13 +130,30 @@ class MainWindow(tk.Tk):
         from .youtube_upload_queue import queue_counts
         return self.upload_queue.counts() if self.upload_queue is not None else queue_counts()
 
+    def _live_kind(self):
+        """'local' = 이 PC에서 송출 중 (인터넷 업로드 대역폭 사용), 'cloud' = Cloud 서버가 송출, '' = LIVE 없음."""
+        w = self._live_window()
+        if w is None:
+            return ""
+        try:
+            if w.controller.active:
+                return "local"
+            if w.cloud.cloud_live_active:
+                return "cloud"
+        except Exception:
+            pass
+        return ""
+
     def _live_state_text(self):
         w = self._live_window()
         if w is None:
             return "LIVE 창 닫힘"
+        kind = self._live_kind()
+        if kind == "local":
+            return "● LIVE 송출 중 (내 PC)"
+        if kind == "cloud":
+            return "● CLOUD LIVE"
         try:
-            if w.controller.active:
-                return "● LIVE 송출 중 (내 PC)"
             if w.cloud.busy:
                 return "LIVE Cloud 확인 중"
         except Exception:
@@ -149,12 +172,14 @@ class MainWindow(tk.Tk):
         self.after(1500, self._refresh_summary)
 
     def _ui(self):
-        root = ttk.Frame(self, padding=12)
+        self.scroll = ScrollFrame(self)
+        self.scroll.pack(fill="both", expand=True)
+        root = ttk.Frame(self.scroll.body, padding=12)
         root.pack(fill="both", expand=True)
 
         top = ttk.Frame(root)
         top.pack(fill="x")
-        ttk.Label(top, text="Playlist Long Video Maker", font=("Segoe UI", 18, "bold")).pack(side="left")
+        ttk.Label(top, text=PRODUCT_NAME, font=("Segoe UI", 18, "bold")).pack(side="left")
         ttk.Label(top, text="v0.3.0").pack(side="right")
         ttk.Label(root, text="완성된 SET MP4를 회차 기준으로 무손실 반복 연결합니다.").pack(anchor="w")
         tr = ttk.Frame(root); tr.pack(fill="x", pady=(4, 8))
@@ -424,7 +449,8 @@ class MainWindow(tk.Tk):
         w = self._alive(self.upload_win)
         if w is None:
             from .youtube_upload_ui import MultiChannelUploadWindow
-            w = self.upload_win = MultiChannelUploadWindow(self, upload_queue=self._get_upload_queue())
+            w = self.upload_win = MultiChannelUploadWindow(self, upload_queue=self._get_upload_queue(),
+                                                           live_guard=self._live_kind)
         else:
             w.deiconify(); w.lift(); w.focus_set()
         if video_path:
