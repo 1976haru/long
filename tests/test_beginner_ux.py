@@ -143,7 +143,8 @@ def test_setup_wizard_four_steps_kr_preset_and_connect(root, tmp_path, quiet):
     w.pick_client_file()
     w.start_connect()
     assert pump(root, lambda: w.connect_msg.get() == "✓ 연결 완료")
-    assert "채널 이름: 한국 시니어" in w.result_text.get() and "시간대: Asia/Seoul" in w.result_text.get()
+    assert "실제 YouTube 채널: 한국 시니어" in w.result_text.get() and "시간대: Asia/Seoul" in w.result_text.get()
+    assert "별칭: 내 한국 채널" in w.result_text.get()
     assert KR["id"] not in " ".join(texts(w.body))  # channel ID는 숨김
     w.toggle_advanced()
     assert any(KR["id"] in x for x in texts(w.body))  # [고급 정보 보기]
@@ -157,6 +158,63 @@ def test_setup_wizard_four_steps_kr_preset_and_connect(root, tmp_path, quiet):
     assert load_settings()["upload_defaults"] == {"time": "21:00"} and "STEP 4 / 4" in w.step_title.get()
     w.finish(open_upload=True)
     assert first_run_done() and opened == [1] and connected == [("내 한국 채널", str(tmp_path / "client_secret_desktop.json"))]
+
+
+@pytest.mark.parametrize("preset,default,custom,lang,tz", [
+    ("kr", "내 한국 채널", "한국 시니어", "ko", "Asia/Seoul"),
+    ("jp", "내 일본 채널", "CHILI LAB", "ja", "Asia/Tokyo"),
+])
+def test_wizard_preset_alias_editable_and_persists(root, tmp_path, preset, default, custom, lang, tz):
+    from app.help_ui import SetupWizard
+    ps = ProfileStore()
+    got = []
+
+    def fake_connect(profiles, p, path, open_browser=None):
+        got.append(p.alias)
+        p.client_file, p.channel_id, p.channel_title = path, KR["id"], "실제 채널 이름"
+        return profiles.save(p)
+    w = SetupWizard(root, profiles=ps, connect=fake_connect, ffmpeg_finder=lambda: ("f", "p"), internet=lambda: True,
+                    pick_file=lambda **kw: str(client_json(tmp_path)), guide=lambda parent: True)
+    w.next()
+    p = w.choose_preset(preset)
+    assert w.alias_var.get() == default and w.ent_alias.winfo_exists()
+    body = texts(w.body)
+    assert "YouTube 채널 이름(별칭)" in body
+    assert any("실제 YouTube 채널 이름과 달라도 됩니다" in x for x in body)
+    w.alias_var.set(f"  {custom}  ")
+    assert w.apply_alias()
+    saved = ps.get(p.profile_id)
+    assert (saved.alias, saved.language, saved.timezone) == (custom, lang, tz)  # trim, 언어·시간대 유지
+    assert w.alias_var.get() == custom
+    w.pick_client_file()
+    w.start_connect()
+    assert pump(root, lambda: w.connect_msg.get() == "✓ 연결 완료")
+    assert got == [custom]  # 연결에 쓴 이름 = 사용자가 정한 별칭
+    assert f"별칭: {custom}" in w.result_text.get() and "실제 YouTube 채널: 실제 채널 이름" in w.result_text.get()
+    assert ProfileStore().get(p.profile_id).alias == custom  # 저장 유지 (다시 읽어도)
+    w.destroy()
+
+
+def test_wizard_alias_blank_and_duplicate_blocked(root):
+    from app.help_ui import SetupWizard
+    ps = ProfileStore()
+    ps.add(ChannelProfile(new_profile_id(), "한국 시니어", language="ko", timezone="Asia/Seoul"))
+    w = SetupWizard(root, profiles=ps, ffmpeg_finder=lambda: ("f", "p"), internet=lambda: True)
+    w.next()
+    p = w.choose_preset("kr")
+    w.alias_var.set("   ")
+    assert not w.apply_alias() and "이름을 입력하세요" in w.alias_msg.get()
+    w.next()
+    assert "STEP 2" in w.step_title.get()  # 빈 이름이면 다음으로 가지 않음
+    w.alias_var.set("한국 시니어")
+    assert not w.apply_alias() and "같은 별칭" in w.alias_msg.get()
+    assert ps.get(p.profile_id).alias == "내 한국 채널"  # 기존 값 유지
+    w.start_connect()
+    assert not w.busy  # 연결도 시작하지 않음
+    w.alias_var.set("한국 시니어 2")
+    w.next()
+    assert "STEP 3" in w.step_title.get() and ps.get(p.profile_id).alias == "한국 시니어 2"
+    w.destroy()
 
 
 def test_wizard_ffmpeg_missing_shows_fix_buttons(root, quiet):

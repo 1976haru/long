@@ -274,6 +274,8 @@ class SetupWizard(tk.Toplevel):
         self.env: list = []
         self.profile = None  # 이번에 만든/연결 중인 YouTube 채널
         self.client_file = tk.StringVar()
+        self.alias_var = tk.StringVar()  # 프로그램 안에서 부르는 이름 (실제 YouTube 채널 이름과 달라도 됨)
+        self.alias_msg = tk.StringVar()
         self.connect_msg = tk.StringVar()
         self.result_text = tk.StringVar()
         self.show_advanced = False
@@ -306,6 +308,8 @@ class SetupWizard(tk.Toplevel):
     def next(self):
         if self.busy:
             return
+        if self.step == 2 and self.profile is not None and not self.apply_alias():
+            return  # 별칭이 비었거나 겹치면 다음으로 가지 않는다
         if self.step == 3:
             self.save_defaults()
         if self.step == self.STEPS:
@@ -363,8 +367,20 @@ class SetupWizard(tk.Toplevel):
                       foreground="gray35", wraplength=640).pack(anchor="w", pady=(8, 0))
             return
         p = self.profile
-        box = ttk.LabelFrame(self.body, text=f"{p.alias} · {LANGUAGE_NAMES.get(p.language, p.language)} · {p.timezone}", padding=10)
+        box = ttk.LabelFrame(self.body, text=f"{channel_kind_label(p.language)} · "
+                             f"{LANGUAGE_NAMES.get(p.language, p.language)} · {p.timezone}", padding=10)
         box.pack(fill="x", pady=(6, 0))
+        ar = ttk.Frame(box); ar.pack(fill="x")
+        ttk.Label(ar, text="YouTube 채널 이름(별칭)").pack(side="left")
+        self.ent_alias = ttk.Entry(ar, textvariable=self.alias_var, width=28)
+        self.ent_alias.pack(side="left", padx=6)
+        self.ent_alias.bind("<Return>", lambda e: (self.apply_alias(), "break")[1])
+        ttk.Button(ar, text="이름 저장", command=self.apply_alias).pack(side="left")
+        ttk.Label(box, text="프로그램 안에서 구분하기 위한 이름입니다. 실제 YouTube 채널 이름과 달라도 됩니다.\n"
+                            "(실제 YouTube 채널 이름은 Google 연결 후 따로 보여드립니다.)",
+                  foreground="gray35", justify="left", wraplength=620).pack(anchor="w")
+        ttk.Label(box, textvariable=self.alias_msg, foreground="firebrick").pack(anchor="w")
+        ttk.Separator(box).pack(fill="x", pady=6)
         ttk.Label(box, text="Google 연결 파일이 필요합니다.\nGoogle Cloud에서 받은 '데스크톱 앱용 JSON 파일'입니다.",
                   justify="left").pack(anchor="w")
         fr = ttk.Frame(box); fr.pack(anchor="w", pady=6)
@@ -389,11 +405,38 @@ class SetupWizard(tk.Toplevel):
             alias, n = f"{pre['alias']} {n}", n + 1
         self.profile = self.profiles.add(ChannelProfile(new_profile_id(), alias, language=pre["language"],
                                                         timezone=pre["timezone"]))
+        self.alias_var.set(alias)  # 기본 이름 — 바로 아래 칸에서 자유롭게 바꿀 수 있다
+        self.alias_msg.set("")
         self.client_file.set("")
         self.connect_msg.set("")
         self.result_text.set("")
         self.render()
         return self.profile
+
+    def apply_alias(self) -> bool:
+        """별칭 저장: 앞뒤 공백 제거, 빈 이름/같은 별칭 거부 (채널 관리와 같은 규칙). 언어·시간대는 그대로."""
+        from .youtube_accounts import ProfileError
+        if self.profile is None:
+            return False
+        name = self.alias_var.get().strip()
+        self.alias_var.set(name)
+        if not name:
+            self.alias_msg.set("⚠ 이름을 입력하세요 (예: 한국 시니어).")
+            return False
+        cur = self.profiles.get(self.profile.profile_id) or self.profile
+        if name == cur.alias:
+            self.alias_msg.set("")
+            return True
+        old = cur.alias
+        cur.alias = name
+        try:
+            self.profile = self.profiles.save(cur)
+        except (ProfileError, ValueError) as e:
+            cur.alias = old
+            self.alias_msg.set(f"⚠ {e}")
+            return False
+        self.alias_msg.set("")
+        return True
 
     def _custom(self):
         if self._open_channels:
@@ -410,6 +453,8 @@ class SetupWizard(tk.Toplevel):
 
     def start_connect(self):
         if self.busy or self.profile is None:
+            return
+        if not self.apply_alias():
             return
         from .youtube_oauth import OAuthError, load_client_file
         from .ui_text import friendly_error
@@ -442,7 +487,8 @@ class SetupWizard(tk.Toplevel):
                 if ok:
                     self.profile = payload
                     self.connect_msg.set("✓ 연결 완료")
-                    self.result_text.set(f"연결된 채널\n채널 이름: {payload.channel_title}\n"
+                    self.result_text.set(f"✓ YouTube 채널 연결 완료\n별칭: {payload.alias}\n"
+                                         f"실제 YouTube 채널: {payload.channel_title}\n"
                                          f"언어: {LANGUAGE_NAMES.get(payload.language, payload.language)}\n시간대: {payload.timezone}")
                 else:
                     from .ui_text import friendly_error
