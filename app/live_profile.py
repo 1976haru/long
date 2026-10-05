@@ -113,6 +113,8 @@ class LiveConfig:
     audio_sample_rate: int = 44100
     # "copy" = DIRECT COPY (재인코딩 없음, LIVE READY 파일 전용) / "transcode" = libx264 실시간 인코딩
     mode: str = MODE_TRANSCODE
+    # "" = 단일 파일 / "concat" = Playlist manifest(ffconcat). Playlist는 DIRECT COPY 전용.
+    input_format: str = ""
 
     def __post_init__(self):
         object.__setattr__(self, "input_path", Path(self.input_path))
@@ -137,6 +139,10 @@ def validate_live_config(config: LiveConfig, *, check_input: bool = True) -> Non
         raise LiveConfigError("키프레임 간격은 1~4초 범위여야 합니다.")
     if config.mode not in (MODE_COPY, MODE_TRANSCODE):
         raise LiveConfigError("송출 방식이 올바르지 않습니다.")
+    if config.input_format not in ("", "concat"):
+        raise LiveConfigError("입력 형식이 올바르지 않습니다.")
+    if config.input_format == "concat" and config.mode != MODE_COPY:
+        raise LiveConfigError("여러 영상 Playlist는 DIRECT COPY(재인코딩 없음)로만 송출합니다.")
     if config.audio_sample_rate not in (44100, 48000):
         raise LiveConfigError("오디오 샘플레이트는 44100 또는 48000 이어야 합니다.")
     if check_input:

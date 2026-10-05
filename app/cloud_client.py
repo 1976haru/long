@@ -28,13 +28,16 @@ from .cloud_model import (
 )
 from .core import creationflags_no_window
 from .live_core import build_output_url
+from .live_playlist import MAX_PLAYLIST_ITEMS
 from .live_profile import redact
+from .live_session import SESSION_CONTINUOUS, SESSION_MODES
 
 DETAIL_LIMIT = 200
 LOG_LINES = 50
 POLL_SECONDS = 10.0
 UPLOAD_CHUNK = 1024 * 1024
 MIN_FREE_BYTES = 2 * 1024**3
+UPLOAD_MARGIN_BYTES = 256 * 1024**2
 q = shlex.quote
 
 
@@ -184,10 +187,20 @@ class CloudStatus:
     last_error: str = ""
     disk_free_bytes: int | None = None
     message: str = ""
+    playlist_count: int = 0
+    current_playlist_index: int | None = None  # 0-based
+    playlist_round: int | None = None
+    session_mode: str = ""
+    session_limit: float | None = None
+    session_remaining: float | None = None
 
     @property
     def live(self) -> bool:
         return self.service_active and self.state in ("STARTING", "RUNNING", "RECONNECT_WAIT")
+
+    @property
+    def session_complete(self) -> bool:
+        return self.state == "SESSION_LIMIT_REACHED"
 
 
 @dataclass
@@ -389,22 +402,27 @@ class CloudClient:
         v = res.out.strip()
         return v if len(v) == 64 else None
 
+    def _remote_free_bytes(self) -> int:
+        res = self._must(self.run(f"df -PB1 {q(REMOTE_MEDIA)} | awk 'NR==2{{print $4}}'"), "서버 저장 공간 확인 실패")
+        try:
+            return int(res.out.strip() or 0)
+        except ValueError:
+            return 0
+
     def upload_media(self, local: Path, *, progress_cb: Callable[[float, str], None] | None = None,
-                     cancel: threading.Event | None = None) -> UploadResult:
+                     cancel: threading.Event | None = None, local_sha: str | None = None,
+                     check_space: bool = True) -> UploadResult:
         local = Path(local)
         name = safe_remote_name(local)
         size = local.stat().st_size
         cb = progress_cb or (lambda f, t: None)
-        local_sha = sha256_file(local, lambda f: cb(f * 0.1, "영상 확인 중"))
+        if local_sha is None:
+            local_sha = sha256_file(local, lambda f: cb(f * 0.1, "영상 확인 중"))
         if self.remote_sha256(name) == local_sha:
             cb(1.0, "이미 Cloud에 같은 영상이 있습니다 (업로드 생략)")
             return UploadResult(name, True, local_sha)
-        res = self._must(self.run(f"df -PB1 {q(REMOTE_MEDIA)} | awk 'NR==2{{print $4}}'"), "서버 저장 공간 확인 실패")
-        try:
-            free = int(res.out.strip() or 0)
-        except ValueError:
-            free = 0
-        if free and free < size + 256 * 1024**2:
+        free = self._remote_free_bytes() if check_space else 0
+        if free and free < size + UPLOAD_MARGIN_BYTES:
             raise CloudError(f"서버 저장 공간이 부족합니다 (필요 {size / 1024**3:.1f}GB, 남음 {free / 1024**3:.1f}GB).")
         part = f"{REMOTE_MEDIA}/{name}.part"
         final = f"{REMOTE_MEDIA}/{name}"
@@ -426,27 +444,94 @@ class CloudClient:
         cb(1.0, "Cloud 업로드 완료 (SHA256 검증)")
         return UploadResult(name, False, local_sha)
 
+    def upload_many(self, paths, *, progress_cb: Callable[[int, int, float, str], None] | None = None,
+                    cancel: threading.Event | None = None) -> list[UploadResult]:
+        """Playlist 업로드: 각 파일 SHA256 → 서버에 같은 파일 있으면 생략 → 없는 파일 합계로 저장 공간 먼저 확인 →
+        하나씩 .part 업로드·검증·이름 교체. 서버의 기존 파일은 지우지 않는다. 1MB씩 전송(메모리에 전체를 올리지 않음)."""
+        paths = [Path(x) for x in paths]
+        n = len(paths)
+        cb = progress_cb or (lambda i, n_, f, t: None)
+        names = [safe_remote_name(x) for x in paths]
+        if len(set(names)) != n:
+            raise CloudError("Playlist에 서버 파일 이름이 같은 영상이 있습니다. 파일 이름을 바꿔 주세요.")
+        shas, missing = [], []
+        for i, x in enumerate(paths, 1):
+            if cancel is not None and cancel.is_set():
+                raise CloudError("업로드를 중지했습니다.")
+            cb(i, n, 0.0, f"{i}/{n} 영상 확인 중")
+            sha = sha256_file(x)
+            shas.append(sha)
+            if self.remote_sha256(names[i - 1]) == sha:
+                cb(i, n, 1.0, f"{i}/{n} 이미 있음")
+            else:
+                missing.append(i - 1)
+        need = sum(paths[i].stat().st_size for i in missing)
+        if missing:
+            free = self._remote_free_bytes()
+            margin = UPLOAD_MARGIN_BYTES + int(need * 0.05)
+            if free and free < need + margin:
+                raise CloudError(f"서버 저장 공간이 부족합니다 (필요 {(need + margin) / 1024**3:.1f}GB, "
+                                 f"남음 {free / 1024**3:.1f}GB). 기존 영상은 자동으로 지우지 않습니다.")
+        results = []
+        for i, x in enumerate(paths):
+            if i not in missing:
+                results.append(UploadResult(names[i], True, shas[i]))
+                continue
+            k = i + 1
+            r = self.upload_media(x, cancel=cancel, local_sha=shas[i], check_space=False,
+                                  progress_cb=lambda f, t, k=k: cb(k, n, f, f"{k}/{n} {t}"))
+            results.append(r)
+        cb(n, n, 1.0, f"{n}/{n} 검증 완료")
+        return results
+
     # ---------- live ----------
-    def start_live(self, *, remote_media: str, ingest_url: str, stream_key: str, wait_seconds: float = 25,
-                   sleep=time.sleep) -> CloudStatus:
+    def worker_version(self) -> int:
+        res = self.run(f"grep -m1 '^WORKER_VERSION' {q(REMOTE_WORKER)} 2>/dev/null", timeout=30)
+        digits = "".join(c for c in res.out if c.isdigit())
+        return int(digits) if digits else 1
+
+    def start_live(self, *, remote_media, ingest_url: str, stream_key: str, wait_seconds: float = 25,
+                   sleep=time.sleep, session_mode: str = SESSION_CONTINUOUS, session_id: str | None = None) -> CloudStatus:
+        """remote_media: 서버 파일 이름 1개(str) 또는 Playlist(list). 설정은 schema v2.
+
+        단일 영상 + 계속 방송은 media를 문자열로 써서 기존(v1) worker와도 그대로 호환된다.
+        Playlist/보관 안전 모드는 worker v2가 필요하다 (구버전이면 시작하지 않고 업데이트 안내)."""
         build_output_url(ingest_url, stream_key)  # 형식 검사 (예외에 key 없음)
+        names = [remote_media] if isinstance(remote_media, str) else list(remote_media)
+        if not names or len(names) > MAX_PLAYLIST_ITEMS:
+            raise CloudError(f"Playlist는 1~{MAX_PLAYLIST_ITEMS}개입니다.")
+        if session_mode not in SESSION_MODES:
+            raise CloudError("세션 모드가 올바르지 않습니다.")
         self._secrets = [stream_key.strip()]
         chk = self.run(f"test -f {q(REMOTE_WORKER)} && systemctl cat {SERVICE} >/dev/null && echo OK", timeout=30)
         if chk.rc == 255:
             raise CloudError(friendly_ssh_error(chk.err), chk.err)
         if "OK" not in chk.out:
             raise CloudError("Cloud LIVE Worker가 설치되지 않았습니다. [처음 설정 도우미]를 진행하세요.")
-        chk = self.run(f"test -s {q(REMOTE_MEDIA + '/' + remote_media)} && echo OK", timeout=30)
-        if "OK" not in chk.out:
-            raise CloudError("Cloud에 영상이 없습니다. [Cloud에 영상 보내기]를 먼저 진행하세요.")
+        needs_v2 = len(names) > 1 or session_mode != SESSION_CONTINUOUS
+        if needs_v2 and self.worker_version() < 2:
+            raise CloudError("Playlist/보관 안전 모드는 Cloud LIVE Worker 업데이트가 필요합니다.\n"
+                             "현재 방송이 끝난 뒤 [처음 설정 도우미] → [무료 Cloud 자동 준비]를 다시 실행하세요.")
+        for name in names:
+            chk = self.run(f"test -s {q(REMOTE_MEDIA + '/' + name)} && echo OK", timeout=30)
+            if "OK" not in chk.out:
+                raise CloudError("Cloud에 영상이 없습니다. [Cloud에 영상 보내기]를 먼저 진행하세요.")
         self._must(self.run(KEY_WRITE_CMD, input_text=stream_key.strip() + "\n"), "Stream Key 저장 실패")
-        cfg = json.dumps({"media": remote_media, "ingest_url": ingest_url.strip(), "mode": "copy"})
+        cfg = json.dumps({
+            "schema_version": 2,
+            "media": names[0] if len(names) == 1 else names,
+            "play_mode": "sequential",
+            "ingest_url": ingest_url.strip(),
+            "mode": "copy",
+            "session_mode": session_mode,
+            "session_id": session_id or pysecrets.token_hex(8),
+        })
         self._must(self.run(CONFIG_WRITE_CMD, input_text=cfg + "\n"), "LIVE 설정 저장 실패")
         self._must(self.run(f"sudo -n systemctl enable {SERVICE} >/dev/null 2>&1; sudo -n systemctl restart {SERVICE}"),
                    "Cloud LIVE 시작 실패")
         deadline = time.monotonic() + wait_seconds
         st = self.status()
-        while time.monotonic() < deadline and st.state not in ("RUNNING", "FAILED"):
+        while time.monotonic() < deadline and st.state not in ("RUNNING", "FAILED", "SESSION_LIMIT_REACHED"):
             sleep(2)
             st = self.status()
         if st.state == "FAILED" or (not st.service_active and st.state != "RUNNING"):
@@ -481,6 +566,12 @@ class CloudClient:
             retry_in=s.get("retry_in"),
             last_error=redact(str(s.get("last_error") or ""), self._secrets),
             disk_free_bytes=d.get("disk_free_bytes"),
+            playlist_count=int(s.get("playlist_count") or (1 if s.get("media") else 0)),
+            current_playlist_index=s.get("current_playlist_index"),
+            playlist_round=s.get("playlist_round"),
+            session_mode=str(s.get("session_mode") or ""),
+            session_limit=s.get("session_limit"),
+            session_remaining=s.get("session_remaining"),
         )
 
     def logs(self, n: int = LOG_LINES) -> list[str]:
@@ -540,20 +631,28 @@ class CloudLiveController:
     def check_async(self):
         return self._run("check", lambda: self._refresh())
 
-    def upload_async(self, local: Path):
-        def fn():
-            return self._client().upload_media(
-                local, cancel=self.cancel,
-                progress_cb=lambda f, t: self.events.put(("progress", "upload", f, t)))
-        return self._run("upload", fn)
+    def _upload(self, local) -> list[UploadResult]:
+        """단일 Path 또는 Playlist(list) 업로드 → UploadResult 목록."""
+        c = self._client()
+        if isinstance(local, (list, tuple)) and len(local) > 1:
+            return c.upload_many(local, cancel=self.cancel,
+                                 progress_cb=lambda i, n, f, t: self.events.put(("progress", "upload", (i - 1 + f) / n, t)))
+        one = local[0] if isinstance(local, (list, tuple)) else local
+        return [c.upload_media(one, cancel=self.cancel,
+                               progress_cb=lambda f, t: self.events.put(("progress", "upload", f, t)))]
 
-    def start_async(self, *, local: Path, ingest_url: str, stream_key: str):
+    def upload_async(self, local):
+        return self._run("upload", lambda: self._upload(local))
+
+    def start_async(self, *, local, ingest_url: str, stream_key: str, session_mode: str = SESSION_CONTINUOUS,
+                    session_id: str | None = None):
         def fn():
             c = self._client()
-            up = c.upload_media(local, cancel=self.cancel,
-                                progress_cb=lambda f, t: self.events.put(("progress", "upload", f, t)))
+            ups = self._upload(local)
             self.events.put(("progress", "start", 1.0, "Cloud LIVE 시작 중"))
-            st = c.start_live(remote_media=up.remote_name, ingest_url=ingest_url, stream_key=stream_key)
+            names = [u.remote_name for u in ups]
+            st = c.start_live(remote_media=names[0] if len(names) == 1 else names, ingest_url=ingest_url,
+                              stream_key=stream_key, session_mode=session_mode, session_id=session_id)
             self.live_started = True
             self.status = st
             return st

@@ -27,6 +27,7 @@ class FakeRemote:
         self.corrupt_upload = False
         self.fail_upload = False
         self.free = 50 * 1024**3
+        self.worker_version = 2
 
     # subprocess.run 대체
     def run(self, args, input=None, **kw):
@@ -71,6 +72,8 @@ class FakeRemote:
         if p[:2] == ["sha256sum", "--"]:
             data = self.files.get(p[2])
             return (hashlib.sha256(data).hexdigest() + "\n") if data is not None else "", 0, ""
+        if p[:2] == ["grep", "-m1"] and "WORKER_VERSION" in p[2]:
+            return (f'WORKER_VERSION = "{self.worker_version}"\n' if self.installed else ""), 0, ""
         if p[:2] == ["df", "-PB1"]:
             return f"{self.free}\n", 0, ""
         if p[:3] == ["mv", "-f", "--"]:

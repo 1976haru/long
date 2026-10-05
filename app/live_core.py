@@ -119,12 +119,15 @@ def build_live_copy_command(
     """
     validate_live_config(config, check_input=False)
     target = output_target if output_target is not None else build_output_url(config.ingest_url, config.stream_key)
+    # Playlist: ffconcat manifest(A→B→C)를 통째로 무한 반복. 단일 파일 명령은 그대로.
+    concat = ["-f", "concat", "-safe", "0"] if config.input_format == "concat" else []
     return [
         str(ffmpeg),
         "-hide_banner",
         "-loglevel", "warning",
         "-re",
         "-stream_loop", "-1",
+        *concat,
         "-i", str(config.input_path),
         "-map", "0:v:0",
         "-map", "0:a:0",

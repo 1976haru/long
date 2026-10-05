@@ -9,6 +9,7 @@ Stream Key는 어떤 messagebox/title/로그에도 표시하지 않는다.
 from __future__ import annotations
 
 import queue
+import secrets as pysecrets
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -23,9 +24,15 @@ from .live_profile import (
     DEFAULT_PRESET_KEY, LIVE_PRESETS, MODE_COPY, MODE_TRANSCODE, YOUTUBE_RTMPS_INGEST, LiveConfigError,
     mask_secret, preset_by_key, recommend_preset, redact,
 )
+from .live_playlist import LivePlaylist, PlaylistError, entry_durations, validate_playlist, write_ffconcat
 from .live_ready import LiveReadyCancelled, analyze_live_ready, make_live_ready_file
+from .live_session import (
+    ARCHIVE_SAFE_SECONDS, SESSION_ARCHIVE_SAFE, SESSION_CONTINUOUS, ManualSessionProvider, archive_notice,
+    session_limit_seconds,
+)
 from .live_secrets import default_key_store
 from .live_supervisor import LiveBusyError, LiveState, busy_message
+from .settings import settings_dir
 from .tooling import FFMPEG_GUARD, release_tk_variables
 
 KEY_REVEAL_MS = 8000
@@ -100,6 +107,12 @@ class LiveWindow(tk.Toplevel):
         self._cloud_reachable: bool | None = None
 
         self.input_path = tk.StringVar()
+        self.source_mode = tk.StringVar(value="single")  # single | playlist
+        self.session_mode = tk.StringVar(value=SESSION_CONTINUOUS)
+        self.playlist = LivePlaylist()
+        self.playlist_summary = tk.StringVar(value="[영상 추가]로 LIVE READY MP4를 2개 이상 넣으세요.")
+        self.next_session_msg = tk.StringVar()
+        self.session_provider = ManualSessionProvider()
         self.input_info = tk.StringVar(value="LIVE로 송출할 완성 MP4를 선택하세요.")
         self.ready_text = tk.StringVar()
         self.location = tk.StringVar(value=LOC_CLOUD)
@@ -118,7 +131,7 @@ class LiveWindow(tk.Toplevel):
         self.confirm_stop = tk.BooleanVar(value=True)
         self.st = {k: tk.StringVar(value="-") for k in (
             "state", "where", "session", "fps", "bitrate", "speed", "out_time", "reconnects", "retry", "exit",
-            "error", "media", "mode", "server", "disk")}
+            "error", "media", "mode", "server", "disk", "playlist", "session_time", "session_left")}
         self._height = 0
 
         self._ui()
@@ -156,19 +169,46 @@ class LiveWindow(tk.Toplevel):
         head = ttk.Frame(root); head.pack(anchor="w")
         ttk.Label(head, text="●", foreground="red", font=("Segoe UI", 16, "bold")).pack(side="left")
         ttk.Label(head, text=" 24H Playlist LIVE Studio", font=("Segoe UI", 16, "bold")).pack(side="left")
-        ttk.Label(root, text="완성 MP4 1개를 YouTube LIVE로 무한 반복 송출합니다.").pack(anchor="w", pady=(0, 6))
+        ttk.Label(root, text="완성 MP4 1개 또는 여러 개(Playlist)를 YouTube LIVE로 무한 반복 송출합니다.").pack(anchor="w", pady=(0, 6))
 
         # ① 영상 + LIVE READY
         f1 = ttk.LabelFrame(root, text="① LIVE 영상", padding=7)
         f1.pack(fill="x")
-        r = ttk.Frame(f1); r.pack(fill="x")
+        mr = ttk.Frame(f1); mr.pack(fill="x", pady=(0, 4))
+        self.rb_single = ttk.Radiobutton(mr, text="단일 영상", variable=self.source_mode, value="single",
+                                         command=self._on_source_mode)
+        self.rb_single.pack(side="left")
+        self.rb_playlist = ttk.Radiobutton(mr, text="여러 영상 Playlist (순서대로 반복)", variable=self.source_mode,
+                                           value="playlist", command=self._on_source_mode)
+        self.rb_playlist.pack(side="left", padx=(12, 0))
+        self.single_frame = ttk.Frame(f1); self.single_frame.pack(fill="x")
+        r = ttk.Frame(self.single_frame); r.pack(fill="x")
         ttk.Entry(r, textvariable=self.input_path, state="readonly").pack(side="left", fill="x", expand=True)
         self.btn_video = ttk.Button(r, text="영상 선택", command=self._pick_video)
         self.btn_video.pack(side="left", padx=(5, 0))
-        ttk.Label(f1, textvariable=self.input_info).pack(anchor="w", pady=(5, 0))
-        self.lbl_ready = ttk.Label(f1, textvariable=self.ready_text, justify="left")
+        ttk.Label(self.single_frame, textvariable=self.input_info).pack(anchor="w", pady=(5, 0))
+        self.lbl_ready = ttk.Label(self.single_frame, textvariable=self.ready_text, justify="left")
         self.lbl_ready.pack(anchor="w", pady=(4, 0))
-        rr = ttk.Frame(f1); rr.pack(fill="x", pady=(4, 0))
+        # Playlist (DIRECT COPY 전용, 순차 반복)
+        self.playlist_frame = ttk.Frame(f1)
+        pb = ttk.Frame(self.playlist_frame); pb.pack(fill="x")
+        self.btn_pl_add = ttk.Button(pb, text="영상 추가", command=self._pl_add)
+        self.btn_pl_remove = ttk.Button(pb, text="제거", command=self._pl_remove)
+        self.btn_pl_up = ttk.Button(pb, text="▲ 위로", command=lambda: self._pl_move(-1))
+        self.btn_pl_down = ttk.Button(pb, text="▼ 아래로", command=lambda: self._pl_move(1))
+        self.btn_pl_clear = ttk.Button(pb, text="전체 지우기", command=self._pl_clear)
+        for b in (self.btn_pl_add, self.btn_pl_remove, self.btn_pl_up, self.btn_pl_down):
+            b.pack(side="left", padx=(0, 4))
+        self.btn_pl_clear.pack(side="right")
+        cols = ("n", "name", "dur", "res", "fps", "state")
+        self.ptree = ttk.Treeview(self.playlist_frame, columns=cols, show="headings", height=6)
+        for c, h, w in zip(cols, ("순서", "파일명", "길이", "해상도", "FPS", "상태"), (44, 300, 80, 100, 60, 200)):
+            self.ptree.heading(c, text=h)
+            self.ptree.column(c, width=w, anchor="w" if c in ("name", "state") else "center")
+        self.ptree.pack(fill="x", pady=(4, 0))
+        self.lbl_playlist = ttk.Label(self.playlist_frame, textvariable=self.playlist_summary, justify="left")
+        self.lbl_playlist.pack(anchor="w", pady=(4, 0))
+        rr = ttk.Frame(self.single_frame); rr.pack(fill="x", pady=(4, 0))
         self.btn_make_ready = ttk.Button(rr, text="LIVE READY 파일 만들기", command=self._make_ready)
         self.btn_cancel_ready = ttk.Button(rr, text="변환 중지", command=self._convert_cancel.set)
         self.ready_bar = ttk.Progressbar(rr, maximum=100, length=260)
@@ -249,6 +289,22 @@ class LiveWindow(tk.Toplevel):
         self.chk_awake.pack(anchor="w")
         ttk.Checkbutton(f4, text="LIVE 종료 전 확인", variable=self.confirm_stop).pack(anchor="w")
 
+        f6 = ttk.LabelFrame(root, text="⑥ 세션 관리", padding=7)
+        f6.pack(fill="x", pady=(8, 0))
+        self.rb_continuous = ttk.Radiobutton(f6, text="계속 방송", variable=self.session_mode, value=SESSION_CONTINUOUS)
+        self.rb_continuous.pack(anchor="w")
+        self.rb_archive = ttk.Radiobutton(f6, text="보관 안전 모드 — 11시간 50분마다 세션 종료",
+                                          variable=self.session_mode, value=SESSION_ARCHIVE_SAFE)
+        self.rb_archive.pack(anchor="w")
+        ttk.Label(f6, foreground="gray30", justify="left", wraplength=780, text=(
+            "YouTube는 12시간을 넘는 LIVE를 보관하지 못할 수 있습니다. 보관 안전 모드는 11시간 50분에서 송출을 안전 종료합니다.\n"
+            "(11시간 50분은 YouTube 공식 숫자가 아니라 이 프로그램이 정한 안전 여유값입니다. "
+            "새 YouTube LIVE 자동 생성은 다음 단계 기능입니다.)")).pack(anchor="w", pady=(2, 0))
+        self.next_frame = ttk.Frame(f6)
+        ttk.Label(self.next_frame, textvariable=self.next_session_msg, foreground="darkorange", justify="left").pack(anchor="w")
+        self.btn_next_session = ttk.Button(self.next_frame, text="▶ 다음 세션 시작", command=self._next_session)
+        self.btn_next_session.pack(anchor="w", pady=(4, 0))
+
         ar = ttk.Frame(root); ar.pack(fill="x", pady=(10, 0))
         self.btn_check = ttk.Button(ar, text="송출 설정 검사", command=self._check)
         self.btn_check.pack(fill="x")
@@ -261,6 +317,7 @@ class LiveWindow(tk.Toplevel):
         f5 = ttk.LabelFrame(root, text="상태", padding=7)
         f5.pack(fill="x", pady=(8, 0))
         rows = (("state", "상태"), ("where", "실행 위치"), ("session", "방송 시간"), ("media", "현재 영상"),
+                ("playlist", "Playlist 회차"), ("session_time", "세션 시간"), ("session_left", "세션 종료까지"),
                 ("mode", "송출 방식"), ("fps", "FPS"), ("bitrate", "Bitrate"), ("speed", "Speed"),
                 ("out_time", "송출 위치"), ("reconnects", "재접속"), ("retry", "재접속까지"),
                 ("exit", "마지막 종료 코드"), ("error", "마지막 오류"), ("server", "Cloud 서버"), ("disk", "서버 저장 공간"))
@@ -383,6 +440,14 @@ class LiveWindow(tk.Toplevel):
         self._update_cloud_line()
 
     def _cloud_upload(self):
+        if self.playlist_mode:
+            v = self.playlist_validation() if self.playlist.items else None
+            if v is None or not v.ok:
+                messagebox.showwarning("Cloud에 영상 보내기", (v.first_error if v else "Playlist에 영상을 추가하세요."), parent=self)
+                return
+            self.cloud.upload_async(self.playlist.paths)
+            self._sync_widgets()
+            return
         src = self.input_path.get()
         if not src:
             messagebox.showwarning("Cloud에 영상 보내기", "먼저 LIVE 영상을 선택하세요.", parent=self)
@@ -453,7 +518,7 @@ class LiveWindow(tk.Toplevel):
             f"{p.fps}fps · Keyframe {p.keyframe_seconds}s · CPU/libx264 · {res}{warn}")
 
     def effective_mode(self) -> str:
-        if self.location.get() == LOC_CLOUD or self.send_mode.get() == SEND_AUTO:
+        if self.location.get() == LOC_CLOUD or self.send_mode.get() == SEND_AUTO or self.playlist_mode:
             return MODE_COPY
         return MODE_TRANSCODE
 
@@ -509,14 +574,133 @@ class LiveWindow(tk.Toplevel):
         self.btn_reveal.configure(text="보기")
 
     # ---------- actions ----------
+    @property
+    def playlist_mode(self) -> bool:
+        return self.source_mode.get() == "playlist"
+
+    def _manifest_path(self) -> Path:
+        return settings_dir() / "live_playlist.ffconcat"
+
     def _preflight(self):
         ffmpeg, ffprobe = self._tools()
+        input_path, ready, pl_reports = self.input_path.get() or None, self.ready_report, None
+        if self.playlist_mode:
+            items = self.playlist.items
+            input_path = str(items[0].path) if items else None
+            ready = items[0].report if len(items) == 1 else None
+            pl_reports = [i.report for i in items] if len(items) > 1 else None
         return run_preflight(
-            ffmpeg=ffmpeg, ffprobe=ffprobe, input_path=self.input_path.get() or None,
+            ffmpeg=ffmpeg, ffprobe=ffprobe, input_path=input_path,
             ingest_url=self._ingest(), stream_key=self.key_var.get(), preset=self._preset(),
             guard=self.controller.guard, supervisor_state=self.controller.state,
-            mode=self.effective_mode(), ready_report=self.ready_report, location=self.location.get(),
+            mode=self.effective_mode(), ready_report=ready, location=self.location.get(),
+            playlist_reports=pl_reports, manifest_path=self._manifest_path() if pl_reports else None,
         )
+
+    # ---------- Playlist ----------
+    def _on_source_mode(self):
+        if self.playlist_mode:
+            self.single_frame.pack_forget()
+            self.playlist_frame.pack(fill="x")
+        else:
+            self.playlist_frame.pack_forget()
+            self.single_frame.pack(fill="x")
+        self._refresh_playlist()
+        self._sync_widgets()
+
+    def _pl_add(self):
+        _, ffprobe = self._tools()
+        if not ffprobe:
+            messagebox.showerror("FFmpeg", "FFmpeg/ffprobe를 찾을 수 없습니다. 메인 창에서 FFmpeg 설정을 확인하세요.", parent=self)
+            return
+        picked = filedialog.askopenfilenames(parent=self, title="Playlist에 넣을 LIVE READY MP4 선택",
+                                             filetypes=[("MP4", "*.mp4"), ("모든 파일", "*.*")])
+        added, problems = [], []
+        for raw in picked or ():
+            try:
+                added.append(self.playlist.add(Path(raw).resolve()).path)
+            except PlaylistError as e:
+                problems.append(str(e))
+        if problems:
+            messagebox.showwarning("Playlist", "\n".join(problems), parent=self)
+        if added:
+            q = self._ui_q  # 스레드에는 Tk 객체를 넘기지 않는다
+
+            def work():
+                for path in added:  # 하나씩 (ffprobe 메타데이터만, 동시 실행 1개)
+                    q.put(("pl_ready", path, analyze_live_ready(path, ffprobe)))
+            threading.Thread(target=work, name="playlist-analyze", daemon=True).start()
+        self._refresh_playlist()
+
+    def _pl_selected(self) -> int | None:
+        sel = self.ptree.selection()
+        return self.ptree.index(sel[0]) if sel else None
+
+    def _pl_remove(self):
+        i = self._pl_selected()
+        if i is not None:
+            self.playlist.remove(i)
+            self._refresh_playlist()
+
+    def _pl_move(self, d: int):
+        i = self._pl_selected()
+        if i is not None:
+            j = self.playlist.move(i, d)
+            self._refresh_playlist(select=j)
+
+    def _pl_clear(self):
+        self.playlist.clear()
+        self._refresh_playlist()
+
+    def playlist_validation(self):
+        return validate_playlist([i.report for i in self.playlist.items])
+
+    def _refresh_playlist(self, select: int | None = None):
+        if not hasattr(self, "ptree"):
+            return
+        for x in self.ptree.get_children():
+            self.ptree.delete(x)
+        v = self.playlist_validation() if self.playlist.items else None
+        for n, item in enumerate(self.playlist.items, 1):
+            rep_ = item.report
+            status = (v.item_status[n - 1] if v and n - 1 < len(v.item_status) and v.item_status[n - 1] else "확인 중")
+            self.ptree.insert("", "end", values=(
+                n, item.name,
+                format_duration(rep_.duration) if rep_ else "-",
+                f"{rep_.width}×{rep_.height}" if rep_ else "-",
+                f"{rep_.fps:.2f}" if rep_ else "-",
+                status))
+        if select is not None and self.ptree.get_children():
+            self.ptree.selection_set(self.ptree.get_children()[select])
+        n = len(self.playlist)
+        if n == 0:
+            text, color = "[영상 추가]로 LIVE READY MP4를 2개 이상 넣으세요.", "gray30"
+        else:
+            lines = [f"총 {n}개", f"총 재생시간 {format_duration(self.playlist.total_duration)}"]
+            if not self.playlist.analyzed:
+                lines.append("영상 확인 중...")
+                color = "gray30"
+            elif v.ok:
+                lines += ["✓ 모두 LIVE READY", "✓ DIRECT COPY Playlist 가능" if n > 1 else "✓ 1개는 단일 영상과 같은 방식으로 송출"]
+                color = "darkgreen"
+            else:
+                lines += ["⚠ " + m for m in v.messages]
+                color = "darkorange"
+            text = "\n".join(lines)
+        self.playlist_summary.set(text)
+        self.lbl_playlist.configure(foreground=color)
+
+    # ---------- 세션 ----------
+    def _session_complete(self) -> bool:
+        if self.controller.state is LiveState.SESSION_LIMIT_REACHED:
+            return True
+        cs = self.cloud.status
+        return bool(self.location.get() == LOC_CLOUD and cs is not None and cs.session_complete)
+
+    def _next_session(self):
+        """Phase 3A: 수동 — 사용자가 YouTube에서 다음 LIVE를 준비한 뒤 누른다 (Phase 3B에서 API provider로 교체)."""
+        self.session_provider.complete_current_broadcast()
+        self._start()
 
     def _check(self):
         r = self._preflight()
@@ -532,7 +716,9 @@ class LiveWindow(tk.Toplevel):
     def _start(self):
         if self.busy_any or self.cloud.cloud_live_active:
             return
-        if self.ready_report is None and self.effective_mode() == MODE_COPY and self.input_path.get():
+        analyzing = (not self.playlist.analyzed) if self.playlist_mode else (
+            self.ready_report is None and self.effective_mode() == MODE_COPY and self.input_path.get())
+        if analyzing:
             messagebox.showinfo("LIVE READY", "영상 분석 중입니다. 잠시 후 다시 눌러 주세요.", parent=self)
             return
         r = self._preflight()
@@ -547,15 +733,24 @@ class LiveWindow(tk.Toplevel):
                 messagebox.showwarning("무료 Cloud", "먼저 [처음 설정 도우미]로 무료 Cloud를 준비하세요.\n"
                                        "Cloud를 사용할 수 없으면 [내 PC에서 LIVE]를 선택하세요.", parent=self)
                 return
-            self.cloud.start_async(local=r.config.input_path, ingest_url=r.config.ingest_url, stream_key=r.config.stream_key)
+            local = self.playlist.paths if self.playlist_mode and len(self.playlist) > 1 else r.config.input_path
+            self.cloud.start_async(local=local, ingest_url=r.config.ingest_url, stream_key=r.config.stream_key,
+                                   session_mode=self.session_mode.get(), session_id=pysecrets.token_hex(8))
             self._cloud_progress = "Cloud LIVE 준비 중"
             self._refresh()
             return
         ffmpeg, _ = self._tools()
         self._failed_shown = False
+        playlist = None
+        if r.config.input_format == "concat":
+            reports = [i.report for i in self.playlist.items]
+            durations = entry_durations(reports)
+            write_ffconcat(self._manifest_path(), list(zip([i.path for i in self.playlist.items], durations)))
+            playlist = [(i.name, d) for i, d in zip(self.playlist.items, durations)]
         try:
             state = self.controller.start(ffmpeg=ffmpeg, config=r.config,
-                                          reconnect=bool(self.reconnect.get()), keep_awake=bool(self.keep_awake.get()))
+                                          reconnect=bool(self.reconnect.get()), keep_awake=bool(self.keep_awake.get()),
+                                          session_limit=session_limit_seconds(self.session_mode.get()), playlist=playlist)
         except LiveBusyError as e:
             messagebox.showwarning("LIVE 시작 불가", str(e), parent=self)
             return
@@ -645,6 +840,9 @@ class LiveWindow(tk.Toplevel):
             kind = ev[0]
             if kind == "ready" and ev[1] == self._analyze_token:
                 self._apply_ready(ev[2])
+            elif kind == "pl_ready":
+                self.playlist.set_report(ev[1], ev[2])
+                self._refresh_playlist()
             elif kind == "convert_progress":
                 self.ready_bar["value"] = ev[1] * 100
                 self.ready_progress.set(ev[2])
@@ -695,7 +893,12 @@ class LiveWindow(tk.Toplevel):
                     else:
                         self._cloud_reachable = True
                     if name == "upload" and not self._closing:
-                        msg = "이미 Cloud에 같은 영상이 있습니다 (업로드 생략)." if payload.skipped else "Cloud에 영상을 보냈습니다 (SHA256 검증 완료)."
+                        ups = payload if isinstance(payload, list) else [payload]
+                        skipped = sum(1 for u in ups if u.skipped)
+                        if len(ups) == 1:
+                            msg = "이미 Cloud에 같은 영상이 있습니다 (업로드 생략)." if skipped else "Cloud에 영상을 보냈습니다 (SHA256 검증 완료)."
+                        else:
+                            msg = f"{len(ups)}개 완료 — 새로 보냄 {len(ups) - skipped}개 / 이미 있음 {skipped}개 (SHA256 검증)"
                         messagebox.showinfo("Cloud에 영상 보내기", msg, parent=self)
                     elif name == "start" and not self._closing:
                         messagebox.showinfo("Cloud LIVE", "● CLOUD LIVE 시작\n\n이제 PC 프로그램을 종료해도 Cloud에서 방송이 계속됩니다.", parent=self)
@@ -717,12 +920,19 @@ class LiveWindow(tk.Toplevel):
             cs = self.cloud.status
             live = self.cloud.cloud_live_active
             label = ("Cloud 작업 중" if self.cloud.busy else "● CLOUD LIVE" if live else
-                     {"RECONNECT_WAIT": "재연결 대기", "FAILED": "오류"}.get(cs.state if cs else "", "대기"))
+                     {"RECONNECT_WAIT": "재연결 대기", "FAILED": "오류",
+                      "SESSION_LIMIT_REACHED": "보관 안전 종료 · 다음 세션 대기"}.get(cs.state if cs else "", "대기"))
             st["state"].set(label)
             self.lbl_state.configure(foreground="red" if live else ("darkorange" if self.cloud.busy else ""))
             st["where"].set("무료 Cloud")
             st["session"].set(format_duration(cs.runtime_seconds) if cs and cs.runtime_seconds else "-")
-            st["media"].set(cs.media if cs and cs.media else "-")
+            if cs and cs.playlist_count > 1 and cs.current_playlist_index is not None:
+                st["media"].set(f"{cs.current_playlist_index + 1}/{cs.playlist_count} {cs.media}")
+            else:
+                st["media"].set(cs.media if cs and cs.media else "-")
+            st["playlist"].set(f"{cs.playlist_round}회" if cs and cs.playlist_round else "-")
+            self._set_session_rows(cs.runtime_seconds if cs else 0.0, cs.session_limit if cs else None,
+                                   cs.session_remaining if cs and live else None)
             st["mode"].set(cs.mode if cs and cs.mode else "DIRECT COPY")
             st["fps"].set(f"{cs.fps:.1f}" if cs and cs.fps is not None else "-")
             st["bitrate"].set(format_bitrate(cs.bitrate) if cs else "-")
@@ -741,7 +951,14 @@ class LiveWindow(tk.Toplevel):
             self.lbl_state.configure(foreground="red" if s.state is LiveState.RUNNING else ("darkorange" if s.state in LOCKED_STATES else ("firebrick" if s.state is LiveState.FAILED else "")))
             st["where"].set("내 PC")
             st["session"].set(format_duration(s.session_seconds) if s.session_seconds else "-")
-            st["media"].set(Path(self.input_path.get()).name if self.input_path.get() else "-")
+            if s.playlist_count > 1 and s.playlist_index is not None:
+                st["media"].set(f"{s.playlist_index + 1}/{s.playlist_count} {s.current_media}")
+            elif self.playlist_mode and self.playlist.items:
+                st["media"].set(self.playlist.items[0].name if len(self.playlist) == 1 else f"Playlist {len(self.playlist)}개")
+            else:
+                st["media"].set(Path(self.input_path.get()).name if self.input_path.get() else "-")
+            st["playlist"].set(f"{s.playlist_round}회" if s.playlist_round else "-")
+            self._set_session_rows(s.session_seconds, s.session_limit, s.session_remaining)
             st["mode"].set("DIRECT COPY" if self.effective_mode() == MODE_COPY else "재인코딩 (libx264)")
             st["fps"].set(f"{s.fps:.1f}" if s.fps is not None else "-")
             st["bitrate"].set(format_bitrate(s.bitrate))
@@ -755,6 +972,23 @@ class LiveWindow(tk.Toplevel):
             st["disk"].set("-")
         self._sync_widgets()
 
+    def _set_session_rows(self, elapsed: float, limit: float | None, remaining: float | None):
+        st = self.st
+        if limit:
+            st["session_time"].set(f"{format_duration(elapsed)} / {format_duration(limit)}" if elapsed else
+                                   f"- / {format_duration(limit)}")
+            notice = archive_notice(remaining)
+            st["session_left"].set(f"{format_duration(remaining)}" + (f"  ({notice})" if notice else "")
+                                   if remaining is not None else "-")
+        else:
+            st["session_time"].set(format_duration(elapsed) + " (계속 방송)" if elapsed else "-")
+            st["session_left"].set("-")
+        if self._session_complete():
+            self.next_session_msg.set("보관 안전 종료되었습니다.\n" + self.session_provider.prepare_next_broadcast())
+            self.next_frame.pack(anchor="w", fill="x", pady=(6, 0))
+        else:
+            self.next_frame.pack_forget()
+
     def _sync_widgets(self):
         local_live = self.controller.active
         cloud_live = self.cloud.cloud_live_active
@@ -762,7 +996,9 @@ class LiveWindow(tk.Toplevel):
         normal = "disabled" if locked else "normal"
         for w in (self.btn_video, self.btn_reveal, self.rb_youtube, self.rb_custom, self.btn_check,
                   self.btn_start, self.chk_reconnect, self.chk_awake, self.rb_cloud, self.rb_local,
-                  self.rb_auto, self.btn_wizard, self.btn_upload):
+                  self.rb_auto, self.btn_wizard, self.btn_upload, self.rb_single, self.rb_playlist,
+                  self.btn_pl_add, self.btn_pl_remove, self.btn_pl_up, self.btn_pl_down, self.btn_pl_clear,
+                  self.rb_continuous, self.rb_archive, self.btn_next_session):
             w.configure(state=normal)
         is_cloud = self.location.get() == LOC_CLOUD
         self.rb_transcode.configure(state="disabled" if locked or is_cloud else "normal")

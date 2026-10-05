@@ -88,15 +88,17 @@ def test_worker_streams_reconnects_and_stops_gracefully(tmp_path, caplog):
     t = threading.Thread(target=worker.run, daemon=True)
     with caplog.at_level(logging.INFO, logger="long-live"):
         t.start()
-        assert wait(lambda: worker.state == "RUNNING" and worker.progress.get("out_time_us", "0") not in ("0", "N/A"))
-        st = status(paths)
-        assert st["state"] == "RUNNING" and st["mode"] == "DIRECT COPY" and st["media"] == "EP001_LIVE_READY.mp4"
-        first_pid = worker.proc.pid
-        worker.proc.kill()  # YouTube 연결 끊김/FFmpeg 비정상 종료 시뮬레이션
-        assert wait(lambda: worker.reconnects >= 1 and worker.state == "RUNNING" and worker.proc and worker.proc.pid != first_pid)
-        assert len(worker.reconnect_history) == 1
-        worker.request_stop()
-        t.join(15)
+        try:
+            assert wait(lambda: worker.state == "RUNNING" and worker.progress.get("out_time_us", "0") not in ("0", "N/A"))
+            st = status(paths)
+            assert st["state"] == "RUNNING" and st["mode"] == "DIRECT COPY" and st["media"] == "EP001_LIVE_READY.mp4"
+            first_pid = worker.proc.pid
+            worker.proc.kill()  # YouTube 연결 끊김/FFmpeg 비정상 종료 시뮬레이션
+            assert wait(lambda: worker.reconnects >= 1 and worker.state == "RUNNING" and worker.proc and worker.proc.pid != first_pid)
+            assert len(worker.reconnect_history) == 1
+        finally:  # 실패해도 FFmpeg를 남기지 않는다
+            worker.request_stop()
+            t.join(15)
     assert not t.is_alive()
     assert worker.proc is None
     st = status(paths)

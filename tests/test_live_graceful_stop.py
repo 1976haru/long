@@ -164,7 +164,9 @@ def test_real_ffmpeg_q_stop_restart_and_valid_output(tmp_path: Path):
                                capture_output=True, text=True, check=False)
         assert probe.returncode == 0, probe.stderr
         assert float(probe.stdout.strip()) >= 3.0
-    assert _ffmpeg_pids() <= before
+    # 이 테스트가 띄운 PID만 확인한다 (위의 run별 검사). PC 전체 ffmpeg 목록은 사용자의 다른 작업(장시간 영상 제작 등)
+    # 때문에 바뀔 수 있어 비교하지 않는다.
+    del before
 
 
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg not installed")

@@ -49,6 +49,11 @@ class LiveState(enum.Enum):
     RECONNECT_WAIT = "RECONNECT_WAIT"
     STOPPING = "STOPPING"
     FAILED = "FAILED"
+    # 보관 안전 모드: 11시간 50분 도달 → 정상 종료, 재접속하지 않고 다음 세션을 기다림
+    SESSION_LIMIT_REACHED = "SESSION_LIMIT_REACHED"
+
+
+TERMINAL_STATES = (LiveState.STOPPED, LiveState.FAILED, LiveState.SESSION_LIMIT_REACHED)
 
 
 class LiveBusyError(RuntimeError):
@@ -84,12 +89,14 @@ class LiveSupervisor:
         on_state: Callable[[LiveState, str], None] | None = None,
         reconnect: bool = True,
         secrets: tuple[str, ...] = (),
+        session_limit: float | None = None,
     ):
         self._factory = process_factory
         self._guard = guard
         self._clock = clock
         self._on_state = on_state
         self.reconnect = reconnect
+        self.session_limit = session_limit  # None = 계속 방송
         self._secrets = [s for s in secrets if s]
         self.session_started_at: float | None = None
         self._lock = threading.RLock()
@@ -120,7 +127,29 @@ class LiveSupervisor:
 
     @property
     def active(self) -> bool:
-        return self.state not in (LiveState.STOPPED, LiveState.FAILED)
+        return self.state not in TERMINAL_STATES
+
+    def session_elapsed(self) -> float | None:
+        if self.session_started_at is None:
+            return None
+        return max(0.0, self._clock() - self.session_started_at)
+
+    def session_remaining(self) -> float | None:
+        if self.session_limit is None or self.session_started_at is None or not self.active:
+            return None
+        return max(0.0, self.session_limit - self.session_elapsed())
+
+    def _finish_session(self) -> None:
+        """보관 안전 종료: q 정상 종료 → 재접속 금지 → guard 해제 → SESSION_LIMIT_REACHED."""
+        proc, self._proc = self._proc, None
+        if proc is not None:
+            try:
+                self.last_exit_code = proc.stop()
+            except Exception:
+                log.exception("LIVE session stop failed")
+        self.next_retry_at = None
+        self._guard.release(GUARD_OWNER)
+        self._set(LiveState.SESSION_LIMIT_REACHED, f"session_limit={self.session_limit:.0f}s")
 
     def start(self) -> None:
         with self._lock:
@@ -160,6 +189,11 @@ class LiveSupervisor:
             if self._user_stop:
                 return self.state
             now = self._clock()
+            # 세션 한도는 종료/재접속 판단보다 먼저: 한도 이후에는 어떤 경우에도 다시 연결하지 않는다
+            if (self.session_limit is not None and self.session_started_at is not None and self.active
+                    and now - self.session_started_at >= self.session_limit):
+                self._finish_session()
+                return self.state
             if self.state is LiveState.RUNNING and self._proc is not None and not self._proc.is_running():
                 self.last_exit_code = self._proc.return_code()
                 try:
@@ -221,7 +255,7 @@ class LiveSupervisor:
 
         def loop():
             while not self._wake.wait(interval):
-                if self.poll() in (LiveState.STOPPED, LiveState.FAILED):
+                if self.poll() in TERMINAL_STATES:
                     break
 
         self._thread = threading.Thread(target=loop, name="live-watchdog", daemon=True)

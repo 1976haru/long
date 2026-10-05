@@ -129,8 +129,76 @@ backend 스레드(watchdog, stop)는 `controller.events` 큐에만 쓴다. `Live
 
 자동 테스트는 실제 YouTube에 연결하지 않는다 (로컬 FLV 출력으로 검증). 실제 송출 확인은 사용자가 GUI에 자신의 key를 직접 입력해서, YouTube Live Control Room의 비공개/일부공개 스트림으로 먼저 한다.
 
+## Phase 3A — 여러 MP4 Playlist / 보관 안전 세션 / soak
+
+### Playlist (DIRECT COPY 전용, 순차 무한 반복)
+
+- 1~20개, 순서 변경/제거/전체 지우기, 같은 파일 중복 금지, shuffle 없음 (`app/live_playlist.py`).
+- 모든 파일이 LIVE READY이고 서로 같아야 한다: 해상도, FPS, 영상 코덱, AAC 샘플레이트/채널. VFR·영상/소리 길이 차이도
+  Playlist에서는 차단(경계마다 반복되므로). 다르면 자동 재인코딩하지 않고 "N번 영상의 … [LIVE READY 파일 만들기]" 안내.
+- 송출: `-re -stream_loop -1 -f concat -safe 0 -i PLAYLIST.ffconcat -map 0:v:0 -map 0:a:0 -c:v copy -c:a copy`.
+  A→B→C→A… 전체가 반복된다. 1개짜리 Playlist는 기존 단일 파일 명령 그대로.
+- **실측 근거 (FFmpeg 7.1, 1080p30 H.264 + AAC 44.1k, 10초 × 3개)**
+  - concat 항목 길이를 파일 길이 그대로 두면 A→B, B→C 경계마다 AAC 프레임이 8ms 겹쳐
+    `Non-monotonic DTS` 경고가 났다 (FFmpeg가 보정하지만 경고 0이 목표).
+  - 각 항목 `duration` = 파일 길이 + AAC 1프레임(1024/샘플레이트, 44.1k에서 23.2ms)으로 두면 경고 0,
+    DTS 역행/중복 0, 영상 경계 간격 최대 57ms, 오디오 간격 최대 24ms.
+  - 60회 반복(1800초, 경계 178개)에서 A/V 끝 차이가 ±29ms 안에서 오르내릴 뿐 누적되지 않았다.
+- manifest: 내 PC는 설정 폴더의 `live_playlist.ffconcat`, 서버는 worker가 `/opt/long-live/state/playlist.ffconcat`를
+  `.part → 이름 교체`로 만든다. 서버는 SAFE_MEDIA 규칙을 통과한 이름 + media 폴더 경로만 쓴다
+  (`../`, 절대 경로, 따옴표/줄바꿈/셸 문자 금지). 항목 길이는 서버의 ffprobe 메타데이터로 계산.
+- 상태: 송출 위치(out_time)와 항목 길이로 현재 영상 `3/8 파일명`, Playlist 회차를 계산 (재접속하면 그 연결 기준으로 다시 셈).
+
+### 세션 관리 (`app/live_session.py`)
+
+- **계속 방송** (기본): 기존과 같음.
+- **보관 안전 모드**: 세션 시작부터 `ARCHIVE_SAFE_SECONDS = 42600` (11시간 50분)이 되면
+  FFmpeg에 `q` → 정상 종료 → **재접속하지 않음** → `SESSION_LIMIT_REACHED` (화면: "보관 안전 종료 · 다음 세션 대기").
+  - YouTube는 12시간을 넘는 LIVE를 보관하지 못할 수 있다. 11:50은 YouTube 공식 숫자가 아니라 이 프로그램이 정한 안전 여유값이다.
+  - 같은 YouTube Broadcast에 다시 연결해 12시간을 넘기는 일이 없도록, 한도 검사는 종료/재접속 판단보다 먼저 한다.
+  - 내 PC: `LiveSupervisor(session_limit=…)`. 한도에서 guard/절전 방지를 풀어 다른 작업이 가능해진다.
+  - Cloud: worker가 `state/session.json`에 `session_id`와 시작 시각(서버 wall clock)을 저장한다.
+    worker crash/재부팅 후에도 같은 세션의 시작 시각을 이어 써서 11:50이 리셋되지 않는다.
+    한도에서 exit 0 (`Restart=on-failure`는 재시작하지 않음), 완료된 세션은 다시 시작돼도 송출하지 않는다.
+    PC의 **[다음 세션 시작]**이 새 `session_id`로 설정을 쓰면 새 세션이 시작된다.
+- 화면: `세션 시간 08:31:22 / 11:50:00`, `세션 종료까지 03:18:38`, 10분/5분/1분 전 상태 문구 (팝업 없음).
+- **Phase 3B hook**: `SessionRolloverProvider` (`prepare_next_broadcast`, `complete_current_broadcast`,
+  `get_next_ingest`). Phase 3A 기본은 `ManualSessionProvider` — "다음 YouTube LIVE를 준비한 뒤 [다음 세션 시작]".
+  **새 YouTube Broadcast 자동 생성/종료는 Phase 3B(YouTube API)** 이며 이번 단계에는 없다.
+  FFmpeg만 재시작해서는 YouTube가 새 보관 영상을 만든다는 보장이 없기 때문이다.
+
+### Cloud 설정 schema v2 / worker v2
+
+```json
+{"schema_version": 2, "media": ["01_LIVE_READY.mp4", "02_LIVE_READY.mp4"], "play_mode": "sequential",
+ "ingest_url": "rtmps://...", "mode": "copy", "session_mode": "continuous", "session_id": "..."}
+```
+
+- worker는 v1(`"media": "file.mp4"`)도 그대로 읽는다 (문자열 → `[문자열]`).
+- PC는 **단일 영상 + 계속 방송**이면 `media`를 문자열로 써서 기존 v1 worker와도 호환된다.
+  Playlist/보관 안전 모드는 worker v2가 필요하며, 구버전이면 시작하지 않고(서버 설정도 바꾸지 않고)
+  "방송이 끝난 뒤 [무료 Cloud 자동 준비]를 다시 실행" 안내만 한다. 자동 업데이트하지 않는다.
+- Playlist 업로드: 파일별 SHA256 → 서버에 같은 파일이 있으면 생략 → 없는 파일 합계 + 여유(256MB + 5%)로 저장 공간을 먼저 확인
+  → 하나씩 `.part` 업로드(1MB 단위, 진행률 `2/8 보내는 중 42%`) → 서버 SHA256 검증 → 이름 교체. 기존 서버 파일은 지우지 않는다.
+
+### 자원 (OCI E2.1.Micro: 1 OCPU, 1GB)
+
+- FFmpeg 1개, Python은 frame/미리보기/파형 처리 없음, 기록은 bounded(오류 30, 상태·재접속 100), status 5초, 로그 회전, MemoryMax=512M.
+- 영상 파일 수가 늘어도 Python 메모리는 파일 크기에 비례하지 않는다 (SHA256/업로드 모두 1MB 스트리밍).
+- `monthly_transfer_bytes()`: 예) 6.3 Mbps × 24시간 × 30일 ≈ 2.04 TB/월/1채널 (외부 API 없이 계산만, 향후 다채널 경고용).
+
+### 24시간 soak (`tools/live_soak.py`)
+
+- 일반 pytest는 24시간을 기다리지 않는다: fake clock으로 24시간 상태 전이를 빠르게 검증 (`tests/test_live_session.py`).
+- 실제 측정은 사용자가 별도 실행: `python tools/live_soak.py --hours 24 --mode playlist-copy`
+  (`single-copy` / `playlist-copy` / `worker-playlist`). YouTube/OCI에 연결하지 않고 로컬 sink로 DIRECT COPY.
+- interval마다 CSV, 끝에 JSON 요약: Python/FFmpeg RSS, thread, handle/fd, 재접속, 송출 위치, Playlist 회차, 마지막 오류, 출력/로그 크기.
+  시작 직후(warm-up)를 빼고 앞 10% 대비 마지막 10% 중앙값이 20% 그리고 20MB(handle은 50개) 넘게 늘면 SUSPECT.
+- 단계: 짧은 smoke → 2h → 6h → 12h → 24h. **24h soak이 끝나기 전에는 "24시간 안정성 검증 완료"라고 쓰지 않는다.**
+
 ## 단계
 
 - Phase 1 (완료): backend — 명령, 보안, LiveProcess, watchdog, dry-run, guard
 - Phase 2 (완료): LIVE 창, preflight, DPAPI 저장, graceful q stop, keep-awake, close lifecycle
-- Phase 3 (예정): 다중 MP4 플레이리스트 무한 송출 + 곡/SET 자동 전환
+- Phase 3A (완료): 다중 MP4 Playlist DIRECT COPY, 보관 안전 세션(11:50 안전 종료), Cloud 설정 v2, soak 도구
+- Phase 3B (예정): YouTube API로 다음 Broadcast 자동 생성/종료 (SessionRolloverProvider 교체)

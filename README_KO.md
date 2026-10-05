@@ -16,9 +16,9 @@ CapCut에서 **자막·이미지·파형·음원·구독/좋아요 요소까지 
 - 장시간 대기열 동안 Windows 절전 방지 옵션을 제공합니다.
 - 대기열을 자동 저장해 프로그램 재실행 시 복구합니다.
 
-## v0.4 개발 중 — 24H LIVE (단일 MP4)
+## v0.4 개발 중 — 24H LIVE (단일 MP4 / 여러 MP4 Playlist)
 
-상단 `● 24H LIVE` 버튼 → **24H Playlist LIVE Studio** 창에서 완성 MP4 1개를 YouTube LIVE로 무한 반복 송출합니다.
+상단 `● 24H LIVE` 버튼 → **24H Playlist LIVE Studio** 창에서 완성 MP4 1개 또는 여러 개(Playlist, 순서대로 반복)를 YouTube LIVE로 무한 반복 송출합니다.
 
 1. `영상 선택` → 자동으로 **LIVE READY** 검사 (아니면 `LIVE READY 파일 만들기`로 PC에서 한 번만 변환)
 2. 실행 위치: **무료 Cloud (권장, PC를 꺼도 방송 계속)** 또는 **내 PC**
@@ -34,6 +34,8 @@ CapCut에서 **자막·이미지·파형·음원·구독/좋아요 요소까지 
 - FFmpeg는 계속 동시에 1개만 실행됩니다: 제작 중에는 LIVE 불가, LIVE 중에는 제작 불가.
 - 끊기면 5→10→30→60초 간격으로 자동 재접속, 종료 시 FFmpeg를 정상 종료합니다.
 - Cloud LIVE 중 PC 프로그램을 닫으면 기본은 **PC만 종료** (Cloud 방송은 계속).
+- **여러 영상 Playlist**: LIVE READY MP4 2~20개를 A→B→C→A… 순서로 재인코딩 없이 반복합니다. 모든 영상의 해상도/FPS/오디오가 같아야 합니다.
+- **보관 안전 모드** (선택): YouTube는 12시간을 넘는 LIVE를 보관하지 못할 수 있어, 11시간 50분에서 송출을 안전 종료하고 다음 세션을 기다립니다. 11:50은 YouTube 공식 숫자가 아니라 이 프로그램의 안전 여유값이며, 새 YouTube LIVE 자동 생성은 다음 단계(Phase 3B) 기능입니다.
 - Stream Key는 로그/설정 파일에 남기지 않으며, 기억 옵션은 Windows DPAPI 암호화 파일로만 저장합니다. 자세한 내용: `docs/LIVE_ARCHITECTURE.md`
 
 ## 가장 쉬운 사용법

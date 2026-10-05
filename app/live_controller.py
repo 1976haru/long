@@ -18,7 +18,9 @@ from typing import Callable
 from .core import BuildError, VideoInfo, format_duration, probe_video
 from .live_core import LiveConfigError, build_output_url, build_stream_command, describe_live_command
 from .live_profile import MODE_COPY, MODE_TRANSCODE, LiveConfig, LivePreset, redact, validate_live_config
-from .live_supervisor import LiveBusyError, LiveState, LiveSupervisor, busy_message, make_process_factory
+from .live_playlist import validate_playlist
+from .live_session import archive_notice, playlist_position
+from .live_supervisor import TERMINAL_STATES, LiveBusyError, LiveState, LiveSupervisor, busy_message, make_process_factory
 from .tooling import FFMPEG_GUARD, FfmpegExecutionGuard, KeepAwake
 
 STATE_LABELS = {
@@ -28,6 +30,7 @@ STATE_LABELS = {
     LiveState.RECONNECT_WAIT: "재연결 대기",
     LiveState.STOPPING: "종료 중",
     LiveState.FAILED: "오류",
+    LiveState.SESSION_LIMIT_REACHED: "보관 안전 종료 · 다음 세션 대기",
 }
 LOCKED_STATES = (LiveState.STARTING, LiveState.RUNNING, LiveState.RECONNECT_WAIT, LiveState.STOPPING)
 
@@ -111,6 +114,8 @@ def run_preflight(
     mode: str = MODE_TRANSCODE,
     ready_report=None,
     location: str = "local",
+    playlist_reports: list | None = None,
+    manifest_path: Path | None = None,
 ) -> PreflightResult:
     """실제 송출 없이 검사. 결과 문자열에는 Stream Key가 절대 들어가지 않는다.
 
@@ -157,7 +162,18 @@ def run_preflight(
         except LiveConfigError as e:
             r.add(False, str(e))
 
-    if mode == MODE_COPY:
+    is_playlist = bool(playlist_reports) and len(playlist_reports) > 1
+    if is_playlist:
+        mode = MODE_COPY  # Playlist는 DIRECT COPY 전용
+        v = validate_playlist(playlist_reports)
+        if v.ok:
+            r.add(True, f"Playlist {len(playlist_reports)}개 · 모두 LIVE READY · DIRECT COPY Playlist 가능")
+        else:
+            for m in v.messages:
+                r.add(False, m)
+        if manifest_path is None:
+            r.add(False, "Playlist 목록 파일 위치가 없습니다.")
+    elif mode == MODE_COPY:
         if ready_report is None:
             r.add(False, "LIVE READY 분석이 필요합니다.")
         elif ready_report.ready:
@@ -168,12 +184,12 @@ def run_preflight(
     if location == "local":
         if guard.owner is not None and guard.owner != "live":
             r.add(False, busy_message(guard.owner))
-        if supervisor_state not in (LiveState.STOPPED, LiveState.FAILED):
+        if supervisor_state not in TERMINAL_STATES:
             r.add(False, "LIVE가 이미 실행 중입니다.")
 
     if all(i.ok for i in r.items) and info is not None:
         config = LiveConfig(
-            input_path=Path(input_path),
+            input_path=Path(manifest_path) if is_playlist else Path(input_path),
             ingest_url=ingest_url.strip(),
             stream_key=key,
             video_bitrate_kbps=preset.video_bitrate_kbps,
@@ -181,9 +197,10 @@ def run_preflight(
             fps=preset.fps,
             keyframe_seconds=preset.keyframe_seconds,
             mode=mode,
+            input_format="concat" if is_playlist else "",
         )
         try:
-            validate_live_config(config)
+            validate_live_config(config, check_input=not is_playlist)
             cmd = build_stream_command(ffmpeg=Path(ffmpeg), config=config)
             text = describe_live_command(cmd, config)
             if key in text:
@@ -211,6 +228,13 @@ class LiveSnapshot:
     retry_in: float | None
     last_exit_code: int | None
     last_error: str
+    session_limit: float | None = None
+    session_remaining: float | None = None
+    notice: str = ""
+    playlist_index: int | None = None  # 0-based
+    playlist_count: int = 0
+    playlist_round: int | None = None
+    current_media: str = ""
 
 
 class LiveController:
@@ -230,6 +254,7 @@ class LiveController:
         self.supervisor: LiveSupervisor | None = None
         self._secret = ""
         self._stop_thread: threading.Thread | None = None
+        self._playlist: list[tuple[str, float]] = []
         self._atexit_registered = False
 
     def __repr__(self) -> str:
@@ -241,22 +266,27 @@ class LiveController:
 
     @property
     def active(self) -> bool:
-        return self.state not in (LiveState.STOPPED, LiveState.FAILED)
+        return self.state not in TERMINAL_STATES
 
     def _on_state(self, state: LiveState, message: str) -> None:
         # backend 스레드에서 호출될 수 있다: Tk 위젯을 만지지 않고 큐에만 넣는다.
         self.events.put(("state", state, STATE_LABELS[state], redact(message, [self._secret])))
 
     def start(self, *, ffmpeg: Path, config: LiveConfig, reconnect: bool = True,
-              keep_awake: bool = True, background: bool = True) -> LiveState:
-        """Tk main thread에서 호출 (keep-awake가 호출 스레드에 묶이므로)."""
+              keep_awake: bool = True, background: bool = True, session_limit: float | None = None,
+              playlist: list[tuple[str, float]] | None = None) -> LiveState:
+        """Tk main thread에서 호출 (keep-awake가 호출 스레드에 묶이므로).
+
+        session_limit: None=계속 방송, 숫자=보관 안전 모드(초). playlist: [(파일명, concat 항목 길이)] 상태 표시용.
+        """
         if self.active:
             raise LiveBusyError("LIVE가 이미 실행 중입니다.")
         self._secret = config.stream_key
+        self._playlist = list(playlist or [])
         sup = LiveSupervisor(
             self._factory_builder(ffmpeg, config),
             guard=self.guard, clock=self._clock, on_state=self._on_state, reconnect=reconnect,
-            secrets=(config.stream_key,),
+            secrets=(config.stream_key,), session_limit=session_limit,
         )
         sup.start()  # guard 충돌 시 LiveBusyError
         self.supervisor = sup
@@ -310,7 +340,7 @@ class LiveController:
             except queue.Empty:
                 break
             out.append(ev)
-            if ev[0] == "state" and ev[1] in (LiveState.STOPPED, LiveState.FAILED):
+            if ev[0] == "state" and ev[1] in TERMINAL_STATES:
                 self.keep_awake.disable()
         return out
 
@@ -323,6 +353,9 @@ class LiveController:
         session = 0.0
         if sup.session_started_at is not None and self.active:
             session = max(0.0, self._clock() - sup.session_started_at)
+        remaining = sup.session_remaining()
+        names = [n for n, _ in getattr(self, "_playlist", [])]
+        pos = playlist_position(stats.out_time_seconds if stats else None, [d for _, d in getattr(self, "_playlist", [])])
         return LiveSnapshot(
             state=state,
             label=STATE_LABELS[state],
@@ -335,4 +368,11 @@ class LiveController:
             retry_in=sup.seconds_until_retry(),
             last_exit_code=sup.last_exit_code,
             last_error=redact(sup.last_error or "", [self._secret]),
+            session_limit=sup.session_limit,
+            session_remaining=remaining,
+            notice=archive_notice(remaining),
+            playlist_index=pos[0] if pos else None,
+            playlist_count=len(names),
+            playlist_round=pos[1] if pos else None,
+            current_media=names[pos[0]] if pos and names else "",
         )

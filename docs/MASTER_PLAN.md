@@ -50,6 +50,8 @@ LIVE (v0.4, 분리 모듈)
   단일 MP4 → LIVE READY 분석(ffprobe) → DIRECT COPY(-re -stream_loop -1 -c copy) 또는 TRANSCODE(고급) → RTMP/RTMPS
     ├ 내 PC: LiveProcess + LiveSupervisor watchdog (5/10/30/60초 재접속)
     └ 무료 Cloud(OCI Always Free): SSH로 설치한 cloud/long_live_worker.py + systemd (DIRECT COPY 전용)
+  Playlist(Phase 3A): LIVE READY 2~20개 → ffconcat(+AAC 1프레임 pad) → -stream_loop -1 -f concat … -c copy (A→B→C 무한)
+  세션(Phase 3A): 계속 방송 | 보관 안전 11:50 → 정상 종료 → 다음 세션 대기 (새 Broadcast 자동 생성은 Phase 3B)
 ```
 
 LIVE 실행 우선순위: ① OCI Always Free Cloud ② 내 PC DIRECT COPY ③ 내 PC 하드웨어 인코더(예정) ④ 내 PC libx264.

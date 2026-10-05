@@ -146,7 +146,10 @@ def test_start_live_key_only_via_stdin(tmp_path):
     assert st.live and st.state == "RUNNING"
     assert remote.key == FAKE_KEY + "\n"
     cfg = json.loads(remote.config)
-    assert cfg == {"media": up.remote_name, "ingest_url": "rtmps://a.rtmps.youtube.com:443/live2", "mode": "copy"}
+    # schema v2. 단일 영상은 media가 문자열이라 기존(v1) worker도 그대로 읽는다.
+    assert {k: cfg[k] for k in ("media", "ingest_url", "mode")} == \
+        {"media": up.remote_name, "ingest_url": "rtmps://a.rtmps.youtube.com:443/live2", "mode": "copy"}
+    assert cfg["schema_version"] == 2 and cfg["play_mode"] == "sequential" and cfg["session_mode"] == "continuous"
     for call in remote.calls:
         assert all(FAKE_KEY not in a for a in call["args"])  # 명령줄 인자에 key 없음
         if call["input"] != FAKE_KEY + "\n":

@@ -80,6 +80,13 @@ South Korea North(Chuncheon) 등 일부 리전은 A1 무료 용량이 부족하�
 - 책임 분리: YouTube/FFmpeg 연결 문제 → worker watchdog (5/10/30/60초) / worker crash → systemd / 서버 reboot → `enable` 상태면 자동 복구.
 - 서비스는 설치 때 켜지 않습니다. [LIVE 시작] 때 `enable + restart`, [LIVE 종료] 때 `disable --now`.
 
+### 설정/Worker 버전 (Phase 3A)
+
+- `live.json` schema v2: `media`가 목록이면 Playlist, `session_mode`(continuous/archive_safe), `session_id`.
+- 단일 영상 + 계속 방송은 v1 worker와도 호환되는 형식으로 쓴다. Playlist/보관 안전 모드는 worker v2 필요 →
+  구버전이면 시작하지 않고 "방송이 끝난 뒤 [무료 Cloud 자동 준비]를 다시 실행"을 안내한다 (운영 중 서버를 자동으로 바꾸지 않음).
+- 보관 안전 모드: `state/session.json`에 세션 시작 시각 저장, 11:50에 정상 종료(exit 0), 완료된 세션은 재부팅 후에도 다시 송출하지 않음.
+
 ## 처음 설정 도우미가 하는 일 (상세 보기에서만 표시)
 
 1. 서버 연결 (`ssh ... echo`)
