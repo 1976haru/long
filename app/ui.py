@@ -306,6 +306,7 @@ class MainWindow(tk.Tk):
         self.tool_text.pack(side="left")
         ttk.Button(tr, text="FFmpeg 설정", command=self._pick_ffmpeg).pack(side="right")
         ttk.Button(tr, text="댓글 관리", command=self._open_comments).pack(side="right", padx=(0, 6))
+        ttk.Button(tr, text="일본 영상 댓글 도우미", command=self._open_japanese_helper).pack(side="right", padx=(0, 6))
         hr0 = ttk.Frame(root); hr0.pack(fill="x", pady=(0, 6))
         ttk.Button(hr0, text="? 처음 사용 가이드", command=self._open_welcome).pack(side="left")
         ttk.Button(hr0, text="? 도움말", command=self._open_help).pack(side="left", padx=4)
@@ -612,6 +613,14 @@ class MainWindow(tk.Tk):
         self.comment_win = CommentManagerWindow(self, service=self._get_comment_service(),
                                                 open_channels=lambda: self._open_upload().open_channels())
         return self.comment_win
+
+    def _open_japanese_helper(self):
+        w = self._alive(getattr(self, "jp_helper_win", None))
+        if w is not None:
+            w.deiconify(); w.lift(); w.focus_set(); return w
+        from .jp_language_ui import ExternalJapaneseCommentHelper
+        self.jp_helper_win = ExternalJapaneseCommentHelper(self)
+        return self.jp_helper_win
 
     def _open_upload(self, video_path="", title=""):
         w = self._alive(self.upload_win)

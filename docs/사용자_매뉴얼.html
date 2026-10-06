@@ -12,7 +12,7 @@ footer{margin-top:40px;color:#666;font-size:13px;border-top:1px solid #ddd;paddi
 .btn{background:#1f2a40;border-color:#36507f}.note{background:#2b2616;border-color:#6b5a2a}.flow{background:#1b2a1b;border-color:#355235}}</style></head>
 <body><h1>YouTube Playlist Studio 사용자 매뉴얼</h1>
 <p class="note">5분 만에 예약 업로드하기 — 아래 &#x27;5. 예약 업로드&#x27; 참고</p>
-<nav><a href="#intro">1. 프로그램 소개</a> <a href="#first">2. 처음 실행</a> <a href="#channels">3. YouTube 채널 연결</a> <a href="#google_file">3-1. Google 연결 파일 만들기</a> <a href="#long">4. 영상 늘리기</a> <a href="#upload">5. 예약 업로드</a> <a href="#batch">6. 여러 영상 한꺼번에 예약</a> <a href="#playlists">6-1. 재생목록 사용하기</a> <a href="#thumb">7. 썸네일 자동 연결</a> <a href="#live">8. LIVE 방송</a> <a href="#live_schedule">9. 예약 LIVE</a> <a href="#first_comment">10. 첫 댓글 자동등록</a> <a href="#reply">11. 댓글 자동답글</a> <a href="#exit">12. 안전하게 종료</a> <a href="#trouble">13. 오류 해결</a> <a href="#faq">14. FAQ</a></nav>
+<nav><a href="#intro">1. 프로그램 소개</a> <a href="#first">2. 처음 실행</a> <a href="#channels">3. YouTube 채널 연결</a> <a href="#google_file">3-1. Google 연결 파일 만들기</a> <a href="#long">4. 영상 늘리기</a> <a href="#upload">5. 예약 업로드</a> <a href="#batch">6. 여러 영상 한꺼번에 예약</a> <a href="#playlists">6-1. 재생목록 사용하기</a> <a href="#thumb">7. 썸네일 자동 연결</a> <a href="#live">8. LIVE 방송</a> <a href="#live_schedule">9. 예약 LIVE</a> <a href="#first_comment">10. 첫 댓글 자동등록</a> <a href="#reply">11. 댓글 자동답글</a> <a href="#japanese">11-1. 무료 일본어 도우미</a> <a href="#exit">12. 안전하게 종료</a> <a href="#trouble">13. 오류 해결</a> <a href="#faq">14. FAQ</a></nav>
 <h2 id="intro">1. 프로그램 소개</h2>
 <pre>YouTube Playlist Studio는 세 가지 일을 한 프로그램에서 합니다.
 
@@ -163,6 +163,17 @@ STEP 1 채널 선택 → STEP 2 영상 선택 → STEP 3 날짜 선택 → STEP 
 • 하루 최대 10 / 20 / 30개, 답글 사이 1분 이상. 같은 문장을 연달아 쓰지 않습니다.
 • 답글 문구는 채널마다 5개 이상 넣는 것을 권장합니다. 구독·좋아요 요청 같은 홍보 문구는 쓰지 마세요.
 • 이미 답한 댓글, YouTube Studio에서 직접 답한 댓글, 내 댓글에는 다시 답하지 않습니다.</pre>
+<h2 id="japanese">11-1. 무료 일본어 도우미</h2>
+<pre>번역과 일본어 문장 만들기를 내 PC에서 처리합니다. 별도의 유료 AI API 키가 필요하지 않습니다.
+
+1. <span class="btn">무료 일본어 도우미 설정</span>에서 Ollama 설치 여부를 확인합니다. 없으면 설치 페이지를 열어 직접 설치합니다.
+2. Qwen3 8B(추천) 또는 Qwen3 4B(가벼운 버전)를 고릅니다. TranslateGemma 번역 강화 모델은 선택 사항입니다.
+3. 댓글 관리의 [일본어 번역·답글 3안]에서 자연스러운 한국어 번역·뉘앙스·답글 후보를 확인합니다.
+4. 후보를 선택해도 자동 게시되지 않습니다. 기존 수동 답글 창에서 확인 후 보내야 합니다.
+5. <span class="btn">일본 영상 댓글 도우미</span>에서는 감상 메모로 외부 영상 댓글 3안을 만들고 복사만 합니다. 외부 댓글 API 게시 기능은 없습니다.
+
+기본 문체는 JP 2030s Female Natural이며 신분을 주장하는 기능이 아닙니다. 질문·불만·민감하거나 모호한 댓글은 직접 확인하세요.
+댓글 내용은 유료 AI 서버로 전송되지 않고 기본 진단 로그에도 저장되지 않습니다. 모델 삭제는 Ollama에서 직접 관리합니다.</pre>
 <h2 id="exit">12. 안전하게 종료</h2>
 <pre>• 업로드나 댓글 자동 확인이 진행 중일 때 종료하면 &#x27;현재 작업이 진행 중입니다&#x27; 창이 나옵니다.
   프로그램을 종료하면 업로드와 댓글 자동 확인은 멈춥니다. 다음에 <span class="btn">▶ 예약 업로드 시작</span>을 누르면 받은 곳부터 이어서 올립니다.

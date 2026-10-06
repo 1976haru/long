@@ -81,6 +81,8 @@ class CommentManagerWindow(tk.Toplevel):
         hd = ttk.Frame(root); hd.pack(fill="x")
         ttk.Label(hd, text="댓글 관리", font="PLS.Title").pack(side="left")
         ttk.Button(hd, text="? 사용법", command=lambda: show_usage(self, "comments")).pack(side="right")
+        ttk.Button(hd, text="일본 영상 댓글 도우미", command=self.open_external_japanese).pack(side="right", padx=4)
+        ttk.Button(hd, text="무료 일본어 도우미 설정", command=self.open_japanese_setup).pack(side="right")
         ttk.Label(root, text=OFFLINE_NOTE, foreground="gray30", wraplength=980, justify="left").pack(anchor="w", pady=(0, 6))
         # 댓글 권한 부족 → 쉬운 안내 + [채널 다시 연결] (필요할 때만 보임)
         self.reauth_frame = rf = ttk.Frame(root)
@@ -144,6 +146,7 @@ class CommentManagerWindow(tk.Toplevel):
         bb = ttk.Frame(cf); bb.pack(fill="x", pady=(4, 0))
         ttk.Button(bb, text="답글 작성", command=self.reply_selected).pack(side="left")
         ttk.Button(bb, text="추천 답글 사용", command=self.use_recommended).pack(side="left", padx=4)
+        ttk.Button(bb, text="일본어 번역·답글 3안", command=self.open_japanese_reply).pack(side="left", padx=4)
         ttk.Button(bb, text="자동답글 제외", command=lambda: self.mark_selected(C_EXCLUDED)).pack(side="left")
         ttk.Button(bb, text="완료 처리", command=lambda: self.mark_selected(C_DONE)).pack(side="left", padx=4)
         ttk.Label(bb, text="더블클릭: 댓글 전체 보기", foreground="#555555").pack(side="right")
@@ -377,6 +380,32 @@ class CommentManagerWindow(tk.Toplevel):
             return
         if messagebox.askyesno("추천 답글", f"이 답글을 보낼까요?\n\n{rec.recommended}", parent=self):
             self.reply_selected(rec.recommended)
+
+    def open_japanese_setup(self):
+        from .jp_language_ui import JapaneseSetupWizard
+        self.jp_setup_win = JapaneseSetupWizard(self)
+        return self.jp_setup_win
+
+    def open_external_japanese(self):
+        from .jp_language_ui import ExternalJapaneseCommentHelper
+        self.jp_external_win = ExternalJapaneseCommentHelper(self)
+        return self.jp_external_win
+
+    def open_japanese_reply(self):
+        rec = self._current()
+        if rec is None:
+            messagebox.showinfo("무료 일본어 도우미", "일본어 댓글을 하나 선택하세요.", parent=self)
+            return None
+        from .jp_language_ui import JapaneseReplyAssistant
+
+        def selected(text):
+            # 선택만으로 게시하지 않는다. 기존 수동 답글 창에서 사용자가 내용을 확인하고 [보내기]를 눌러야 한다.
+            approved = (self._ask_text or ask_reply_text)(self, rec.text, text)
+            if approved:
+                self.reply_selected(approved)
+
+        self.jp_reply_win = JapaneseReplyAssistant(self, comment=rec.text, on_select=selected)
+        return self.jp_reply_win
 
     def mark_selected(self, status: str) -> None:
         for cid in self._selected():

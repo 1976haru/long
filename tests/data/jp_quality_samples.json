@@ -1,0 +1,13 @@
+[
+ {"category":"thanks","ja":"聴いてくれてありがとう。"},{"category":"thanks","ja":"コメントうれしいです。"},{"category":"thanks","ja":"見つけてくれてありがとう。"},{"category":"thanks","ja":"いつも聴いてくれてありがとう。"},
+ {"category":"impression","ja":"夜に聴くと落ち着きます。"},{"category":"impression","ja":"最初から雰囲気が好きです。"},{"category":"impression","ja":"作業中にちょうどいいです。"},{"category":"impression","ja":"雨の日に聴きたくなります。"},
+ {"category":"empathy","ja":"その気持ち、なんかわかります。"},{"category":"empathy","ja":"私も同じところが好きです。"},{"category":"empathy","ja":"疲れた日に沁みますよね。"},{"category":"empathy","ja":"つい何度も聴いちゃいます。"},
+ {"category":"praise","ja":"すごく好き。"},{"category":"praise","ja":"声がきれいですね。"},{"category":"praise","ja":"雰囲気が最高です。"},{"category":"praise","ja":"また聴きたいです。"},
+ {"category":"emotional","ja":"懐かしい気持ちになりました。"},{"category":"emotional","ja":"なんだか胸にきます。"},{"category":"emotional","ja":"静かに元気をもらえました。"},{"category":"emotional","ja":"帰り道に聴きたくなる曲です。"},
+ {"category":"question","ja":"この曲はどこで聴けますか？"},{"category":"question","ja":"次の動画はいつですか？"},{"category":"question","ja":"曲名を教えてもらえますか？"},{"category":"question","ja":"これはオリジナル曲ですか？"},
+ {"category":"complaint","ja":"音が少し小さくて聞きづらいです。"},{"category":"complaint","ja":"広告が多くて集中できませんでした。"},{"category":"complaint","ja":"前の動画のほうが好きでした。"},{"category":"complaint","ja":"途中で音が切れている気がします。"},
+ {"category":"slang","ja":"これ普通に好きかも。"},{"category":"slang","ja":"雰囲気よすぎる。"},{"category":"slang","ja":"ずっと聴いてられる。"},{"category":"slang","ja":"めっちゃ落ち着く。"},
+ {"category":"emoji","ja":"今日も聴きに来ました🌙"},{"category":"emoji","ja":"この曲好きです☺️"},{"category":"emoji","ja":"夜の作業がはかどります✨"},{"category":"emoji","ja":"優しい音ですね。"},
+ {"category":"long","ja":"仕事で疲れて帰った日に偶然見つけて、最後までゆっくり聴きました。落ち着く時間をありがとう。"},{"category":"long","ja":"最初は作業用に流していたのに、気づいたら手を止めて最後まで聴いていました。"},
+ {"category":"ambiguous","ja":"そうなんですね。"},{"category":"ambiguous","ja":"ちょっと気になる。"},{"category":"ambiguous","ja":"これはどうなんだろう。"},{"category":"ambiguous","ja":"まあ、悪くないかも。"}
+]

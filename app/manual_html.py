@@ -24,6 +24,16 @@ footer{margin-top:40px;color:#666;font-size:13px;border-top:1px solid #ddd;paddi
 .btn{background:#1f2a40;border-color:#36507f}.note{background:#2b2616;border-color:#6b5a2a}.flow{background:#1b2a1b;border-color:#355235}}"""
 
 EXTRA = {
+    "japanese": ("11-1. 무료 일본어 도우미", f"""번역과 일본어 문장 만들기를 내 PC에서 처리합니다. 별도의 유료 AI API 키가 필요하지 않습니다.
+
+1. {B('jp_setup')}에서 Ollama 설치 여부를 확인합니다. 없으면 설치 페이지를 열어 직접 설치합니다.
+2. Qwen3 8B(추천) 또는 Qwen3 4B(가벼운 버전)를 고릅니다. TranslateGemma 번역 강화 모델은 선택 사항입니다.
+3. 댓글 관리의 [일본어 번역·답글 3안]에서 자연스러운 한국어 번역·뉘앙스·답글 후보를 확인합니다.
+4. 후보를 선택해도 자동 게시되지 않습니다. 기존 수동 답글 창에서 확인 후 보내야 합니다.
+5. {B('jp_external')}에서는 감상 메모로 외부 영상 댓글 3안을 만들고 복사만 합니다. 외부 댓글 API 게시 기능은 없습니다.
+
+기본 문체는 JP 2030s Female Natural이며 신분을 주장하는 기능이 아닙니다. 질문·불만·민감하거나 모호한 댓글은 직접 확인하세요.
+댓글 내용은 유료 AI 서버로 전송되지 않고 기본 진단 로그에도 저장되지 않습니다. 모델 삭제는 Ollama에서 직접 관리합니다."""),
     "intro": ("1. 프로그램 소개", f"""{hc.APP_NAME}는 세 가지 일을 한 프로그램에서 합니다.
 
 {B('card_long')} — {hc.CARD_HELP['long']}
@@ -129,7 +139,8 @@ def manual_html() -> str:
         ("upload", "5. 예약 업로드", t["upload"].body), ("batch", *EXTRA["batch"]),
         ("playlists", "6-1. 재생목록 사용하기", t["playlists"].body), ("thumb", *EXTRA["thumb"]),
         ("live", "8. LIVE 방송", t["live"].body), ("live_schedule", *EXTRA["live_schedule"]),
-        ("first_comment", *EXTRA["first_comment"]), ("reply", *EXTRA["reply"]), ("exit", *EXTRA["exit"]),
+        ("first_comment", *EXTRA["first_comment"]), ("reply", *EXTRA["reply"]),
+        ("japanese", *EXTRA["japanese"]), ("exit", *EXTRA["exit"]),
         ("trouble", "13. 오류 해결", t["trouble"].body), ("faq", "14. FAQ", t["faq"].body),
     ]
     return _page(f"{hc.APP_NAME} 사용자 매뉴얼", sections, intro=hc.QUICK_START.splitlines()[0] + " — 아래 '5. 예약 업로드' 참고")
