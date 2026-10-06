@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from . import ui_theme
+from .ui_theme import ensure as ensure_theme
 from .core import (
     BuildCancelled, BuildError, VideoInfo, build_round_plan, build_time_plan,
     default_output_name_rounds, default_output_name_time, enough_disk_space,
@@ -57,6 +59,7 @@ class QueueJob:
 class MainWindow(tk.Tk):
     def __init__(self, app_root: Path):
         super().__init__()
+        ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.app_root = Path(app_root)
         self.title(PRODUCT_TITLE)
         # 작은 화면(1366×768)에서도 열리도록 화면 높이에 맞춘다. 내용은 세로 스크롤로 끝까지 닿는다.
@@ -119,27 +122,44 @@ class MainWindow(tk.Tk):
             card = tk.Frame(bar, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border,
                             cursor="" if active else "hand2")
             card.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0))
-            hd = tk.Frame(card, bg=bg); hd.pack(fill="x", padx=10, pady=(5, 0))
-            tk.Label(hd, text=title, bg=bg, fg=fg, font=("Segoe UI", 13, "bold")).pack(side="left")
-            tk.Label(hd, text=foot, bg=bg, fg=border if active else "#2f6fdf").pack(side="right")
+            # 큰 글자에서도 겹치지 않게: 제목 / 설명 / 도움말 링크 / 열기·예약 LIVE 를 각각 한 줄씩
+            hd = tk.Frame(card, bg=bg); hd.pack(fill="x", padx=10, pady=(6, 0))
+            tk.Label(hd, text=title, bg=bg, fg=fg, font="PLS.Section").pack(side="left")
             ft = tk.Frame(card, bg=bg); ft.pack(fill="x", padx=10, pady=(0, 1))
-            tk.Label(ft, text=desc, bg=bg, fg="gray25").pack(side="left")
-            hp = tk.Frame(card, bg=bg); hp.pack(fill="x", padx=10, pady=(0, 4))
+            tk.Label(ft, text=desc, bg=bg, fg="#333333", anchor="w", justify="left", wraplength=300).pack(side="left")
+            hp = tk.Frame(card, bg=bg); hp.pack(fill="x", padx=10, pady=(0, 1))
             why = tk.Label(hp, text="ⓘ 이 기능은 언제 쓰나요?", bg=bg, fg="#1d4fa8", cursor="hand2")
             why.pack(side="left")
             why.bind("<Button-1>", lambda e, k=key, t=title: (self._card_help(k, t), "break")[1])
             self.card_help_links[key] = why
+            ac = tk.Frame(card, bg=bg); ac.pack(fill="x", padx=10, pady=(0, 6))
+            tk.Label(ac, text=foot, bg=bg, fg=border if active else "#1d4fa8", font="PLS.Strong").pack(side="right")
             if key == "live":
-                sched = tk.Label(ft, text="예약 LIVE", bg=bg, fg="#2f6fdf", cursor="hand2")
-                sched.pack(side="right")
+                sched = tk.Label(ac, text="예약 LIVE", bg=bg, fg="#1d4fa8", cursor="hand2", font="PLS.Strong")
+                sched.pack(side="left")
                 sched.bind("<Button-1>", lambda e: (self._open_live_schedule(), "break")[1])
             if cmd:
-                for w in (card, hd, ft, hp, *hd.winfo_children(), *ft.winfo_children()):
+                for w in (card, hd, ft, hp, ac, *hd.winfo_children(), *ft.winfo_children(), *ac.winfo_children()):
                     if w.bind("<Button-1>"):
                         continue
                     w.bind("<Button-1>", lambda e, c=cmd: c())
             self.mode_cards[key] = card
         ttk.Frame(root, height=6).pack(fill="x")
+
+    # ---------- 글자 크기 ----------
+    def _set_font_size(self, size):
+        ui_theme.change(self, size)  # named font → 열려 있는 모든 창에 바로 적용 + 저장
+        self._show_font_size()
+
+    def _step_font(self, delta):
+        ui_theme.step(self, delta)
+        self._show_font_size()
+
+    def _show_font_size(self):
+        cur = getattr(self, "_pls_theme_size", ui_theme.current_size())
+        self.font_size_text.set(f"({ui_theme.SIZE_LABELS[cur]})")
+        for size, b in self.font_buttons.items():
+            b.state(["pressed"] if size == cur else ["!pressed"])
 
     # ---------- 초보자 안내 ----------
     def _card_help(self, key, title):
@@ -278,7 +298,7 @@ class MainWindow(tk.Tk):
 
         top = ttk.Frame(root)
         top.pack(fill="x")
-        ttk.Label(top, text=PRODUCT_NAME, font=("Segoe UI", 18, "bold")).pack(side="left")
+        ttk.Label(top, text=PRODUCT_NAME, font="PLS.Hero").pack(side="left")
         ttk.Label(top, text="v0.3.0").pack(side="right")
         ttk.Label(root, text="완성된 SET MP4를 회차 기준으로 무손실 반복 연결합니다.").pack(anchor="w")
         tr = ttk.Frame(root); tr.pack(fill="x", pady=(4, 8))
@@ -292,7 +312,22 @@ class MainWindow(tk.Tk):
         ttk.Button(hr0, text="⚙ 설정 점검", command=self._open_check).pack(side="left")
         ttk.Checkbutton(hr0, text="초보자 모드", variable=self.beginner, command=self._toggle_beginner).pack(side="left", padx=(12, 2))
         InfoTip(hr0, TOOLTIPS["beginner"]).pack(side="left")
-        ttk.Label(hr0, textvariable=self.mode_summary, foreground="gray25").pack(side="right")
+        # 글자 크기: [가] 보통 · [가+] 크게 · [가++] 아주 크게 (바로 적용, 다음 실행에도 유지) · Ctrl + / Ctrl −
+        ttk.Label(hr0, text="글자 크기").pack(side="left", padx=(14, 4))
+        self.font_buttons = {}
+        for size, label in ((ui_theme.NORMAL, "가"), (ui_theme.LARGE, "가+"), (ui_theme.XLARGE, "가++")):
+            b = ttk.Button(hr0, text=label, width=5, style="Secondary.TButton",
+                           command=lambda s=size: self._set_font_size(s))
+            b.pack(side="left", padx=1)
+            self.font_buttons[size] = b
+        self.font_size_text = tk.StringVar()
+        ttk.Label(hr0, textvariable=self.font_size_text, style="Hint.TLabel").pack(side="left", padx=4)
+        for seq in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+            self.bind_all(seq, lambda e: self._step_font(1))
+        for seq in ("<Control-minus>", "<Control-KP_Subtract>"):
+            self.bind_all(seq, lambda e: self._step_font(-1))
+        self._show_font_size()
+        ttk.Label(root, textvariable=self.mode_summary, foreground="#333333").pack(anchor="w", pady=(0, 6))
         self._mode_cards(root)
 
         f1 = ttk.LabelFrame(root, text="① SET 영상", padding=7)
@@ -335,7 +370,7 @@ class MainWindow(tk.Tk):
         hs.pack(side="left"); ttk.Label(hr, text="시간").pack(side="left")
         ms.pack(side="left", padx=(4,0)); ttk.Label(hr, text="분").pack(side="left")
         hs.bind("<KeyRelease>", lambda e:self._recalc()); ms.bind("<KeyRelease>", lambda e:self._recalc())
-        ttk.Label(f2, textvariable=self.calc, font=("Segoe UI",10,"bold")).pack(anchor="w", pady=(6,0))
+        ttk.Label(f2, textvariable=self.calc, font="PLS.Strong").pack(anchor="w", pady=(6,0))
         ttk.Label(f2, text="※ 화질·음질 보존을 위해 재인코딩하지 않습니다. FFmpeg -c copy만 사용합니다.").pack(anchor="w")
 
         f3 = ttk.LabelFrame(root, text="③ 저장 및 대기열", padding=7)

@@ -10,6 +10,7 @@ import webbrowser
 from tkinter import filedialog, ttk
 from typing import Callable
 
+from .ui_theme import ensure as ensure_theme
 from .cloud_setup_ui import _background
 from .tooling import release_tk_variables
 from .youtube_config import (
@@ -36,6 +37,7 @@ class YouTubeSetupWizard(tk.Toplevel):
                  connect: Callable[..., object] = connect_account, open_url: Callable[[str], object] = webbrowser.open,
                  pick_file: Callable = filedialog.askopenfilename):
         super().__init__(master)
+        ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.title("YouTube 자동 세션 연결")
         self.geometry("720x600")
         self.minsize(600, 520)
@@ -57,7 +59,7 @@ class YouTubeSetupWizard(tk.Toplevel):
         self.client_ok = False
         self.connected = bool(prev.get("channel_id"))
 
-        ttk.Label(self, textvariable=self.step_title, font=("Segoe UI", 14, "bold"), padding=(12, 10, 12, 4)).pack(anchor="w")
+        ttk.Label(self, textvariable=self.step_title, font="PLS.Title", padding=(12, 10, 12, 4)).pack(anchor="w")
         self.body = ttk.Frame(self, padding=12)
         self.body.pack(fill="both", expand=True)
         nav = ttk.Frame(self, padding=12); nav.pack(fill="x")
@@ -158,7 +160,7 @@ class YouTubeSetupWizard(tk.Toplevel):
             "[Google 계정 연결]을 누르면 브라우저가 열립니다.\n"
             "YouTube 채널 계정으로 로그인하고 권한을 허용하면 프로그램으로 자동으로 돌아옵니다.\n"
             "(프로그램은 Google 비밀번호를 받지 않습니다)")).pack(anchor="w")
-        self.btn_conn = ttk.Button(self.body, text="Google 계정 연결", command=self._start_connect)
+        self.btn_conn = ttk.Button(self.body, text="Google 계정 연결", style="Primary.TButton", command=self._start_connect)
         self.btn_conn.pack(anchor="w", pady=12)
         self.lbl_conn = ttk.Label(self.body, textvariable=self.conn_msg, justify="left", wraplength=660)
         self.lbl_conn.pack(anchor="w")
@@ -181,8 +183,8 @@ class YouTubeSetupWizard(tk.Toplevel):
     def _step5(self):
         self.step_title.set("STEP 5/5 · 연결 확인")
         if self.connected:
-            ttk.Label(self.body, text="✓ YouTube 연결됨", foreground="darkgreen", font=("Segoe UI", 13, "bold")).pack(anchor="w")
-            ttk.Label(self.body, text=f"채널: {self.channel_title.get()}", font=("Segoe UI", 11)).pack(anchor="w", pady=(4, 10))
+            ttk.Label(self.body, text="✓ YouTube 연결됨", foreground="darkgreen", font="PLS.Section").pack(anchor="w")
+            ttk.Label(self.body, text=f"채널: {self.channel_title.get()}", font="PLS.Lead").pack(anchor="w", pady=(4, 10))
         ttk.Label(self.body, text="⚠ " + TESTING_TOKEN_WARNING, foreground="firebrick", justify="left",
                   wraplength=660).pack(anchor="w")
         ttk.Label(self.body, wraplength=660, justify="left", foreground="gray30", text=(

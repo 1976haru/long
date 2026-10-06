@@ -11,6 +11,7 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 from typing import Callable
 
+from .ui_theme import ensure as ensure_theme
 from .cloud_setup_ui import _background
 from .tooling import release_tk_variables
 from .ui_scroll import ScrollFrame
@@ -39,6 +40,7 @@ class CommentManagerWindow(tk.Toplevel):
     def __init__(self, master, *, service: CommentService, profile_id: str = "",
                  ask_text: Callable | None = None, open_channels: Callable | None = None):
         super().__init__(master)
+        ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.title("댓글 관리")
         sh = self.winfo_screenheight()
         self.geometry(f"1040x{max(520, min(820, sh - 90))}")
@@ -77,7 +79,7 @@ class CommentManagerWindow(tk.Toplevel):
         root = ttk.Frame(self.scroll.body, padding=12)
         root.pack(fill="both", expand=True)
         hd = ttk.Frame(root); hd.pack(fill="x")
-        ttk.Label(hd, text="댓글 관리", font=("Segoe UI", 15, "bold")).pack(side="left")
+        ttk.Label(hd, text="댓글 관리", font="PLS.Title").pack(side="left")
         ttk.Button(hd, text="? 사용법", command=lambda: show_usage(self, "comments")).pack(side="right")
         ttk.Label(root, text=OFFLINE_NOTE, foreground="gray30", wraplength=980, justify="left").pack(anchor="w", pady=(0, 6))
         # 댓글 권한 부족 → 쉬운 안내 + [채널 다시 연결] (필요할 때만 보임)
@@ -112,7 +114,7 @@ class CommentManagerWindow(tk.Toplevel):
         ttk.Button(op, text="답글 문구·제외 키워드", command=self.toggle_templates).pack(side="right")
         ttk.Label(root, text="자동답글: " + TOOLTIPS["auto_reply"].replace("\n", " ") + " (기본: 검토 후 답글)",
                   foreground="gray30", wraplength=980, justify="left").pack(anchor="w", pady=(4, 0))
-        self.lbl_counts = ttk.Label(root, textvariable=self.counts_text, font=("Segoe UI", 10, "bold"))
+        self.lbl_counts = ttk.Label(root, textvariable=self.counts_text, font="PLS.Strong")
         self.lbl_counts.pack(anchor="w", pady=(6, 0))
         self.lbl_msg = ttk.Label(root, textvariable=self.message, wraplength=980, justify="left")
         self.lbl_msg.pack(anchor="w")
@@ -144,7 +146,7 @@ class CommentManagerWindow(tk.Toplevel):
         ttk.Button(bb, text="추천 답글 사용", command=self.use_recommended).pack(side="left", padx=4)
         ttk.Button(bb, text="자동답글 제외", command=lambda: self.mark_selected(C_EXCLUDED)).pack(side="left")
         ttk.Button(bb, text="완료 처리", command=lambda: self.mark_selected(C_DONE)).pack(side="left", padx=4)
-        ttk.Label(bb, text="더블클릭: 댓글 전체 보기", foreground="gray40").pack(side="right")
+        ttk.Label(bb, text="더블클릭: 댓글 전체 보기", foreground="#555555").pack(side="right")
 
         ff = ttk.LabelFrame(root, text="첫 댓글 자동등록 (업로드한 영상)", padding=8)
         ff.pack(fill="x", pady=(8, 0))
@@ -157,7 +159,7 @@ class CommentManagerWindow(tk.Toplevel):
         tb = ttk.Frame(ff); tb.pack(fill="x", pady=(4, 0))
         ttk.Button(tb, text="지금 확인 (비공개 대기 포함)", command=self.check_tasks).pack(side="left")
         ttk.Button(tb, text="첫 댓글 취소", command=self.cancel_task).pack(side="left", padx=4)
-        self.lbl_usage = ttk.Label(root, textvariable=self.usage, foreground="gray40", wraplength=980)
+        self.lbl_usage = ttk.Label(root, textvariable=self.usage, foreground="#555555", wraplength=980)
         self.apply_mode()
 
     def apply_mode(self) -> None:

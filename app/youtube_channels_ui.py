@@ -12,6 +12,7 @@ import webbrowser
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+from .ui_theme import ensure as ensure_theme
 from .cloud_setup_ui import _background
 from .tooling import release_tk_variables
 from .youtube_accounts import (
@@ -43,6 +44,7 @@ class ChannelManagerWindow(tk.Toplevel):
                  on_change: Callable[[], None] | None = None, templates: UploadTemplateStore | None = None,
                  connect_guide: Callable | None = None):
         super().__init__(master)
+        ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.title("YouTube 채널 관리")
         self.geometry(f"860x{max(520, min(660, self.winfo_screenheight() - 90))}")
         self.minsize(760, 520)
@@ -84,7 +86,7 @@ class ChannelManagerWindow(tk.Toplevel):
         root = ttk.Frame(self.scroll.body, padding=12)
         root.pack(fill="both", expand=True)
         hd = ttk.Frame(root); hd.pack(fill="x")
-        ttk.Label(hd, text="YouTube 채널 관리", font=("Segoe UI", 14, "bold")).pack(side="left")
+        ttk.Label(hd, text="YouTube 채널 관리", font="PLS.Title").pack(side="left")
         ttk.Button(hd, text="? 사용법", command=lambda: show_usage(self, "channels")).pack(side="right")
         ttk.Label(root, foreground="gray30", text=(
             "예약 업로드할 채널을 별칭으로 등록하고 채널마다 Google 계정을 연결하세요. "
@@ -101,7 +103,7 @@ class ChannelManagerWindow(tk.Toplevel):
         ttk.Button(tb, text="＋ 새 채널", command=self.new_profile).pack(side="left")
         self.btn_clone = ttk.Button(tb, text="복제 (설정만, 연결은 복제 안 함)", command=self.clone_selected)
         self.btn_clone.pack(side="left", padx=6)
-        self.btn_delete = ttk.Button(tb, text="채널 삭제", command=self.delete_selected)
+        self.btn_delete = ttk.Button(tb, text="채널 삭제", style="Danger.TButton", command=self.delete_selected)
         self.btn_delete.pack(side="right")
 
         form = ttk.LabelFrame(root, text="채널 설정", padding=8)
@@ -143,9 +145,9 @@ class ChannelManagerWindow(tk.Toplevel):
         act = ttk.Frame(root); act.pack(fill="x", pady=(8, 0))
         self.btn_save = ttk.Button(act, text="저장", command=self.save_form)
         self.btn_save.pack(side="left")
-        self.btn_connect = ttk.Button(act, text="Google 계정 연결", command=self.start_connect)
+        self.btn_connect = ttk.Button(act, text="Google 계정 연결", style="Primary.TButton", command=self.start_connect)
         self.btn_connect.pack(side="left", padx=6)
-        self.btn_disconnect = ttk.Button(act, text="연결 해제", command=self.disconnect_selected)
+        self.btn_disconnect = ttk.Button(act, text="연결 해제", style="Danger.TButton", command=self.disconnect_selected)
         self.btn_disconnect.pack(side="left")
         ttk.Checkbutton(act, text="댓글 기능 권한도 함께 요청", variable=self.comment_scope).pack(side="left", padx=8)
         ttk.Button(act, text="닫기", command=self.destroy).pack(side="right")
@@ -161,7 +163,7 @@ class ChannelManagerWindow(tk.Toplevel):
 
     def _say(self, text: str, color: str = "") -> None:
         self.message.set(text)
-        self.lbl_msg.configure(foreground=color or "black", font=("Segoe UI", 9))
+        self.lbl_msg.configure(foreground=color or "black", font="PLS.Body")
 
     def status_text(self, p: ChannelProfile) -> str:
         """연결 확인 결과: 채널 이름·언어·시간대 (channel ID는 [고급 정보 보기]에서만)."""
@@ -348,7 +350,7 @@ class ChannelManagerWindow(tk.Toplevel):
         if self._connect_guide is not None and not self._connect_guide(self):
             return
         self._say(f"{CONNECTING_TEXT}\n('{p.alias}' 채널 계정으로 로그인 → 채널 선택 → [허용], 최대 5분)", "#1d4fa8")
-        self.lbl_msg.configure(font=("Segoe UI", 12, "bold"))
+        self.lbl_msg.configure(font="PLS.Strong")
         profiles, connect, open_browser = self.profiles, self._connect, self._open_browser
         kw = {"scope": COMMENT_SCOPES} if self.comment_scope.get() else {}  # 기본은 기존 scope 그대로
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+from .ui_theme import ensure as ensure_theme
 from .cloud_client import CloudClient, CloudLiveController, CloudStatus, fix_key_permissions
 from .cloud_model import CLOUD_UNAVAILABLE, FREE_UNSURE, CloudConfigError, load_cloud_profile
 from .core import format_duration
@@ -96,6 +97,7 @@ class LiveWindow(tk.Toplevel):
     def __init__(self, master, *, tools: Callable[[], tuple], controller: LiveController | None = None, key_store=None,
                  cloud: CloudLiveController | None = None):
         super().__init__(master)
+        ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.title("24H Playlist LIVE Studio")
         self.geometry("880x760")
         self.minsize(640, 480)
@@ -193,8 +195,8 @@ class LiveWindow(tk.Toplevel):
     def _ui(self):
         root = self._scroll_area()
         head = ttk.Frame(root); head.pack(anchor="w")
-        ttk.Label(head, text="●", foreground="red", font=("Segoe UI", 16, "bold")).pack(side="left")
-        ttk.Label(head, text=" 24H Playlist LIVE Studio", font=("Segoe UI", 16, "bold")).pack(side="left")
+        ttk.Label(head, text="●", foreground="red", font="PLS.Title").pack(side="left")
+        ttk.Label(head, text=" 24H Playlist LIVE Studio", font="PLS.Title").pack(side="left")
         ttk.Label(root, text="완성 MP4 1개 또는 여러 개(Playlist)를 YouTube LIVE로 무한 반복 송출합니다.").pack(anchor="w", pady=(0, 6))
         gr = ttk.Frame(root); gr.pack(fill="x", pady=(0, 6))
         ttk.Button(gr, text="초보자 추천 설정", command=self.apply_beginner_preset).pack(side="left")
@@ -380,9 +382,9 @@ class LiveWindow(tk.Toplevel):
         self.btn_check = ttk.Button(ar, text="송출 설정 검사", command=self._check)
         self.btn_check.pack(fill="x")
         br = ttk.Frame(root); br.pack(fill="x", pady=(6, 0))
-        self.btn_start = ttk.Button(br, text="▶ 24H LIVE 시작", command=self._start)
+        self.btn_start = ttk.Button(br, text="▶ 24H LIVE 시작", style="Primary.TButton", command=self._start)
         self.btn_start.pack(side="left", fill="x", expand=True)
-        self.btn_stop = ttk.Button(br, text="■ LIVE 종료", command=self._stop, state="disabled")
+        self.btn_stop = ttk.Button(br, text="■ LIVE 종료", style="Danger.TButton", command=self._stop, state="disabled")
         self.btn_stop.pack(side="left", fill="x", expand=True, padx=(5, 0))
 
         f5 = ttk.LabelFrame(root, text="상태", padding=7)
@@ -398,7 +400,7 @@ class LiveWindow(tk.Toplevel):
             lbl = ttk.Label(f5, textvariable=self.st[k], wraplength=560, justify="left")
             lbl.grid(row=i, column=1, sticky="w")
             if k == "state":
-                lbl.configure(font=("Segoe UI", 11, "bold"))
+                lbl.configure(font="PLS.Strong")
                 self.lbl_state = lbl
         ttk.Button(root, text="상세 보기", command=self._show_details).pack(anchor="e", pady=(6, 0))
         ttk.Label(root, text="처음 테스트는 YouTube Live Control Room에서 비공개/일부공개 스트림으로 확인하세요.",

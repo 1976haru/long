@@ -11,6 +11,7 @@ from pathlib import Path
 from tkinter import ttk
 from typing import Callable
 
+from .ui_theme import ensure as ensure_theme
 from .cloud_setup_ui import _background
 from .tooling import release_tk_variables
 from .youtube_accounts import ChannelMismatchError
@@ -65,6 +66,7 @@ class PreviewDialog(tk.Toplevel):
                  verify: Callable[[], object] | None = None, on_start: Callable[[BatchPlan], object] | None = None,
                  on_reselect: Callable[[], object] | None = None):
         super().__init__(master)
+        ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.title("예약 업로드 미리보기")
         sh = self.winfo_screenheight()
         self.geometry(f"900x{max(480, min(700, sh - 100))}")
@@ -84,8 +86,8 @@ class PreviewDialog(tk.Toplevel):
         root = ttk.Frame(self, padding=12)
         root.pack(fill="both", expand=True)
         # 잘못된 채널 방지: 어느 채널에 올리는지 가장 크게
-        ttk.Label(root, text="이 채널에 업로드합니다", font=("Segoe UI", 11)).pack(anchor="w")
-        ttk.Label(root, text=plan.alias, font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(root, text="이 채널에 업로드합니다", font="PLS.Lead").pack(anchor="w")
+        ttk.Label(root, text=plan.alias, font="PLS.Hero").pack(anchor="w")
         ttk.Label(root, text=channel_kind_label(plan.language), foreground="gray30").pack(anchor="w")
         first = next((i.publish_at for i in plan.items if i.publish_at), None)
         info = ttk.Frame(root); info.pack(fill="x", pady=(6, 6))
@@ -98,9 +100,9 @@ class PreviewDialog(tk.Toplevel):
             rows.insert(1, ("저장된 YouTube 채널", f"{plan.channel_title or '-'} ({plan.channel_id or '연결 안 됨'})"))
         for r, (k, v) in enumerate(rows):
             ttk.Label(info, text=k, width=18).grid(row=r, column=0, sticky="w")
-            ttk.Label(info, text=v, font=("Segoe UI", 10, "bold")).grid(row=r, column=1, sticky="w")
+            ttk.Label(info, text=v, font="PLS.Strong").grid(row=r, column=1, sticky="w")
         ttk.Label(info, text="실제 YouTube", width=18).grid(row=len(rows), column=0, sticky="w")
-        self.lbl_verify = ttk.Label(info, textvariable=self.verify_text, font=("Segoe UI", 10, "bold"))
+        self.lbl_verify = ttk.Label(info, textvariable=self.verify_text, font="PLS.Strong")
         self.lbl_verify.grid(row=len(rows), column=1, sticky="w")
 
         cols = ("n", "when", "title", "thumb")
@@ -115,7 +117,7 @@ class PreviewDialog(tk.Toplevel):
         self.lbl_problems = ttk.Label(root, textvariable=self.problems, justify="left", wraplength=860)
         self.lbl_problems.pack(anchor="w", pady=(6, 0))
         act = ttk.Frame(root); act.pack(fill="x", pady=(8, 0))
-        self.btn_start = ttk.Button(act, text="맞습니다. 예약 업로드 시작", command=self.confirm_and_start)
+        self.btn_start = ttk.Button(act, text="맞습니다. 예약 업로드 시작", style="Primary.TButton", command=self.confirm_and_start)
         if on_start:
             self.btn_start.pack(side="left", ipadx=8, ipady=4)
         self.btn_add = ttk.Button(act, text=f"{len(plan.items)}개 대기열에 추가", command=self.confirm)

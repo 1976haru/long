@@ -50,6 +50,12 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
         ok("upload_window", u.winfo_exists() and len(u.step_labels) == 5, u.title())
         cm = u.open_channels()
         ok("channel_manager", cm.winfo_exists(), cm.title())
+        c = app._open_comments()
+        ok("comment_manager", c.winfo_exists(), c.title())
+        from . import ui_theme
+        body = ui_theme.size_of("PLS.Body", app)
+        ok("readable_font", body >= 12 and getattr(app, "_pls_theme_size", "") == ui_theme.LARGE,
+           f"{getattr(app, '_pls_theme_size', '')} body={body}pt")
         app.after(step_ms, s5)
 
     def s5():

@@ -181,7 +181,7 @@ def test_wizard_preset_alias_editable_and_persists(root, tmp_path, preset, defau
     p = w.choose_preset(preset)
     assert w.alias_var.get() == default and w.ent_alias.winfo_exists()
     body = texts(w.body)
-    assert "YouTube 채널 이름(별칭)" in body
+    assert "1. YouTube 채널 이름(별칭)" in body
     assert any("실제 YouTube 채널 이름과 달라도 됩니다" in x for x in body)
     w.alias_var.set(f"  {custom}  ")
     assert w.apply_alias()

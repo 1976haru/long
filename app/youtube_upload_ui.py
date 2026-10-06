@@ -16,6 +16,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+from .ui_theme import ensure as ensure_theme
 from . import help_ui
 from . import youtube_upload_preview as preview_ui
 from .help_content import TOOLTIPS
@@ -79,6 +80,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
                  clock: Callable[[], float] | None = None, live_guard: Callable[[], str] | None = None,
                  comments=None):
         super().__init__(master)
+        ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.title("③ 예약 업로드 · 여러 YouTube 채널")
         sh = self.winfo_screenheight()
         self.geometry(f"1040x{max(520, min(900, sh - 90))}")
@@ -159,7 +161,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         root = ttk.Frame(self.scroll.body, padding=12)
         root.pack(fill="both", expand=True)
         top = ttk.Frame(root); top.pack(fill="x")
-        ttk.Label(top, text="③ 예약 업로드", font=("Segoe UI", 15, "bold")).pack(side="left")
+        ttk.Label(top, text="③ 예약 업로드", font="PLS.Title").pack(side="left")
         ttk.Button(top, text="YouTube 채널 관리", command=self.open_channels).pack(side="right")
         ttk.Button(top, text="댓글 관리", command=self.open_comments).pack(side="right", padx=6)
         ttk.Button(top, text="? 사용법", command=lambda: show_usage(self, "upload")).pack(side="right")
@@ -172,7 +174,7 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self.step_labels = []
         for i, name in enumerate(UPLOAD_STEPS, 1):
             if i > 1:
-                ttk.Label(sf, text="→", foreground="gray50").pack(side="left", padx=2)
+                ttk.Label(sf, text="→", foreground="#555555").pack(side="left", padx=2)
             lb = tk.Label(sf, text=f"STEP {i}\n{name}", justify="center", padx=10, pady=3, relief="groove", borderwidth=1)
             lb.pack(side="left")
             self.step_labels.append(lb)
@@ -329,7 +331,8 @@ class MultiChannelUploadWindow(tk.Toplevel):
         self._detail_anchor = ttk.Frame(root)
         self._detail_anchor.pack(fill="x")
 
-        ttk.Button(root, text="▶ 미리보기 후 대기열에 추가", command=self.preview).pack(fill="x", pady=(8, 0))
+        ttk.Button(root, text="▶ 미리보기 후 대기열에 추가", style="Primary.TButton", command=self.preview).pack(
+            fill="x", pady=(8, 0))
 
         # ④ 대기열
         qf = ttk.LabelFrame(root, text=f"④ 예약 업로드 대기열 (최대 {MAX_JOBS}개 · 1개씩 순차 업로드)", padding=8)
@@ -352,27 +355,27 @@ class MultiChannelUploadWindow(tk.Toplevel):
         ttk.Button(tb, text="다시 시도", command=self.retry_selected).pack(side="left")
         ttk.Button(tb, text="재생목록만 다시 추가", command=self.retry_selected).pack(side="left", padx=(4, 0))
         ttk.Button(tb, text="취소", command=self.cancel_selected).pack(side="left", padx=4)
-        ttk.Button(tb, text="삭제", command=self.remove_selected).pack(side="left")
+        ttk.Button(tb, text="삭제", style="Danger.TButton", command=self.remove_selected).pack(side="left")
         ttk.Button(tb, text="완료만 정리", command=self.clear_done).pack(side="right")
         ttk.Button(tb, text="실패만 다시 시도", command=self.retry_failed).pack(side="right", padx=4)
-        ttk.Button(tb, text="선택 삭제", command=self.remove_selected).pack(side="right")
+        ttk.Button(tb, text="선택 삭제", style="Danger.TButton", command=self.remove_selected).pack(side="right")
         ttk.Button(tb, text="선택 전체", command=self.select_all).pack(side="right", padx=4)
 
         # 진행 상태 (크게) — 업로드 중에만 보인다
         self.progress_frame = pf = ttk.LabelFrame(root, text="업로드 진행", padding=8)
-        ttk.Label(pf, textvariable=self.progress_head, font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(pf, textvariable=self.progress_head, font="PLS.Section").pack(anchor="w")
         self.progress_bar = ttk.Progressbar(pf, maximum=100)
         self.progress_bar.pack(fill="x", pady=4)
         ttk.Label(pf, textvariable=self.progress_text, justify="left").pack(anchor="w")
         self._progress_anchor = ttk.Frame(root)
         self._progress_anchor.pack(fill="x")
         ar = ttk.Frame(root); ar.pack(fill="x", pady=(8, 0))
-        self.btn_start = ttk.Button(ar, text="▶ 예약 업로드 시작", command=self.start)
+        self.btn_start = ttk.Button(ar, text="▶ 예약 업로드 시작", style="Primary.TButton", command=self.start)
         self.btn_start.pack(side="left", fill="x", expand=True)
         self.btn_stop = ttk.Button(ar, text="■ 중지 (나중에 이어 올리기)", command=self.stop)
         self.btn_stop.pack(side="left", padx=(5, 0))
         ttk.Label(root, textvariable=self.summary).pack(anchor="w", pady=(4, 0))
-        self.lbl_usage = ttk.Label(root, textvariable=self.usage, foreground="gray40", wraplength=980)
+        self.lbl_usage = ttk.Label(root, textvariable=self.usage, foreground="#555555", wraplength=980)
         self.lbl_usage.pack(anchor="w")
         self._on_kind()
         self.apply_mode()
@@ -417,10 +420,10 @@ class MultiChannelUploadWindow(tk.Toplevel):
         for i, lb in enumerate(self.step_labels, 1):
             name = UPLOAD_STEPS[i - 1]
             if i == cur:
-                lb.configure(text=f"▶ STEP {i}\n{name}", bg="#2f6fdf", fg="white", font=("Segoe UI", 9, "bold"))
+                lb.configure(text=f"▶ STEP {i}\n{name}", bg="#2f6fdf", fg="white", font="PLS.Strong")
             else:
                 lb.configure(text=f"{'✓' if i < cur else ''} STEP {i}\n{name}".strip(), bg="#eef3fd" if i < cur else "#f4f4f4",
-                             fg="#1d4fa8" if i < cur else "gray35", font=("Segoe UI", 9))
+                             fg="#1d4fa8" if i < cur else "#444444", font="PLS.Body")
 
     def toggle_detail(self):
         if self.detail_open.get():
@@ -1219,6 +1222,7 @@ class NewPlaylistDialog(tk.Toplevel):
 
     def __init__(self, master, *, on_create: Callable):
         super().__init__(master)
+        ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.title("새 재생목록 만들기")
         self.transient(master)
         self.resizable(False, False)

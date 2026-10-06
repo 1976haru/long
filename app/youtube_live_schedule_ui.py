@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+from .ui_theme import ensure as ensure_theme
 from .cloud_setup_ui import _background
 from .settings import load_settings, update_settings
 from .tooling import release_tk_variables
@@ -57,6 +58,7 @@ class LiveScheduleWindow(tk.Toplevel):
                  clock: Callable[[], float] = time.time, pick_file: Callable = filedialog.askopenfilename,
                  open_url: Callable[[str], object] = webbrowser.open):
         super().__init__(master)
+        ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.title("② 예약 LIVE")
         self.geometry("940x760")
         self.minsize(820, 660)
@@ -92,7 +94,7 @@ class LiveScheduleWindow(tk.Toplevel):
     def _ui(self):
         root = ttk.Frame(self, padding=12)
         root.pack(fill="both", expand=True)
-        ttk.Label(root, text="② 예약 LIVE", font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        ttk.Label(root, text="② 예약 LIVE", font="PLS.Title").pack(anchor="w")
         ttk.Label(root, textvariable=self.account, foreground="gray30").pack(anchor="w", pady=(0, 8))
 
         form = ttk.LabelFrame(root, text="① 방송 정보와 반복", padding=8)

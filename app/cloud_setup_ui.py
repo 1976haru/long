@@ -13,6 +13,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
+from .ui_theme import ensure as ensure_theme
 from .cloud_client import CloudClient, CloudError, fix_key_permissions
 from .tooling import release_tk_variables
 from .cloud_model import (
@@ -65,6 +66,7 @@ class CloudSetupWizard(tk.Toplevel):
                  ssh_probe: Callable = probe_ssh_executable,
                  pick_file: Callable = filedialog.askopenfilename):
         super().__init__(master)
+        ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.title("무료 Cloud 처음 설정 도우미")
         self.geometry("720x600")
         self.minsize(600, 520)
@@ -98,8 +100,8 @@ class CloudSetupWizard(tk.Toplevel):
         self.step_title = tk.StringVar()
 
         banner = ttk.Frame(self, padding=(12, 10, 12, 0)); banner.pack(fill="x")
-        ttk.Label(banner, text=f"🛡 {FREE_NOTICE}", foreground="darkgreen", font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        ttk.Label(self, textvariable=self.step_title, font=("Segoe UI", 14, "bold"), padding=(12, 8, 12, 4)).pack(anchor="w")
+        ttk.Label(banner, text=f"🛡 {FREE_NOTICE}", foreground="darkgreen", font="PLS.Strong").pack(anchor="w")
+        ttk.Label(self, textvariable=self.step_title, font="PLS.Title", padding=(12, 8, 12, 4)).pack(anchor="w")
         self.body = ttk.Frame(self, padding=12)
         self.body.pack(fill="both", expand=True)
         nav = ttk.Frame(self, padding=12); nav.pack(fill="x")
@@ -142,7 +144,7 @@ class CloudSetupWizard(tk.Toplevel):
     def _step2(self):
         self.step_title.set("STEP 2/4 · 서버 만들 때 고를 값")
         ttk.Label(self.body, text="⚠ Always Free Eligible 표시가 있는지 확인하세요.",
-                  foreground="firebrick", font=("Segoe UI", 13, "bold")).pack(anchor="w", pady=(0, 8))
+                  foreground="firebrick", font="PLS.Section").pack(anchor="w", pady=(0, 8))
         ttk.Label(self.body, text=STEP2_TEXT, justify="left", wraplength=660).pack(anchor="w")
         box = ttk.LabelFrame(self.body, text="무료 서버를 만들 수 없을 때", padding=8)
         box.pack(fill="x", pady=(10, 0))
@@ -266,7 +268,7 @@ class CloudSetupWizard(tk.Toplevel):
             ttk.Label(self.body, textvariable=v).pack(anchor="w")
             self.step_labels.append(v)
         self.lbl_prep = ttk.Label(self.body, textvariable=self.prep_msg, justify="left", wraplength=640,
-                                  font=("Segoe UI", 11, "bold"))
+                                  font="PLS.Strong")
         self.lbl_prep.pack(anchor="w", pady=(10, 0))
         ttk.Button(self.body, text="상세 보기", command=self._details).pack(anchor="e")
         if self.prepared:
