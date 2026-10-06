@@ -66,6 +66,10 @@ class CommentManagerWindow(tk.Toplevel):
         self.usage = tk.StringVar()
         self.warn_text = tk.StringVar()
         self.templates_open = False
+        self.jp_auto_translate = tk.BooleanVar(value=True)
+        self.jp_translation = tk.StringVar()
+        self.jp_nuance = tk.StringVar()
+        self._jp_worker = None
 
         self._ui()
         self.refresh_profiles(profile_id)
@@ -143,6 +147,7 @@ class CommentManagerWindow(tk.Toplevel):
             self.tree.tag_configure(st, foreground=color)
         self.tree.pack(fill="both", expand=True)
         self.tree.bind("<Double-1>", lambda e: self.show_full())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self.translate_selected())
         bb = ttk.Frame(cf); bb.pack(fill="x", pady=(4, 0))
         ttk.Button(bb, text="답글 작성", command=self.reply_selected).pack(side="left")
         ttk.Button(bb, text="추천 답글 사용", command=self.use_recommended).pack(side="left", padx=4)
@@ -150,6 +155,11 @@ class CommentManagerWindow(tk.Toplevel):
         ttk.Button(bb, text="자동답글 제외", command=lambda: self.mark_selected(C_EXCLUDED)).pack(side="left")
         ttk.Button(bb, text="완료 처리", command=lambda: self.mark_selected(C_DONE)).pack(side="left", padx=4)
         ttk.Label(bb, text="더블클릭: 댓글 전체 보기", foreground="#555555").pack(side="right")
+        jp = ttk.LabelFrame(cf, text="무료 일본어 도우미", padding=6); jp.pack(fill="x", pady=(6, 0))
+        ttk.Checkbutton(jp, text="일본어 댓글을 한국어로 자동 번역", variable=self.jp_auto_translate,
+                        command=self.translate_selected).pack(anchor="w")
+        ttk.Label(jp, textvariable=self.jp_translation, wraplength=940, justify="left").pack(anchor="w")
+        ttk.Label(jp, textvariable=self.jp_nuance, foreground="gray30", wraplength=940, justify="left").pack(anchor="w")
 
         ff = ttk.LabelFrame(root, text="첫 댓글 자동등록 (업로드한 영상)", padding=8)
         ff.pack(fill="x", pady=(8, 0))
@@ -381,6 +391,29 @@ class CommentManagerWindow(tk.Toplevel):
         if messagebox.askyesno("추천 답글", f"이 답글을 보낼까요?\n\n{rec.recommended}", parent=self):
             self.reply_selected(rec.recommended)
 
+    def translate_selected(self):
+        rec = self._current()
+        if not self.jp_auto_translate.get() or rec is None or (self._jp_worker and self._jp_worker.is_alive()):
+            return
+        from .jp_language_ui import make_service
+        from .jp_youtube_workflow import TranslationCache
+        service, cache = make_service(), TranslationCache()
+        cached = cache.get(rec.comment_id, service.translation_model or service.model, rec.text)
+        if cached:
+            self.jp_translation.set("한국어: " + cached["translation_ko"])
+            self.jp_nuance.set("뉘앙스: " + cached["nuance_ko"])
+            return
+        self.jp_translation.set("무료 일본어 AI를 준비하고 있습니다. 처음 한 번은 시간이 조금 걸릴 수 있습니다.")
+        def work():
+            try:
+                tr, nu = service.translate(rec.text)
+                cache.put(rec.comment_id, service.translation_model or service.model, rec.text, tr, nu)
+                self._q.put(("jp_translation", True, (rec.comment_id, tr, nu)))
+            except Exception as e:
+                self._q.put(("jp_translation", False, str(e)))
+        import threading
+        self._jp_worker = threading.Thread(target=work, name="jp-translation", daemon=True); self._jp_worker.start()
+
     def open_japanese_setup(self):
         from .jp_language_ui import JapaneseSetupWizard
         self.jp_setup_win = JapaneseSetupWizard(self)
@@ -401,7 +434,10 @@ class CommentManagerWindow(tk.Toplevel):
         def selected(text):
             # 선택만으로 게시하지 않는다. 기존 수동 답글 창에서 사용자가 내용을 확인하고 [보내기]를 눌러야 한다.
             approved = (self._ask_text or ask_reply_text)(self, rec.text, text)
-            if approved:
+            p = self.selected_profile()
+            if approved and p and messagebox.askyesno("YouTube에 답글 게시",
+                    f"이 채널로 답글을 작성합니다\n\n{p.channel_title or p.alias}\n{p.alias}\n\n댓글:\n{approved}\n\n맞습니다. 답글 게시",
+                    parent=self):
                 self.reply_selected(approved)
 
         self.jp_reply_win = JapaneseReplyAssistant(self, comment=rec.text, on_select=selected)
@@ -435,6 +471,13 @@ class CommentManagerWindow(tk.Toplevel):
         try:
             while True:
                 tag, ok, payload = self._q.get_nowait()
+                if tag == "jp_translation":
+                    if ok:
+                        _, tr, nu = payload; self.jp_translation.set("한국어: " + tr); self.jp_nuance.set("뉘앙스: " + nu)
+                    else:
+                        self.jp_translation.set("번역하려면 무료 일본어 AI를 시작하세요. [무료 일본어 도우미 설정]")
+                        self.jp_nuance.set(str(payload))
+                    continue
                 self._worker = None
                 self._say(("" if ok else "✗ ") + str(payload), "darkgreen" if ok else "firebrick")
                 changed = True

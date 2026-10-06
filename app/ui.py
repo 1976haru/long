@@ -619,7 +619,8 @@ class MainWindow(tk.Tk):
         if w is not None:
             w.deiconify(); w.lift(); w.focus_set(); return w
         from .jp_language_ui import ExternalJapaneseCommentHelper
-        self.jp_helper_win = ExternalJapaneseCommentHelper(self)
+        self.jp_helper_win = ExternalJapaneseCommentHelper(self,
+            open_channels=lambda: self._open_upload().open_channels())
         return self.jp_helper_win
 
     def _open_upload(self, video_path="", title=""):

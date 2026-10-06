@@ -33,6 +33,7 @@ QUOTA_COSTS = {
     "videos.list": 1, "videos.update": 50, "thumbnails.set": 50, "liveBroadcasts.update": 50,
     "liveBroadcasts.delete": 50, "videoCategories.list": 1, "videos.insert": 1600,
     "commentThreads.list": 1, "commentThreads.insert": 50, "comments.list": 1, "comments.insert": 50,
+    "comments.delete": 50,
     "playlists.list": 1, "playlists.insert": 50, "playlistItems.insert": 50,
 }
 # videos.update(part=snippet): 요청에 없는 기존 snippet 값은 삭제된다(공식 문서) → 읽은 값을 모두 다시 보낸다.
@@ -540,6 +541,12 @@ class YouTubeApiClient:
     def insert_comment_reply(self, parent_id: str, text: str) -> YouTubeComment:
         body = {"snippet": {"parentId": parent_id, "textOriginal": text}}
         return self._comment(self._request("POST", "comments", {"part": "snippet"}, body, "comments.insert"), parent_id)
+
+    def delete_comment(self, comment_id: str) -> None:
+        """comments.delete. 호출자는 자신이 작성해 기록한 comment_id인지 먼저 확인해야 한다."""
+        if not (comment_id or "").strip():
+            raise ValueError("삭제할 댓글 ID가 없습니다.")
+        self._request("DELETE", "comments", {"id": comment_id}, None, "comments.delete")
 
     def list_comment_replies(self, parent_id: str, *, max_results: int = 20) -> list[YouTubeComment]:
         d = self._request("GET", "comments", {"part": "snippet", "parentId": parent_id, "textFormat": "plainText",

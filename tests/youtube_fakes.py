@@ -296,6 +296,18 @@ class FakeYouTube:
                 return self._err(403, "commentsDisabled")
             cid = self.add_reply(parent, body["snippet"]["textOriginal"], author_channel=me["id"], author=me["title"])
             return 200, t["replies"][-1] if t["replies"][-1]["id"] == cid else {"id": cid}
+        if op == "comments" and method == "DELETE":
+            cid = q.get("id", "")
+            top = self.threads.get(cid)
+            if top is not None and top["top"]["snippet"]["authorChannelId"]["value"] == me["id"]:
+                del self.threads[cid]
+                return 204, {}
+            for t in self.threads.values():
+                for reply in list(t["replies"]):
+                    if reply["id"] == cid and reply["snippet"]["authorChannelId"]["value"] == me["id"]:
+                        t["replies"].remove(reply)
+                        return 204, {}
+            return self._err(403, "forbidden")
         return None
 
     def set_privacy(self, vid, privacy):

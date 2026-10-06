@@ -12,8 +12,9 @@ CANDIDATE_SCHEMA = {
         "review_required": {"type": "boolean"},
         "candidates": {"type": "array", "minItems": 3, "maxItems": 3,
             "items": {"type": "object", "additionalProperties": False,
-                      "required": ["style", "ja"],
-                      "properties": {"style": {"type": "string"}, "ja": {"type": "string"}}}},
+                      "required": ["style", "ja", "ko"],
+                      "properties": {"style": {"type": "string"}, "ja": {"type": "string"},
+                                     "ko": {"type": "string"}}}},
     },
 }
 
@@ -31,6 +32,7 @@ TRANSLATION_SCHEMA = {"type": "object", "additionalProperties": False,
 
 SYSTEM = """You are a local Japanese writing assistant. Return only data matching the JSON schema.
 Translate Japanese into natural Korean and briefly explain nuance in Korean. Create exactly three distinct Japanese drafts.
+For every candidate include ko, a natural Korean meaning of that Japanese draft.
 Style profile JP 2030s Female Natural means only a writing style, never the user's identity: natural and short (1-3 sentences),
 not business-like, not excessive slang/kawaii/gyaru, 0-1 emoji, no promotional language or URLs.
 Never claim 私は日本人です, 日本人として, 日本在住なので, 東京に住んでいます, 同じ日本人として.

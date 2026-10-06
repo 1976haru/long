@@ -40,6 +40,8 @@ def _validate(value: dict) -> None:
     for item in value["candidates"]:
         if not isinstance(item, dict) or not isinstance(item.get("style"), str) or not isinstance(item.get("ja"), str):
             raise ProviderError("답글 후보 형식이 올바르지 않습니다.")
+        if not isinstance(item.get("ko"), str):
+            item["ko"] = ""  # Phase 1 fake providers remain compatible.
     if not all(isinstance(value[k], str) for k in ("translation_ko", "nuance_ko", "tone")):
         raise ProviderError("번역 응답 형식이 올바르지 않습니다.")
     if not isinstance(value["contains_question"], bool) or not isinstance(value["review_required"], bool):
@@ -85,6 +87,17 @@ class JapaneseLanguageService:
         self.provider, self.model, self.translation_model = provider, model, translation_model
         self.keep_alive = "30m" if keep_loaded else "5m"
         self.history, self.timeout = history or DraftHistory(), timeout
+
+    def translate(self, comment_ja: str, cancel_event=None) -> tuple[str, str]:
+        if not comment_ja.strip(): raise ValueError("일본어 댓글을 입력하세요.")
+        model = self.translation_model or self.model
+        value = self.provider.generate_structured(model=model,
+            messages=[{"role": "system", "content": "Translate Japanese naturally to Korean and briefly explain nuance in Korean. JSON only."},
+                      {"role": "user", "content": comment_ja}], schema=TRANSLATION_SCHEMA,
+            timeout=self.timeout, cancel_event=cancel_event, keep_alive=self.keep_alive)
+        if not isinstance(value, dict) or not isinstance(value.get("translation_ko"), str) or not isinstance(value.get("nuance_ko"), str):
+            raise ProviderError("번역 응답 형식이 올바르지 않습니다.")
+        return value["translation_ko"], value["nuance_ko"]
 
     def _generate(self, messages: list[dict], cancel_event=None) -> dict:
         error = None
