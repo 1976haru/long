@@ -14,10 +14,12 @@ _REPLACE_RETRIES = (0.05, 0.1, 0.2, 0.4, 0.8)  # 백신/색인 프로그램이 �
 
 
 def settings_dir() -> Path:
+    # 친구 테스트판은 본인용 설정/토큰/경로와 완전히 분리된 폴더를 사용한다.
+    folder = os.environ.get("PLAYLIST_STUDIO_SETTINGS_DIR", "PlaylistLongVideoMaker").strip() or "PlaylistLongVideoMaker"
     if os.name == "nt" and os.environ.get("APPDATA"):
-        p = Path(os.environ["APPDATA"]) / "PlaylistLongVideoMaker"
+        p = Path(os.environ["APPDATA"]) / folder
     else:
-        p = Path.home() / ".config" / "PlaylistLongVideoMaker"
+        p = Path.home() / ".config" / folder
     p.mkdir(parents=True, exist_ok=True)
     return p
 
