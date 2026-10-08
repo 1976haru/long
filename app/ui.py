@@ -61,7 +61,8 @@ class MainWindow(tk.Tk):
         super().__init__()
         ensure_theme(self)  # 글자 크기/버튼 테마 (ui_theme)
         self.app_root = Path(app_root)
-        self.title(PRODUCT_TITLE)
+        self.friend_test_mode = os.environ.get("PLAYLIST_STUDIO_FRIEND_TEST", "").strip() == "1"
+        self.title(f"{PRODUCT_TITLE} — 친구 테스트판" if self.friend_test_mode else PRODUCT_TITLE)
         # 작은 화면(1366×768)에서도 열리도록 화면 높이에 맞춘다. 내용은 세로 스크롤로 끝까지 닿는다.
         sh = self.winfo_screenheight()
         self.geometry(f"1080x{max(560, min(990, sh - 90))}")
@@ -84,7 +85,7 @@ class MainWindow(tk.Tk):
         self.mode_cards = {}
         self.card_help_links = {}
         self.mode_summary = tk.StringVar()
-        self.beginner = tk.BooleanVar(value=is_beginner())
+        self.beginner = tk.BooleanVar(value=True if self.friend_test_mode else is_beginner())
         self.help_win = self.wizard_win = self.check_win = self.welcome_win = None
 
         self.mode = tk.StringVar(value="rounds")
@@ -106,15 +107,17 @@ class MainWindow(tk.Tk):
         self._tools()
         self.after(100, self._pump)
         self.after(300, self._refresh_summary)
-        self.after(1500, self._start_comments)  # 앱 시작 catch-up: 밀린 첫 댓글 확인 + 새 댓글 1회 확인
-        self.after(700, self._maybe_welcome)  # 처음 실행이면 '처음 사용하시나요?'
+        if not self.friend_test_mode:
+            self.after(1500, self._start_comments)  # 본인용 빌드에서만 댓글 서비스 시작
+        self.after(700, self._maybe_welcome)  # 친구 테스트판은 별도 시작 안내만 표시
 
     def _mode_cards(self, root):
         """상단 3개 모드 카드. ①은 지금 이 화면(기존 제작 UI 그대로), ②③은 별도 창을 연다."""
         bar = ttk.Frame(root); bar.pack(fill="x", pady=(0, 4))
         specs = (("long", "① 영상 늘리기", "SET 영상을 장시간 MP4로 제작", None, "● 현재 화면"),
-                 ("live", "② 실시간 스트리밍", "Cloud / 내 PC에서 Playlist LIVE", self._open_live, "LIVE 창 열기 ▶"),
-                 ("upload", "③ 예약 업로드", "한국·일본 등 여러 채널에 자동 예약", self._open_upload, "예약 업로드 열기 ▶"))
+                 ("live", "② 실시간 스트리밍", "Cloud / 내 PC에서 Playlist LIVE", self._open_live, "LIVE 창 열기 ▶"))
+        if not self.friend_test_mode:
+            specs += (("upload", "③ 예약 업로드", "한국·일본 등 여러 채널에 자동 예약", self._open_upload, "예약 업로드 열기 ▶"),)
         for i, (key, title, desc, cmd, foot) in enumerate(specs):
             active = cmd is None
             bg, border, fg = ("#e8f1ff", "#2f6fdf", "#1d4fa8") if active else ("#f6f6f6", "#c4c4c4", "#202020")
@@ -134,7 +137,7 @@ class MainWindow(tk.Tk):
             self.card_help_links[key] = why
             ac = tk.Frame(card, bg=bg); ac.pack(fill="x", padx=10, pady=(0, 6))
             tk.Label(ac, text=foot, bg=bg, fg=border if active else "#1d4fa8", font="PLS.Strong").pack(side="right")
-            if key == "live":
+            if key == "live" and not self.friend_test_mode:
                 sched = tk.Label(ac, text="예약 LIVE", bg=bg, fg="#1d4fa8", cursor="hand2", font="PLS.Strong")
                 sched.pack(side="left")
                 sched.bind("<Button-1>", lambda e: (self._open_live_schedule(), "break")[1])
@@ -166,6 +169,8 @@ class MainWindow(tk.Tk):
         messagebox.showinfo(f"{title} — 이 기능은 언제 쓰나요?", CARD_HELP[key], parent=self)
 
     def _maybe_welcome(self):
+        if self.friend_test_mode:
+            return
         if not first_run_done():
             self._open_welcome()
 
@@ -281,11 +286,14 @@ class MainWindow(tk.Tk):
     def _refresh_summary(self):
         try:
             waiting = sum(j.status != "완료" for j in self.jobs)
-            c = self._upload_counts()
-            up = " · 업로드 중" if self.upload_queue is not None and self.upload_queue.running else ""
-            fc = self._first_comment_waiting()
-            self.mode_summary.set(f"영상 제작 대기 {waiting} · {self._live_state_text()} · 예약 업로드 대기 {c['waiting']}{up}"
-                                  f" · 예약 완료 {c['done']}" + (f" · 첫 댓글 대기 {fc}" if fc else ""))
+            if self.friend_test_mode:
+                self.mode_summary.set(f"친구 테스트판 · 영상 제작 대기 {waiting} · {self._live_state_text()} · ① 늘리기 + ② LIVE만 사용")
+            else:
+                c = self._upload_counts()
+                up = " · 업로드 중" if self.upload_queue is not None and self.upload_queue.running else ""
+                fc = self._first_comment_waiting()
+                self.mode_summary.set(f"영상 제작 대기 {waiting} · {self._live_state_text()} · 예약 업로드 대기 {c['waiting']}{up}"
+                                      f" · 예약 완료 {c['done']}" + (f" · 첫 댓글 대기 {fc}" if fc else ""))
         except tk.TclError:
             return
         self.after(1500, self._refresh_summary)
@@ -300,13 +308,15 @@ class MainWindow(tk.Tk):
         top.pack(fill="x")
         ttk.Label(top, text=PRODUCT_NAME, font="PLS.Hero").pack(side="left")
         ttk.Label(top, text="v0.3.0").pack(side="right")
-        ttk.Label(root, text="완성된 SET MP4를 회차 기준으로 무손실 반복 연결합니다.").pack(anchor="w")
+        ttk.Label(root, text=("친구 테스트판: ① 영상 늘리기 + ② 24H LIVE만 확인합니다." if self.friend_test_mode
+                              else "완성된 SET MP4를 회차 기준으로 무손실 반복 연결합니다.")).pack(anchor="w")
         tr = ttk.Frame(root); tr.pack(fill="x", pady=(4, 8))
         self.tool_text = ttk.Label(tr, text="FFmpeg 확인 중...")
         self.tool_text.pack(side="left")
         ttk.Button(tr, text="FFmpeg 설정", command=self._pick_ffmpeg).pack(side="right")
-        ttk.Button(tr, text="댓글 관리", command=self._open_comments).pack(side="right", padx=(0, 6))
-        ttk.Button(tr, text="일본 영상 댓글 도우미", command=self._open_japanese_helper).pack(side="right", padx=(0, 6))
+        if not self.friend_test_mode:
+            ttk.Button(tr, text="댓글 관리", command=self._open_comments).pack(side="right", padx=(0, 6))
+            ttk.Button(tr, text="일본 영상 댓글 도우미", command=self._open_japanese_helper).pack(side="right", padx=(0, 6))
         hr0 = ttk.Frame(root); hr0.pack(fill="x", pady=(0, 6))
         ttk.Button(hr0, text="? 처음 사용 가이드", command=self._open_welcome).pack(side="left")
         ttk.Button(hr0, text="? 도움말", command=self._open_help).pack(side="left", padx=4)
@@ -391,7 +401,8 @@ class MainWindow(tk.Tk):
         ttk.Label(qt, textvariable=self.qsummary).pack(side="left")
         ttk.Button(qt, text="전체 비우기", command=self._clear_jobs).pack(side="right")
         ttk.Button(qt, text="선택 삭제", command=self._del_job).pack(side="right", padx=4)
-        ttk.Button(qt, text="③ 예약 업로드로 보내기", command=self._send_to_upload).pack(side="right", padx=(0, 8))
+        if not self.friend_test_mode:
+            ttk.Button(qt, text="③ 예약 업로드로 보내기", command=self._send_to_upload).pack(side="right", padx=(0, 8))
         qcols=("n","inputs","mode","dur","output","state")
         self.qtree=ttk.Treeview(qf,columns=qcols,show="headings",height=5)
         qlabels=("#","SET","기준","예상 길이","출력 파일","상태")
