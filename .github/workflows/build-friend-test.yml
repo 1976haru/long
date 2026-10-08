@@ -1,0 +1,57 @@
+name: Build Friend Test Windows
+
+on:
+  push:
+    branches:
+      - friend-test-v0.3-20261008
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip pyinstaller tzdata
+
+      - name: Build offline manuals
+        shell: pwsh
+        run: |
+          python -m app.manual_html
+
+      - name: Build friend EXE
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name YouTube_Playlist_Studio_Friend_Test_v0.3 --add-data "cloud\long_live_worker.py;cloud" --add-data "deploy\linux;deploy\linux" --add-data "docs\*.html;docs" friend_main.py
+
+      - name: Prepare package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Copy-Item "dist\YouTube_Playlist_Studio_Friend_Test_v0.3.exe" package
+          Copy-Item "friend_test\00_처음에_읽기.txt" package
+          Copy-Item "friend_test\테스트결과_보내기.txt" package
+          Copy-Item "friend_test\01_처음_한번만_실행.bat" package
+          Copy-Item "friend_test\02_프로그램_실행.bat" package
+
+      - name: Create 10-second sample
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress
+          ffmpeg -y -f lavfi -i "testsrc2=size=1280x720:rate=30" -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 10 -c:v libx264 -preset veryfast -pix_fmt yuv420p -g 60 -c:a aac -b:a 128k -ar 48000 -ac 2 "package\TEST_SAMPLE_10SEC.mp4"
+
+      - name: Upload friend package
+        uses: actions/upload-artifact@v4
+        with:
+          name: YouTube_Playlist_Studio_Friend_Test_v0.3
+          path: package
+          if-no-files-found: error
