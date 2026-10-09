@@ -414,11 +414,17 @@ class LiveScheduleWindow(tk.Toplevel):
         self.media_text.set("\n".join(lines))
 
     # ---------------- list ----------------
-    def refresh(self) -> None:
+    def _refresh_account(self) -> bool:
+        """YouTube 연결 상태 (LIVE 창에서 연결/해제하면 창을 다시 열지 않아도 반영)."""
         s = load_youtube_settings()
-        ok = self._connected()
-        self.account.set(f"YouTube 계정: {s.get('channel_title') or '-'}" if ok else
-                         "YouTube 계정이 연결되지 않았습니다 → ② LIVE 창에서 [YouTube 연결]을 먼저 하세요.")
+        ok = bool(self._connected())
+        self.account.set(f"✓ YouTube 연결됨 · 채널: {s.get('channel_title') or '-'}" if ok else
+                         "○ YouTube 계정이 연결되지 않았습니다 → ② LIVE 창 ③ YouTube 송출의 [YouTube 연결]을 먼저 하세요.")
+        self._account_ok = ok
+        return ok
+
+    def refresh(self) -> None:
+        ok = self._refresh_account()
         sel = self._selected()
         for x in self.tree.get_children():
             self.tree.delete(x)
@@ -800,6 +806,16 @@ class LiveScheduleWindow(tk.Toplevel):
             pass
         except tk.TclError:
             return
+        self._pump_ticks = getattr(self, "_pump_ticks", 0) + 1
+        if self._pump_ticks % 10 == 0:  # 2초마다 연결 상태 확인 → 바뀌었으면 버튼 상태까지 다시
+            try:
+                before = getattr(self, "_account_ok", None)
+                if self._refresh_account() != before:
+                    self.refresh()
+            except tk.TclError:
+                return
+            except Exception:
+                pass
         if self.winfo_exists():
             self.after(200, self._pump)
 

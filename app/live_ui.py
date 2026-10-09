@@ -236,13 +236,16 @@ class LiveWindow(tk.Toplevel):
         # ① 영상 + LIVE READY
         f1 = ttk.LabelFrame(root, text="① LIVE 영상", padding=7)
         f1.pack(fill="x")
-        mr = ttk.Frame(f1); mr.pack(fill="x", pady=(0, 4))
-        self.rb_single = ttk.Radiobutton(mr, text="단일 영상", variable=self.source_mode, value="single",
+        mr = ttk.Frame(f1); mr.pack(fill="x", pady=(0, 2))
+        ttk.Label(mr, text="영상 종류", font="PLS.Strong").pack(side="left", padx=(0, 8))
+        self.rb_single = ttk.Radiobutton(mr, text="단일 영상 (MP4 1개)", variable=self.source_mode, value="single",
                                          command=self._on_source_mode)
         self.rb_single.pack(side="left")
-        self.rb_playlist = ttk.Radiobutton(mr, text="여러 영상 Playlist (순서대로 반복)", variable=self.source_mode,
+        self.rb_playlist = ttk.Radiobutton(mr, text="여러 영상 Playlist (MP4 여러 개)", variable=self.source_mode,
                                            value="playlist", command=self._on_source_mode)
         self.rb_playlist.pack(side="left", padx=(12, 0))
+        self.source_hint = tk.StringVar(value="완성 MP4 1개를 반복 송출합니다.")
+        ttk.Label(f1, textvariable=self.source_hint, foreground="darkgreen").pack(anchor="w", pady=(0, 4))
         self.single_frame = ttk.Frame(f1); self.single_frame.pack(fill="x")
         r = ttk.Frame(self.single_frame); r.pack(fill="x")
         ttk.Entry(r, textvariable=self.input_path, state="readonly").pack(side="left", fill="x", expand=True)
@@ -318,19 +321,30 @@ class LiveWindow(tk.Toplevel):
         # ③ YouTube 송출
         f2 = ttk.LabelFrame(root, text="③ YouTube 송출", padding=7)
         f2.pack(fill="x", pady=(8, 0))
-        ym = ttk.Frame(f2); ym.pack(fill="x", pady=(0, 6))
+        # 채널 (지금은 기본 채널 1개 — 여러 채널 LIVE 확장 자리)
+        chr_ = ttk.Frame(f2); chr_.pack(fill="x", pady=(0, 4))
+        ttk.Label(chr_, text="현재 채널", width=11).pack(side="left")
+        self.channel_var = tk.StringVar(value="기본 채널")
+        self.cmb_channel = ttk.Combobox(chr_, textvariable=self.channel_var, state="disabled", width=24,
+                                        values=["기본 채널"])
+        self.cmb_channel.pack(side="left")
+        # YouTube 계정 연결 상태: 송출 방식과 상관없이 항상 표시 (예약 LIVE도 이 연결을 쓴다)
+        yr = ttk.Frame(f2); yr.pack(fill="x", pady=(0, 4))
+        ttk.Label(yr, text="YouTube 계정", width=11).pack(side="left")
+        self.lbl_yt = ttk.Label(yr, textvariable=self.yt_status)
+        self.lbl_yt.pack(side="left")
+        self.btn_yt_setup = ttk.Button(yr, text="YouTube 연결", command=self._open_yt_wizard)
+        self.btn_yt_setup.pack(side="left", padx=(8, 0))
+        ym = ttk.Frame(f2); ym.pack(fill="x", pady=(2, 6))
+        ttk.Label(ym, text="송출 방식", width=11).pack(side="left")
         self.rb_yt_manual = ttk.Radiobutton(ym, text="Stream Key 직접 입력 (기본)", variable=self.yt_mode,
                                             value=STREAM_MODE_MANUAL, command=self._on_yt_mode)
         self.rb_yt_manual.pack(side="left")
-        self.rb_yt_api = ttk.Radiobutton(ym, text="YouTube 자동 세션 (API 연결)", variable=self.yt_mode,
+        self.rb_yt_api = ttk.Radiobutton(ym, text="YouTube API 자동 세션", variable=self.yt_mode,
                                          value=STREAM_MODE_API, command=self._on_yt_mode)
         self.rb_yt_api.pack(side="left", padx=(12, 0))
+        self._yt_mode_row = ym
         self.yt_frame = ttk.Frame(f2)
-        yr = ttk.Frame(self.yt_frame); yr.pack(fill="x")
-        self.lbl_yt = ttk.Label(yr, textvariable=self.yt_status)
-        self.lbl_yt.pack(side="left")
-        self.btn_yt_setup = ttk.Button(yr, text="YouTube 자동 세션 연결", command=self._open_yt_wizard)
-        self.btn_yt_setup.pack(side="right")
         g = ttk.Frame(self.yt_frame); g.pack(fill="x", pady=(4, 0))
         ttk.Label(g, text="LIVE 제목", width=11).grid(row=0, column=0, sticky="w")
         self.ent_yt_title = ttk.Entry(g, textvariable=self.yt_title)
@@ -719,9 +733,11 @@ class LiveWindow(tk.Toplevel):
         if self.playlist_mode:
             self.single_frame.pack_forget()
             self.playlist_frame.pack(fill="x")
+            self.source_hint.set("여러 MP4를 위에서 아래 순서로 반복 송출합니다. [영상 추가]로 넣고 ▲▼로 순서를 바꾸세요.")
         else:
             self.playlist_frame.pack_forget()
             self.single_frame.pack(fill="x")
+            self.source_hint.set("완성 MP4 1개를 반복 송출합니다.")
         self._refresh_playlist()
         self._sync_widgets()
 
@@ -964,7 +980,7 @@ class LiveWindow(tk.Toplevel):
     def _on_yt_mode(self):
         save_youtube_settings(stream_mode=self.yt_mode.get())
         if self.api_mode:
-            self.yt_frame.pack(fill="x", pady=(0, 6))
+            self.yt_frame.pack(fill="x", pady=(0, 6), after=self._yt_mode_row)
         else:
             self.yt_frame.pack_forget()
             if self.session_mode.get() == SESSION_YOUTUBE_AUTO:
@@ -975,11 +991,13 @@ class LiveWindow(tk.Toplevel):
     def _update_yt_status(self):
         ys = load_youtube_settings()
         if is_connected():
-            self.yt_status.set(f"✓ YouTube 연결됨 · 채널: {ys.get('channel_title', '')}")
+            self.yt_status.set(f"✓ 연결됨 · 채널: {ys.get('channel_title', '')}")
             self.lbl_yt.configure(foreground="darkgreen")
+            self.btn_yt_setup.configure(text="다시 연결")
         else:
-            self.yt_status.set("○ 연결 안 됨 — [YouTube 자동 세션 연결]을 진행하세요.")
+            self.yt_status.set("○ 연결 안 됨 — 예약 LIVE / API 자동 세션에 필요합니다.")
             self.lbl_yt.configure(foreground="gray30")
+            self.btn_yt_setup.configure(text="YouTube 연결")
 
     def _open_yt_wizard(self):
         from .youtube_setup_ui import YouTubeSetupWizard
@@ -999,7 +1017,7 @@ class LiveWindow(tk.Toplevel):
 
     def _start_api(self):
         if not is_connected():
-            messagebox.showwarning("YouTube", "먼저 [YouTube 자동 세션 연결]을 진행하세요.", parent=self)
+            messagebox.showwarning("YouTube", "먼저 ③ YouTube 송출의 [YouTube 연결]을 진행하세요.", parent=self)
             return
         if self.session_mode.get() == SESSION_ARCHIVE_SAFE:
             messagebox.showwarning("세션 관리", "YouTube API 연결 모드에서는 '계속 방송' 또는 'YouTube 자동 교체'를 선택하세요.",
@@ -1221,6 +1239,9 @@ class LiveWindow(tk.Toplevel):
                     self.after_idle(self._show_failed)
             self._drain_ui()
             self._drain_cloud()
+            self._yt_status_ticks = getattr(self, "_yt_status_ticks", 0) + 1
+            if self._yt_status_ticks % 6 == 0:  # 3초마다: 다른 창에서 연결/해제해도 바로 반영
+                self._update_yt_status()
             self._refresh()
         finally:
             if self.winfo_exists():

@@ -221,7 +221,7 @@ def _token_request(client: OAuthClient, form: dict, transport, timeout: float = 
     if status != 200:
         err = data.get("error", "")
         if err == "invalid_grant":
-            raise OAuthError("YouTube 연결이 만료되었거나 취소되었습니다. [YouTube 자동 세션 연결]을 다시 진행하세요.\n"
+            raise OAuthError("YouTube 연결이 만료되었거나 취소되었습니다. LIVE 창 ③의 [YouTube 연결]을 다시 진행하세요.\n"
                              + TESTING_TOKEN_WARNING, "invalid_grant")
         if err in ("invalid_client", "unauthorized_client"):
             raise OAuthError("OAuth Client 설정이 올바르지 않습니다 (Client JSON 확인).", "config")
@@ -345,7 +345,7 @@ class OAuthSession:
                 return self._token.access_token
             saved = self.store.load()
             if not saved:
-                raise OAuthError("YouTube가 연결되어 있지 않습니다. [YouTube 자동 세션 연결]을 진행하세요.", "invalid_grant")
+                raise OAuthError("YouTube가 연결되어 있지 않습니다. LIVE 창 ③의 [YouTube 연결]을 진행하세요.", "invalid_grant")
             tok = refresh_access_token(self.client, saved["refresh_token"], transport=self.transport, clock=self.clock)
             if tok.refresh_token and tok.refresh_token != saved["refresh_token"]:
                 self.store.save(tok.refresh_token, client_id=self.client.client_id, scope=tok.scope)
