@@ -266,6 +266,7 @@ class ReservationRecord:
     stream_id: str = ""
     ingest_url: str = ""
     cloud_playlist: list = field(default_factory=list)  # [{name, sha256, size, duration}] — 비밀 없음
+    profile_id: str = "default"  # 여러 채널 LIVE: 이 예약을 송출할 채널 (기존 기록 = 기본 채널)
 
     @property
     def cloud_label(self) -> str:

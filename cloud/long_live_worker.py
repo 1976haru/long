@@ -25,6 +25,16 @@
   scheduler 상태는 /opt/long-live/state/jobs/<job_id>.state.json. T-120초 영상 SHA256 확인 → T-30초 최종 확인
   → T(예약 시각)에 FFmpeg 송출 시작 (YouTube enableAutoStart가 방송을 LIVE로) → stop_at에 q 정상 종료 (enableAutoStop).
   예약 시각 + 5분이 지나도록 시작 못 했으면 MISSED (늦게 시작하지 않음). 같은 job은 한 번만 실행 (worker.lock).
+
+여러 채널 동시 LIVE (v4, --profile <id> / long-live@<id>.service):
+  기본 채널(default)은 위 경로를 그대로 쓴다 (기존 1채널 LIVE/예약과 100% 같음).
+  채널 profile은 경로를 완전히 분리한다:
+    /etc/long-live/channels/<id>/stream.key (0600 longlive) · live.json (0640 root:longlive)
+    /opt/long-live/state/channels/<id>/ (status.json, session.json, playlist.ffconcat, worker.lock, jobs/)
+    /opt/long-live/logs/channels/<id>/worker.log
+  같은 채널 중복 송출은 채널 worker.lock으로 막고, 서버 전체 동시 송출은 state/slots/live<N>.lock으로
+  MAX_CONCURRENT_LIVE(2)개까지만 허용한다. 두 번째 LIVE는 시작 전에 RAM/디스크/load/FFmpeg 수를 확인한다.
+  미디어(/opt/long-live/media)는 모든 채널이 공유한다 (같은 SHA256 파일은 다시 올리지 않음).
 """
 from __future__ import annotations
 
@@ -53,12 +63,21 @@ except ImportError:  # Windows 테스트 환경: 같은 프로세스 안의 잠�
 _LOCAL_LOCKS: set[str] = set()
 _LOCAL_LOCKS_GUARD = threading.Lock()
 
-WORKER_VERSION = "3"
+WORKER_VERSION = "4"
+DEFAULT_ETC = "/etc/long-live"
 DEFAULT_CONFIG = "/etc/long-live/live.json"
 DEFAULT_KEY = "/etc/long-live/stream.key"
 DEFAULT_MEDIA = "/opt/long-live/media"
 DEFAULT_STATE = "/opt/long-live/state"
 DEFAULT_LOGS = "/opt/long-live/logs"
+DEFAULT_PROFILE = "default"  # 기존 1채널 경로 (live.json / stream.key / state/worker.lock)
+CHANNELS_DIR = "channels"
+SAFE_PROFILE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")  # systemd instance 이름에 escape가 필요 없는 문자만
+MAX_CONCURRENT_LIVE = 2  # OCI Free VM 보호: 서버 전체 동시 송출 (DIRECT COPY) 최대 2개
+MIN_FREE_MEM_BYTES = 200 * 1024**2  # 두 번째 LIVE 시작 전 MemAvailable 최소 여유
+MIN_FREE_DISK_BYTES = 512 * 1024**2
+MAX_LOAD_PER_CPU = 1.5
+LIVE_STATES = ("STARTING", "RUNNING", "RECONNECT_WAIT")
 RETRY_DELAYS = (5, 10, 30, 60)
 STABLE_RESET_SECONDS = 60.0
 STATUS_INTERVAL = 5.0
@@ -218,7 +237,8 @@ class FileLock:
     def held(self) -> bool:
         return self._fd is not None
 
-    def acquire(self) -> bool:
+    def acquire(self, *, wait: float = 0.0) -> bool:
+        """wait > 0: 그 시간까지 기다린다 (slot 선택처럼 짧게 순서를 맞출 때만)."""
         if self._fd is not None:
             return True
         try:
@@ -226,25 +246,45 @@ class FileLock:
             fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT, 0o644)
         except OSError:
             return False
-        try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            else:
-                with _LOCAL_LOCKS_GUARD:
-                    key = os.path.normcase(os.path.abspath(str(self.path)))
-                    if key in _LOCAL_LOCKS:
-                        raise OSError("locked")
-                    _LOCAL_LOCKS.add(key)
-        except OSError:
-            os.close(fd)
-            return False
+        end = time.monotonic() + wait
+        while True:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                else:
+                    with _LOCAL_LOCKS_GUARD:
+                        key = os.path.normcase(os.path.abspath(str(self.path)))
+                        if key in _LOCAL_LOCKS:
+                            raise OSError("locked")
+                        _LOCAL_LOCKS.add(key)
+                break
+            except OSError:
+                if time.monotonic() >= end:
+                    os.close(fd)
+                    return False
+                time.sleep(0.02)
         self._fd = fd
         return True
+
+    def write_info(self, data: dict) -> None:
+        """잠금 파일에 소유자 정보(pid/profile)만 기록 — 상태 표시용 (비밀 없음)."""
+        if self._fd is None:
+            return
+        try:
+            os.ftruncate(self._fd, 0)
+            os.lseek(self._fd, 0, os.SEEK_SET)
+            os.write(self._fd, json.dumps(data).encode("utf-8"))
+        except OSError:
+            pass
 
     def release(self) -> None:
         fd, self._fd = self._fd, None
         if fd is None:
             return
+        try:
+            os.ftruncate(fd, 0)
+        except OSError:
+            pass
         try:
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -257,12 +297,153 @@ class FileLock:
 
 
 LOCK_BUSY = "다른 LIVE 송출이 이미 실행 중입니다 (예약 LIVE 또는 직접 시작한 Cloud LIVE)."
+CONCURRENT_BUSY = (f"현재 Cloud에서 LIVE {MAX_CONCURRENT_LIVE}개가 실행 중입니다.\n"
+                   f"동시 송출은 최대 {MAX_CONCURRENT_LIVE}개입니다.")
+
+
+# ======================= 채널 profile (v4) =======================
+
+def valid_profile(profile) -> str:
+    p = DEFAULT_PROFILE if profile in (None, "") else profile
+    if p != DEFAULT_PROFILE and (not isinstance(p, str) or not SAFE_PROFILE.match(p)):
+        raise ConfigError("채널 ID 형식이 올바르지 않습니다.")
+    return p
+
+
+def profile_paths(profile, *, etc_dir=DEFAULT_ETC, state_dir=DEFAULT_STATE, log_dir=DEFAULT_LOGS) -> dict:
+    """채널별 경로. default는 기존 1채널 경로 그대로 (호환)."""
+    p = valid_profile(profile)
+    etc, state, logs = Path(etc_dir), Path(state_dir), Path(log_dir)
+    if p == DEFAULT_PROFILE:
+        return {"profile": p, "config": etc / "live.json", "key": etc / "stream.key", "state": state,
+                "lock": state / "worker.lock", "logs": logs, "jobs": state / "jobs"}
+    cs = state / CHANNELS_DIR / p
+    return {"profile": p, "config": etc / CHANNELS_DIR / p / "live.json", "key": etc / CHANNELS_DIR / p / "stream.key",
+            "state": cs, "lock": cs / "worker.lock", "logs": logs / CHANNELS_DIR / p, "jobs": cs / "jobs"}
+
+
+def service_name(profile) -> str:
+    p = valid_profile(profile)
+    return "long-live.service" if p == DEFAULT_PROFILE else f"long-live@{p}.service"
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if os.path.isdir("/proc"):
+        return os.path.exists(f"/proc/{pid}")
+    return pid == os.getpid()  # Windows 테스트: 같은 프로세스의 스레드 송출만 (os.kill(pid, 0)은 Windows에서 종료 신호)
+
+
+def slot_owners(slot_dir, max_live: int = MAX_CONCURRENT_LIVE) -> list[dict]:
+    """현재 송출 slot을 가진 worker (표시용, 살아 있는 pid만). 실제 제한은 slot 파일 잠금(flock)이 한다."""
+    out = []
+    for i in range(1, max_live + 1):
+        try:
+            d = json.loads((Path(slot_dir) / f"live{i}.lock").read_text(encoding="utf-8") or "{}")
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and _pid_alive(d.get("pid")):
+            out.append({"slot": i, "profile_id": str(d.get("profile_id") or ""), "pid": d.get("pid")})
+    return out
+
+
+def _count_ffmpeg() -> int:
+    n = 0
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return 0
+    for d in entries:
+        if d.isdigit():
+            try:
+                with open(f"/proc/{d}/comm", encoding="utf-8") as f:
+                    if f.read().strip() == "ffmpeg":
+                        n += 1
+            except OSError:
+                pass
+    return n
+
+
+def system_resources(media_dir) -> dict:
+    """free RAM / disk / load / 실행 중 FFmpeg 수 (Linux /proc). 읽을 수 없는 값은 None."""
+    res = {"mem_available_bytes": None, "disk_free_bytes": None, "load1": None, "cpus": os.cpu_count() or 1,
+           "ffmpeg_count": _count_ffmpeg()}
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    res["mem_available_bytes"] = int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        res["disk_free_bytes"] = shutil.disk_usage(str(media_dir)).free
+    except OSError:
+        pass
+    try:
+        res["load1"] = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        pass
+    return res
+
+
+def resource_problem(res: dict, *, others_live: int, max_live: int = MAX_CONCURRENT_LIVE) -> str:
+    """두 번째 LIVE 시작 전 확인. 문제 없으면 "". 첫 번째 LIVE는 이 확인으로 막지 않는다 (기존 동작 유지)."""
+    if others_live <= 0:
+        return ""
+    if others_live >= max_live or (res.get("ffmpeg_count") or 0) >= max_live:
+        return CONCURRENT_BUSY
+    mem = res.get("mem_available_bytes")
+    if mem is not None and mem < MIN_FREE_MEM_BYTES:
+        return (f"서버 메모리가 부족해 두 번째 LIVE를 시작하지 않았습니다 (남은 RAM {mem // 1024**2}MB, "
+                f"필요 {MIN_FREE_MEM_BYTES // 1024**2}MB). 첫 번째 LIVE는 계속 송출합니다.")
+    disk = res.get("disk_free_bytes")
+    if disk is not None and disk < MIN_FREE_DISK_BYTES:
+        return "서버 저장 공간이 부족해 두 번째 LIVE를 시작하지 않았습니다. 첫 번째 LIVE는 계속 송출합니다."
+    load, cpus = res.get("load1"), res.get("cpus") or 1
+    if load is not None and load > MAX_LOAD_PER_CPU * cpus:
+        return (f"서버 부하가 높아 두 번째 LIVE를 시작하지 않았습니다 (load {load:.1f}). "
+                "첫 번째 LIVE는 계속 송출합니다.")
+    return ""
+
+
+def acquire_live_slot(slot_dir, *, profile: str, media_dir, max_live: int = MAX_CONCURRENT_LIVE,
+                      resources=system_resources) -> tuple["FileLock | None", str]:
+    """서버 전체 동시 송출 slot 1개 잡기 → (잠금, 오류 메시지). 선택 과정은 guard 잠금으로 순서를 맞춘다
+    (같은 시각 예약 2개가 동시에 시작해도 서로 slot을 엿보다가 둘 다 거부되는 일이 없게)."""
+    slot_dir = Path(slot_dir)
+    guard = FileLock(slot_dir / "slots.guard")
+    if not guard.acquire(wait=10.0):
+        return None, "송출 자리를 확인하지 못했습니다. 잠시 뒤 다시 시도하세요."
+    try:
+        mine, others = None, 0
+        for i in range(1, max_live + 1):
+            lk = FileLock(slot_dir / f"live{i}.lock")
+            if not lk.acquire():
+                others += 1
+            elif mine is None:
+                mine = lk
+            else:
+                lk.release()  # 개수 확인용 (guard 안이라 다른 worker와 겹치지 않음)
+        if mine is None:
+            return None, CONCURRENT_BUSY
+        problem = resource_problem(resources(media_dir), others_live=others, max_live=max_live) if others else ""
+        if problem:
+            mine.release()
+            return None, problem
+        mine.write_info({"pid": os.getpid(), "profile_id": profile, "since": time.time()})
+        return mine, ""
+    finally:
+        guard.release()
 
 
 class Worker:
     def __init__(self, *, config_path, key_path, media_dir, state_dir, ffmpeg="ffmpeg", ffprobe=None,
                  retry_delays=RETRY_DELAYS, debug_output=None, clock=time.monotonic, wall=time.time,
-                 session_limit=ARCHIVE_SAFE_SECONDS, deadline_wall: float | None = None, lock_path=None):
+                 session_limit=ARCHIVE_SAFE_SECONDS, deadline_wall: float | None = None, lock_path=None,
+                 profile=DEFAULT_PROFILE, slot_dir=None, max_live=MAX_CONCURRENT_LIVE, resources=system_resources):
         self.config_path = Path(config_path)
         self.key_path = Path(key_path)
         self.media_dir = Path(media_dir)
@@ -278,6 +459,12 @@ class Worker:
         self.deadline = None if deadline_wall is None else float(deadline_wall)
         # 같은 서버에서 FFmpeg 송출은 하나만 (수동 Cloud LIVE와 예약 LIVE가 같은 잠금 파일을 쓴다)
         self.lock = FileLock(lock_path if lock_path is not None else self.state_dir / "worker.lock")
+        # v4: 서버 전체 동시 송출 제한 (slot_dir=None이면 제한 없음 — 기존 단독 테스트/호출 호환)
+        self.profile = valid_profile(profile)
+        self.slot_dir = None if slot_dir is None else Path(slot_dir)
+        self.max_live = int(max_live)
+        self.resources = resources
+        self.slot: FileLock | None = None
         self.stop_event = threading.Event()
         self.secrets: list[str] = []
         self.errors = collections.deque(maxlen=30)
@@ -327,7 +514,8 @@ class Worker:
             raise ConfigError("Stream Key 파일을 읽을 수 없습니다.") from e
         if not key:
             raise ConfigError("Stream Key가 비어 있습니다.")
-        self.secrets[:] = [key]
+        if key not in self.secrets:  # 덮어쓰지 않고 추가: scheduler의 여러 채널 job이 같은 목록(로그 가림)을 공유
+            self.secrets.append(key)
         target = build_output_url(cfg["ingest_url"], key)
         self.media_names = cfg["media"]
         self.session_mode = cfg["session_mode"]
@@ -430,6 +618,7 @@ class Worker:
         current = (self.media_names[pos[0]] if pos else "") if n > 1 else self.media_name
         return {
             "worker_version": WORKER_VERSION,
+            "profile_id": self.profile,
             "state": self.state,
             "media": current,
             "mode": "DIRECT COPY",
@@ -571,8 +760,18 @@ class Worker:
             self._set_state("FAILED", LOCK_BUSY)
             return EXIT_CONFIG
         try:
+            if self.slot_dir is not None:
+                self.slot, problem = acquire_live_slot(self.slot_dir, profile=self.profile, media_dir=self.media_dir,
+                                                       max_live=self.max_live, resources=self.resources)
+                if self.slot is None:  # 다른 채널 LIVE는 건드리지 않고 이 채널만 시작하지 않음
+                    self.last_error = problem
+                    self._set_state("FAILED", problem)
+                    return EXIT_CONFIG
             return self._run_locked(media, target, concat)
         finally:
+            if self.slot is not None:
+                self.slot.release()
+                self.slot = None
             self.lock.release()
 
     def _run_locked(self, media, target, concat) -> int:
@@ -706,7 +905,8 @@ def parse_job(d) -> dict:
     grace = d.get("grace_seconds", LATE_GRACE_SECONDS)
     if not isinstance(grace, int) or not 0 <= grace <= MAX_LATE_GRACE:
         raise ConfigError("늦은 시작 허용 시간이 올바르지 않습니다.")
-    return {"schema": JOB_SCHEMA, "job_id": jid, "broadcast_id": d.get("broadcast_id", ""),
+    profile = valid_profile(d.get("profile_id"))  # v3 job(필드 없음) = 기본 채널
+    return {"schema": JOB_SCHEMA, "job_id": jid, "profile_id": profile, "broadcast_id": d.get("broadcast_id", ""),
             "stream_id": d.get("stream_id", ""), "scheduled_at_utc": d["scheduled_at_utc"],
             "stop_at_utc": d["stop_at_utc"], "start": start, "stop": stop, "playlist": playlist,
             "ingest_url": ingest, "ingest_mode": "copy", "key_fingerprint": fp, "grace": grace,
@@ -743,8 +943,31 @@ class JobStore:
     def state_path(self, jid: str) -> Path:
         return self.state_root / f"{jid}.state.json"
 
-    def run_dir(self, jid: str) -> Path:
-        return self.state_root / jid
+    def run_dir(self, jid: str, profile: str = DEFAULT_PROFILE) -> Path:
+        """송출 작업 폴더. 기본 채널은 기존 state/jobs/<job_id>, 채널 profile은 state/channels/<id>/jobs/<job_id>."""
+        if valid_profile(profile) == DEFAULT_PROFILE:
+            return self.state_root / jid
+        return self.state_root.parent / CHANNELS_DIR / profile / "jobs" / jid
+
+    def overlap_problem(self, job: dict) -> str:
+        """같은 채널의 겹치는 예약은 금지, 다른 채널은 허용하되 같은 시각 전체 MAX_CONCURRENT_LIVE개까지."""
+        others = []
+        for o in self.specs():
+            if o["job_id"] == job["job_id"] or self.cancel_requested(o["job_id"]):
+                continue
+            if self.read_state(o["job_id"]).get("state", J_PENDING) in JOB_TERMINAL:
+                continue
+            if o["start"] < job["stop"] and job["start"] < o["stop"]:
+                if o["profile_id"] == job["profile_id"]:
+                    return "같은 채널에 시간이 겹치는 예약이 이미 있습니다. 시간을 바꾸거나 기존 예약을 취소하세요."
+                others.append(o)
+        # 새 예약 구간 안에서 동시에 겹치는 다른 예약 수의 최댓값 (시작 시각들만 보면 충분)
+        points = [job["start"]] + [o["start"] for o in others if job["start"] <= o["start"] < job["stop"]]
+        peak = max((sum(1 for o in others if o["start"] <= t < o["stop"]) for t in points), default=0)
+        if peak + 1 > MAX_CONCURRENT_LIVE:
+            return (f"같은 시간에 Cloud 예약 LIVE가 이미 {peak}개 있습니다. "
+                    f"동시 송출은 최대 {MAX_CONCURRENT_LIVE}개입니다.")
+        return ""
 
     def specs(self) -> list[dict]:
         try:
@@ -785,8 +1008,11 @@ class JobStore:
         jid = job["job_id"]
         if self.spec_path(jid).exists() and self.read_state(jid).get("state", J_PENDING) != J_PENDING:
             raise ConfigError("이미 시작되었거나 끝난 예약은 바꿀 수 없습니다.")
+        problem = self.overlap_problem(job)
+        if problem:
+            raise ConfigError(problem)
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
-        stored = {k: raw[k] for k in ("schema", "job_id", "broadcast_id", "stream_id", "scheduled_at_utc",
+        stored = {k: raw[k] for k in ("schema", "job_id", "profile_id", "broadcast_id", "stream_id", "scheduled_at_utc",
                                       "stop_at_utc", "playlist", "ingest_url", "ingest_mode", "key_fingerprint",
                                       "grace_seconds", "created_at") if k in raw}
         _atomic_write(self.spec_path(jid), json.dumps(stored, ensure_ascii=False), 0o640, "longlive")
@@ -802,7 +1028,8 @@ class JobStore:
         st = self.read_state(job["job_id"])
         media_dir = Path(media_dir)
         media_ok = all((media_dir / it["name"]).is_file() for it in job["playlist"])
-        return {"job_id": job["job_id"], "broadcast_id": job["broadcast_id"], "stream_id": job["stream_id"],
+        return {"job_id": job["job_id"], "profile_id": job["profile_id"], "broadcast_id": job["broadcast_id"],
+                "stream_id": job["stream_id"],
                 "scheduled_at_utc": job["scheduled_at_utc"], "stop_at_utc": job["stop_at_utc"],
                 "media": [it["name"] for it in job["playlist"]], "media_count": len(job["playlist"]),
                 "media_ok": media_ok, "manifest_ok": self.spec_path(job["job_id"]).is_file(),
@@ -834,14 +1061,15 @@ class JobRunner:
 
     def start(self) -> None:
         jid = self.job["job_id"]
-        d = self.store.run_dir(jid)
+        profile = self.job.get("profile_id", DEFAULT_PROFILE)
+        d = self.store.run_dir(jid, profile)
         names = [it["name"] for it in self.job["playlist"]]
         cfg = {"schema_version": 2, "media": names[0] if len(names) == 1 else names, "play_mode": "sequential",
                "ingest_url": self.job["ingest_url"], "mode": "copy", "session_mode": "continuous", "session_id": jid}
         _atomic_write(d / "live.json", json.dumps(cfg))
         self.worker = self.worker_cls(config_path=d / "live.json", key_path=self.key_path, media_dir=self.media_dir,
                                       state_dir=d, ffmpeg=self.ffmpeg, deadline_wall=self.job["stop"],
-                                      lock_path=self.lock_path, wall=self.wall, **self.worker_kwargs)
+                                      lock_path=self.lock_path, wall=self.wall, profile=profile, **self.worker_kwargs)
         self.worker.secrets = self.secrets  # scheduler 로그 RedactFilter와 같은 목록 (key가 로그에 남지 않게)
         self.thread = threading.Thread(target=self._run, name=f"job-{jid}", daemon=True)
         self.thread.start()
@@ -891,17 +1119,35 @@ class Scheduler:
     """
 
     def __init__(self, store: JobStore, *, media_dir, key_path, runner_factory, wall=time.time, sha_fn=_file_sha256,
-                 status_path=None):
+                 status_path=None, etc_dir=None, max_live: int = MAX_CONCURRENT_LIVE):
         self.store = store
         self.media_dir = Path(media_dir)
         self.key_path = Path(key_path)
+        # 채널 profile Stream Key: <etc>/channels/<id>/stream.key (기본 채널은 key_path 그대로)
+        self.etc_dir = Path(etc_dir) if etc_dir else self.key_path.parent
         self.runner_factory = runner_factory
         self.wall = wall
         self.sha_fn = sha_fn
         self.status_path = Path(status_path) if status_path else None
-        self.running: tuple[str, object] | None = None
+        self.max_live = int(max_live)
+        self.runs: dict[str, object] = {}  # job_id → runner (채널마다 최대 1개, 전체 max_live개)
         self._sha_cache: dict[tuple, str] = {}
         self.shutting_down = False
+
+    @property
+    def running(self) -> tuple[str, object] | None:
+        """(호환) 송출 중인 job 하나. 여러 개면 첫 번째."""
+        return next(iter(self.runs.items()), None)
+
+    def key_path_for(self, job: dict) -> Path:
+        p = job.get("profile_id", DEFAULT_PROFILE)
+        return self.key_path if p == DEFAULT_PROFILE else self.etc_dir / CHANNELS_DIR / p / "stream.key"
+
+    def _profile_running(self, profile: str) -> str | None:
+        for jid, r in self.runs.items():
+            if getattr(r, "job", {}).get("profile_id", DEFAULT_PROFILE) == profile:
+                return jid
+        return None
 
     # ---- state helpers ----
     def _set(self, jid: str, **changes) -> dict:
@@ -937,7 +1183,7 @@ class Scheduler:
 
     def _key_problem(self, job: dict) -> str:
         try:
-            key = self.key_path.read_text(encoding="utf-8").strip()
+            key = self.key_path_for(job).read_text(encoding="utf-8").strip()
         except OSError:
             return "Stream Key 파일을 읽을 수 없습니다."
         if not key:
@@ -955,7 +1201,7 @@ class Scheduler:
             w = self._step(job, now)
             if w is not None:
                 waits.append(w)
-        if self.running is not None:
+        if self.runs:
             waits.append(SCHED_RUNNING_SECONDS)
         self._write_status(now)
         return max(0.5, min([SCHED_IDLE_SECONDS] + waits))
@@ -963,17 +1209,21 @@ class Scheduler:
     def _write_status(self, now: float) -> None:
         if self.status_path is None:
             return
+        running = [{"job_id": jid, "profile_id": getattr(r, "job", {}).get("profile_id", DEFAULT_PROFILE)}
+                   for jid, r in self.runs.items()]
         try:
             _atomic_write(self.status_path, json.dumps({"pid": os.getpid(), "updated_at": now,
-                                                        "running_job": self.running[0] if self.running else None,
+                                                        "running_job": running[0]["job_id"] if running else None,
+                                                        "running_jobs": running,
                                                         "worker_version": WORKER_VERSION}))
         except OSError:
             log.warning("scheduler status write failed")
 
     def _poll_running(self, now: float) -> None:
-        if self.running is None:
-            return
-        jid, r = self.running
+        for jid, r in list(self.runs.items()):  # 채널마다 따로: 한 job이 끝나거나 실패해도 다른 job은 그대로
+            self._poll_one(jid, r, now)
+
+    def _poll_one(self, jid: str, r, now: float) -> None:
         if self.store.cancel_requested(jid) and not r.stop_requested:
             r.stop()  # 기존 stop safety: FFmpeg에 q → 정상 종료
             self._set(jid, state=J_STOPPING, message="사용자 요청으로 송출을 멈추는 중")
@@ -982,7 +1232,7 @@ class Scheduler:
             state = J_STOPPING if r.stop_requested else (J_LIVE if ws in ("RUNNING", "RECONNECT_WAIT") else J_STARTING)
             self._set(jid, state=state, heartbeat=now)
             return
-        self.running = None
+        self.runs.pop(jid, None)
         ws = r.worker_state
         if self.shutting_down and not self.store.cancel_requested(jid):
             self._set(jid, heartbeat=now)  # 서비스 종료/재부팅: 상태 유지 → 다시 켜지면 이어서 송출
@@ -997,7 +1247,7 @@ class Scheduler:
 
     def _step(self, job: dict, now: float) -> float | None:
         jid = job["job_id"]
-        if self.running is not None and self.running[0] == jid:
+        if jid in self.runs:
             return None
         st = self.store.read_state(jid)
         state = st.get("state", J_PENDING)
@@ -1046,8 +1296,11 @@ class Scheduler:
 
     def _start(self, job: dict, now: float, st: dict, *, resume: bool = False) -> float | None:
         jid = job["job_id"]
-        if self.running is not None:
+        if self._profile_running(job.get("profile_id", DEFAULT_PROFILE)) is not None:
             self._set(jid, state=J_FAILED, finished_at=now, message="다른 예약 LIVE가 송출 중이라 시작하지 않았습니다.")
+            return None
+        if len(self.runs) >= self.max_live:
+            self._set(jid, state=J_FAILED, finished_at=now, message=CONCURRENT_BUSY)
             return None
         err = self._media_problem(job, verify_sha=False) or self._key_problem(job)
         if err:
@@ -1070,18 +1323,19 @@ class Scheduler:
         except Exception as e:
             self._set(jid, state=J_FAILED, finished_at=now, message=f"송출을 시작하지 못했습니다 ({type(e).__name__}).")
             return None
-        self.running = (jid, runner)
+        self.runs[jid] = runner
         return SCHED_RUNNING_SECONDS
 
     def shutdown(self, timeout: float = 15) -> None:
         """서비스 종료(SIGTERM): 송출 중이면 FFmpeg 정상 종료. job 상태는 유지 (재시작 후 5분 안이면 이어서)."""
         self.shutting_down = True
-        if self.running is not None:
-            _, r = self.running
+        runs = list(self.runs.values())
+        for r in runs:
             if r.worker is not None:
                 r.worker.request_stop()
+        for r in runs:
             r.join(timeout)
-            self._poll_running(self.wall())
+        self._poll_running(self.wall())
 
 
 def run_scheduler(args, *, stop_event: threading.Event | None = None, secrets: list | None = None) -> int:
@@ -1094,12 +1348,15 @@ def run_scheduler(args, *, stop_event: threading.Event | None = None, secrets: l
     secrets = secrets if secrets is not None else []
     store = JobStore(args.jobs_dir, state_dir)
     ffmpeg = shutil.which(args.ffmpeg) or args.ffmpeg
+    etc_dir = getattr(args, "etc_dir", None) or str(Path(args.key_file).parent)  # 테스트의 SimpleNamespace 호환
 
     def factory(job):
-        return JobRunner(job, store=store, media_dir=args.media_dir, key_path=args.key_file,
-                         lock_path=state_dir / "worker.lock", ffmpeg=ffmpeg, secrets=secrets)
+        p = profile_paths(job.get("profile_id"), etc_dir=etc_dir, state_dir=state_dir)
+        key = args.key_file if p["profile"] == DEFAULT_PROFILE else p["key"]
+        return JobRunner(job, store=store, media_dir=args.media_dir, key_path=key, lock_path=p["lock"],
+                         ffmpeg=ffmpeg, secrets=secrets, worker_kwargs={"slot_dir": state_dir / "slots"})
     sched = Scheduler(store, media_dir=args.media_dir, key_path=args.key_file, runner_factory=factory,
-                      status_path=state_dir / "scheduler.json")
+                      status_path=state_dir / "scheduler.json", etc_dir=etc_dir)
     log.info("scheduler started version=%s", WORKER_VERSION)
     try:
         while not stop_event.is_set():
@@ -1115,11 +1372,61 @@ def run_scheduler(args, *, stop_event: threading.Event | None = None, secrets: l
     return EXIT_OK
 
 
+def service_state(name: str) -> str:
+    """systemctl is-active 결과 (active/inactive/failed/...). systemctl이 없으면 'unknown'."""
+    try:
+        return subprocess.run(["systemctl", "is-active", name], capture_output=True, text=True,
+                              timeout=10).stdout.strip() or "unknown"
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def known_profiles(etc_dir, state_dir) -> list[str]:
+    found = {DEFAULT_PROFILE}
+    for base in (Path(state_dir) / CHANNELS_DIR, Path(etc_dir) / CHANNELS_DIR):
+        try:
+            found |= {d.name for d in base.iterdir() if d.is_dir() and SAFE_PROFILE.match(d.name)}
+        except OSError:
+            pass
+    return sorted(found, key=lambda p: (p != DEFAULT_PROFILE, p))
+
+
+def live_status(args) -> dict:
+    """모든 채널의 송출 상태 (PC [채널] 화면/동시 송출 수 확인용). Stream Key는 존재 여부만."""
+    state_root, etc = Path(args.state_dir), Path(args.etc_dir)
+    lives = []
+    for p in known_profiles(etc, state_root):
+        paths = profile_paths(p, etc_dir=etc, state_dir=state_root)
+        try:
+            st = json.loads((paths["state"] / "status.json").read_text(encoding="utf-8"))
+            st = st if isinstance(st, dict) else {}
+        except (OSError, ValueError):
+            st = {}
+        svc = service_name(p)
+        active = service_state(svc)
+        lives.append({"profile_id": p, "service": svc, "active": active,
+                      "live": active == "active" and st.get("state") in LIVE_STATES,
+                      "state": st.get("state") or "", "runtime_seconds": st.get("runtime_seconds"),
+                      "bitrate": st.get("bitrate"), "reconnects": st.get("reconnects"),
+                      "key_set": paths["key"].is_file()})
+    try:
+        sched = json.loads((state_root / "scheduler.json").read_text(encoding="utf-8"))
+        running_jobs = [j for j in (sched.get("running_jobs") or []) if isinstance(j, dict)]
+    except (OSError, ValueError, AttributeError):
+        running_jobs = []
+    owners = slot_owners(state_root / "slots")
+    return {"ok": True, "worker_version": WORKER_VERSION, "max_concurrent": MAX_CONCURRENT_LIVE,
+            "slots_used": len(owners), "slots": owners, "lives": lives, "scheduled_running": running_jobs,
+            "resources": system_resources(args.media_dir)}
+
+
 def admin_command(args) -> int:
     """PC가 sudo로 호출하는 관리 명령. 결과는 JSON 한 줄 (Stream Key 출력 없음)."""
     store = JobStore(args.jobs_dir, args.state_dir)
     try:
-        if args.add_job:
+        if args.live_status:
+            out = live_status(args)
+        elif args.add_job:
             raw = json.loads(sys.stdin.read() or "{}")
             out = {"ok": True, "job": store.add(raw, args.media_dir)}
         elif args.cancel_job:
@@ -1131,9 +1438,11 @@ def admin_command(args) -> int:
                 sched = None
             out = {"ok": True, "jobs": store.listing(args.media_dir), "scheduler": sched,
                    "worker_version": WORKER_VERSION}
-        else:  # --key-fingerprint
+        else:  # --key-fingerprint [--profile <id>]
+            p = profile_paths(args.profile, etc_dir=args.etc_dir, state_dir=args.state_dir)
+            key_file = args.key_file if p["profile"] == DEFAULT_PROFILE else p["key"]
             try:
-                key = Path(args.key_file).read_text(encoding="utf-8").strip()
+                key = Path(key_file).read_text(encoding="utf-8").strip()
             except OSError:
                 key = ""
             out = {"ok": True, "fingerprint": key_fingerprint(key) if key else ""}
@@ -1194,10 +1503,15 @@ def main(argv=None) -> int:
     ap.add_argument("--list-jobs", action="store_true")
     ap.add_argument("--cancel-job", default="")
     ap.add_argument("--key-fingerprint", action="store_true")
+    ap.add_argument("--live-status", action="store_true", help="모든 채널 송출 상태 (JSON)")
+    ap.add_argument("--profile", default=DEFAULT_PROFILE, help="채널 profile ID (기본: default = 기존 1채널 경로)")
+    ap.add_argument("--etc-dir", default=None, help="설정 폴더 (기본: --key-file이 있는 폴더 = /etc/long-live)")
     args = ap.parse_args(argv)
+    if not args.etc_dir:
+        args.etc_dir = str(Path(args.key_file).parent)
     if args.self_check:
         return self_check(args)
-    if args.add_job or args.list_jobs or args.cancel_job or args.key_fingerprint:
+    if args.add_job or args.list_jobs or args.cancel_job or args.key_fingerprint or args.live_status:
         return admin_command(args)
     if args.scheduler:
         secrets: list[str] = []
@@ -1206,9 +1520,17 @@ def main(argv=None) -> int:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
         return run_scheduler(args, stop_event=stop, secrets=secrets)
-    worker = Worker(config_path=args.config, key_path=args.key_file, media_dir=args.media_dir,
-                    state_dir=args.state_dir, ffmpeg=shutil.which(args.ffmpeg) or args.ffmpeg)
-    setup_logging(args.log_dir, worker.secrets)
+    try:
+        p = profile_paths(args.profile, etc_dir=args.etc_dir, state_dir=args.state_dir, log_dir=args.log_dir)
+    except ConfigError as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_CONFIG
+    default = p["profile"] == DEFAULT_PROFILE
+    worker = Worker(config_path=args.config if default else p["config"], key_path=args.key_file if default else p["key"],
+                    media_dir=args.media_dir, state_dir=args.state_dir if default else p["state"],
+                    ffmpeg=shutil.which(args.ffmpeg) or args.ffmpeg, profile=p["profile"],
+                    slot_dir=Path(args.state_dir) / "slots")
+    setup_logging(args.log_dir if default else str(p["logs"]), worker.secrets)
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: worker.request_stop())
     return worker.run()

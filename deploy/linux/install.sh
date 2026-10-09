@@ -13,11 +13,16 @@ fi
 install -d -m 0755 -o root -g root /opt/long-live /opt/long-live/worker
 install -d -m 0755 -o "$UPLOAD_USER" -g longlive /opt/long-live/media
 install -d -m 0755 -o longlive -g longlive /opt/long-live/state /opt/long-live/logs
-install -d -m 0750 -o root -g longlive /etc/long-live /etc/long-live/jobs
+install -d -m 0755 -o longlive -g longlive /opt/long-live/state/channels /opt/long-live/state/slots /opt/long-live/logs/channels
+install -d -m 0750 -o root -g longlive /etc/long-live /etc/long-live/jobs /etc/long-live/channels
 install -m 0644 -o root -g root "$SRC_DIR/long_live_worker.py" /opt/long-live/worker/long_live_worker.py
 install -m 0644 -o root -g root "$SRC_DIR/long-live.service" /etc/systemd/system/long-live.service
 if [ -f "$SRC_DIR/long-live-scheduler.service" ]; then
   install -m 0644 -o root -g root "$SRC_DIR/long-live-scheduler.service" /etc/systemd/system/long-live-scheduler.service
+fi
+# 여러 채널 동시 LIVE (v4): 채널마다 long-live@<채널ID>.service (기본 채널은 기존 long-live.service 그대로)
+if [ -f "$SRC_DIR/long-live@.service" ]; then
+  install -m 0644 -o root -g root "$SRC_DIR/long-live@.service" "/etc/systemd/system/long-live@.service"
 fi
 install -m 0755 -o root -g root "$SRC_DIR/uninstall.sh" /opt/long-live/worker/uninstall.sh
 systemctl daemon-reload

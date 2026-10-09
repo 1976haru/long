@@ -124,6 +124,12 @@ class LiveScheduleWindow(tk.Toplevel):
         self._worker = None
         self._cancel = threading.Event()
         self.store = reservation_store()
+        # 여러 채널: 예약할 채널 (LIVE 창에서 고른 채널로 시작). 기본 채널은 기존 연결/설정 그대로.
+        from .live_channels import LiveChannelStore
+        self.channels = LiveChannelStore()
+        self.channel_id = self.channels.selected_id()
+        self._channel_ids: list[str] = []
+        self.channel_var = tk.StringVar()
         self.media: list[tuple[Path, object]] = []  # (경로, LiveReadyReport|None) — 방송 영상 순서
         self.media_from_live = False
         self.last_outcome = None
@@ -171,6 +177,13 @@ class LiveScheduleWindow(tk.Toplevel):
         head = ttk.Frame(root); head.pack(fill="x")
         ttk.Label(head, text="② 예약 LIVE", font="PLS.Title").pack(side="left")
         ttk.Button(head, text="초보자 빠른 예약", style="Primary.TButton", command=self.beginner_quick).pack(side="right")
+        self.channel_row = ttk.Frame(root)
+        ttk.Label(self.channel_row, text="예약할 채널", font="PLS.Strong").pack(side="left")
+        self.cmb_channel = ttk.Combobox(self.channel_row, textvariable=self.channel_var, state="readonly", width=28)
+        self.cmb_channel.pack(side="left", padx=(6, 0))
+        self.cmb_channel.bind("<<ComboboxSelected>>", lambda e: self._on_channel())
+        self.channel_row.pack(fill="x", pady=(2, 0))
+        self._load_channels()
         ttk.Label(root, textvariable=self.account, foreground="gray30").pack(anchor="w", pady=(0, 8))
 
         form = ttk.LabelFrame(root, text="① 방송 영상 · 시간 · 정보", padding=8)
@@ -414,11 +427,70 @@ class LiveScheduleWindow(tk.Toplevel):
         self.media_text.set("\n".join(lines))
 
     # ---------------- list ----------------
+    # ---------------- 채널 (여러 채널 LIVE) ----------------
+    def _load_channels(self) -> None:
+        profiles = self.channels.all()
+        self._channel_ids = [p.channel_profile_id for p in profiles]
+        if self.channel_id not in self._channel_ids:
+            self.channel_id = self._channel_ids[0]
+        self.cmb_channel.configure(values=[p.display_name for p in profiles])
+        self.cmb_channel.current(self._channel_ids.index(self.channel_id))
+        if len(profiles) > 1:
+            self.channel_row.pack(fill="x", pady=(2, 0))
+        else:
+            self.channel_row.pack_forget()  # 채널 1개: 기존 화면 그대로
+
+    def _on_channel(self) -> None:
+        i = self.cmb_channel.current()
+        if 0 <= i < len(self._channel_ids) and not self.busy:
+            self.channel_id = self._channel_ids[i]
+            self.refresh()
+
+    def _channel(self, pid: str | None = None):
+        from .live_channels import default_channel
+        return self.channels.get(pid or self.channel_id) or default_channel()
+
+    def _legacy(self, pid: str | None = None) -> bool:
+        """기본 채널 + 채널 전용 Google 연결 없음 → 기존 연결(youtube_token.dat / settings["youtube"])."""
+        ch = self._channel(pid)
+        return ch.is_default and not ch.oauth_profile_id
+
+    def _api_factory_for(self, pid: str | None = None) -> Callable:
+        if self._legacy(pid):
+            return self._api_factory
+        from .live_channels import channel_api
+        ch = self._channel(pid)
+        return lambda: channel_api(ch)
+
+    def _channel_youtube(self, pid: str | None = None) -> tuple[bool, str, str | None]:
+        """(연결 여부, 실제 YouTube 채널 이름, 저장된 송출 스트림 ID)."""
+        if self._legacy(pid):
+            s = load_youtube_settings()
+            return bool(self._connected()), s.get("channel_title") or "", s.get("stream_id") or None
+        from .live_channels import oauth_connected, oauth_profile_for
+        ch = self._channel(pid)
+        op = oauth_profile_for(ch)
+        return (bool(oauth_connected(ch)), op.channel_title if op else "", (op.stream_id or None) if op else None)
+
+    def _save_stream_id(self, pid: str, stream_id: str) -> None:
+        if self._legacy(pid):
+            save_youtube_settings(stream_id=stream_id)
+            return
+        from .live_channels import oauth_profile_for
+        from .youtube_accounts import ProfileStore
+        profiles = ProfileStore()
+        op = oauth_profile_for(self._channel(pid), profiles)
+        if op is not None and op.stream_id != stream_id:
+            op.stream_id = stream_id
+            profiles.save(op)
+
     def _refresh_account(self) -> bool:
         """YouTube 연결 상태 (LIVE 창에서 연결/해제하면 창을 다시 열지 않아도 반영)."""
-        s = load_youtube_settings()
-        ok = bool(self._connected())
-        self.account.set(f"✓ YouTube 연결됨 · 채널: {s.get('channel_title') or '-'}" if ok else
+        try:
+            ok, title, _ = self._channel_youtube()
+        except Exception:
+            ok, title = False, ""
+        self.account.set(f"✓ YouTube 연결됨 · 채널: {title or '-'}" if ok else
                          "○ YouTube 계정이 연결되지 않았습니다 → ② LIVE 창 ③ YouTube 송출의 [YouTube 연결]을 먼저 하세요.")
         self._account_ok = ok
         return ok
@@ -468,9 +540,8 @@ class LiveScheduleWindow(tk.Toplevel):
     # ---------------- 예약 만들기 ----------------
     def _run(self, jobs: list[tuple[str, dict, dict]], save_new: bool) -> None:
         """YouTube 예약만 (기존). jobs: (rule_id, rule dict, template dict) — 스레드에는 dict만 넘긴다."""
-        api_factory, clock, store = self._api_factory, self._clock, self.store
-        stream_id = load_youtube_settings().get("stream_id") or None
-        channel = load_youtube_settings().get("channel_title", "")
+        api_factory, clock, store = self._api_factory_for(), self._clock, self.store
+        _, channel, stream_id = self._channel_youtube()
 
         def work():
             api = api_factory()
@@ -496,9 +567,15 @@ class LiveScheduleWindow(tk.Toplevel):
     def _run_cloud(self, jobs: list[dict]) -> None:
         """TRUE 예약 LIVE 준비 (Cloud). jobs: {rule_id, rule, template, media, reports?, cloud_playlist, save_new}."""
         from .scheduled_live import STEP_LABELS, prepare_cloud_schedule
-        api_factory, cloud_factory, clock, store = self._api_factory, self._cloud_factory, self._clock, self.store
-        ys = load_youtube_settings()
-        saved_stream, channel = ys.get("stream_id") or None, ys.get("channel_title", "")
+        cloud_factory, clock, store = self._cloud_factory, self._clock, self.store
+        # 채널마다: YouTube API(채널 token) · 송출 스트림 · 채널 이름 (스레드에는 Tk 객체 없이 값/함수만)
+        per = {}
+        for job in jobs:
+            pid = job.get("profile_id") or self.channel_id
+            job["profile_id"] = pid
+            if pid not in per:
+                _, title, stream = self._channel_youtube(pid)
+                per[pid] = (self._api_factory_for(pid), stream, title)
         q, cancel, analyze_fn = self._q, self._cancel, self._analyze_fn
         _, ffprobe = self._tools()
         cancel.clear()
@@ -513,11 +590,16 @@ class LiveScheduleWindow(tk.Toplevel):
             q.put(("cloud_" + kind, *payload))
 
         def work():
-            api = api_factory()
             client = cloud_factory()
             now = datetime.fromtimestamp(clock(), timezone.utc)
             outcomes = []
+            apis = {}
             for job in jobs:
+                pid = job["profile_id"]
+                api_factory, saved_stream, channel = per[pid]
+                if pid not in apis:
+                    apis[pid] = api_factory()
+                api = apis[pid]
                 rule, tpl = ScheduleRule.from_dict(job["rule"]), MetadataTemplate.from_dict(job["template"])
                 paths = [Path(p) for p in job["media"]]
                 reports = job.get("reports")
@@ -526,13 +608,15 @@ class LiveScheduleWindow(tk.Toplevel):
                         raise RuntimeError("FFmpeg/ffprobe를 찾을 수 없습니다 (영상 검사 불가).")
                     reports = analyze_fn(paths, ffprobe)
                 if job.get("save_new"):
-                    save_rule(job["rule_id"], rule, tpl, execution="cloud", media=[str(p) for p in paths])
+                    save_rule(job["rule_id"], rule, tpl, execution="cloud", media=[str(p) for p in paths],
+                              profile_id=pid)
                 out = prepare_cloud_schedule(
                     api=api, client=client, media_paths=paths, reports=reports, rule=rule, template=tpl,
                     rule_id=job["rule_id"], store=store, now=now, saved_stream_id=saved_stream, channel=channel,
                     emit=emit, cancel=cancel, saved_playlist=job.get("cloud_playlist"),
-                    on_stream=lambda sid: q.put(("stream_id", sid)),
-                    on_playlist=lambda pl, rid=job["rule_id"]: update_rule_extra(rid, cloud_playlist=pl))
+                    on_stream=lambda sid, pid=pid: q.put(("stream_id", sid, pid)),
+                    on_playlist=lambda pl, rid=job["rule_id"]: update_rule_extra(rid, cloud_playlist=pl),
+                    profile_id=pid)
                 outcomes.append(out)
                 if out.failed_step:
                     break
@@ -565,7 +649,7 @@ class LiveScheduleWindow(tk.Toplevel):
             return
         self._run_cloud([{"rule_id": secrets.token_hex(6), "rule": rule.to_dict(), "template": template.to_dict(),
                           "media": [str(p) for p, _ in self.media], "reports": [r for _, r in self.media],
-                          "save_new": True}])
+                          "save_new": True, "profile_id": self.channel_id}])
 
     def top_up_saved(self):
         if self.busy:
@@ -583,7 +667,8 @@ class LiveScheduleWindow(tk.Toplevel):
             # Cloud 규칙: YouTube 예약과 Cloud job을 회차마다 함께 (같은 영상은 SHA256로 확인 후 다시 보내지 않음)
             self._pending_yt = [(r["rule_id"], r.get("rule") or {}, r.get("template") or {}) for r in yt]
             self._run_cloud([{"rule_id": r["rule_id"], "rule": r.get("rule") or {}, "template": r.get("template") or {},
-                              "media": list(r.get("media") or []), "cloud_playlist": r.get("cloud_playlist") or None}
+                              "media": list(r.get("media") or []), "cloud_playlist": r.get("cloud_playlist") or None,
+                              "profile_id": r.get("profile_id") or "default"}  # 규칙마다 저장된 채널 (기존 규칙 = 기본 채널)
                              for r in cloud])
             return
         self._run([(r["rule_id"], r.get("rule") or {}, r.get("template") or {}) for r in rules], save_new=False)
@@ -627,7 +712,8 @@ class LiveScheduleWindow(tk.Toplevel):
         if not mode:
             return
         from .scheduled_live import cancel_reservation
-        api_factory, cloud_factory, store = self._api_factory, self._cloud_factory, self.store
+        api_factory = self._api_factory_for(getattr(rec, "profile_id", "") or "default")  # 예약한 채널의 YouTube 연결
+        cloud_factory, store = self._cloud_factory, self.store
         need_cloud = rec.execution == "cloud" and bool(rec.cloud_job_id)
 
         def work():
@@ -647,7 +733,8 @@ class LiveScheduleWindow(tk.Toplevel):
             self._say("Cloud 준비가 실패한 예약(⚠)만 다시 시도할 수 있습니다.")
             return
         from .scheduled_live import retry_cloud_job
-        api_factory, cloud_factory, clock, store = self._api_factory, self._cloud_factory, self._clock, self.store
+        api_factory = self._api_factory_for(getattr(rec, "profile_id", "") or "default")
+        cloud_factory, clock, store = self._cloud_factory, self._clock, self.store
 
         def work():
             r = retry_cloud_job(rec, api=api_factory(), client=cloud_factory(), store=store,
@@ -761,7 +848,10 @@ class LiveScheduleWindow(tk.Toplevel):
                     self.prog_bar["value"] = ev[1] * 100
                     self.progress_text.set(ev[2])
                 elif tag == "stream_id":
-                    save_youtube_settings(stream_id=ev[1])
+                    try:
+                        self._save_stream_id(ev[2] if len(ev) > 2 else self.channel_id, ev[1])
+                    except Exception:
+                        pass  # 스트림 ID 기억은 편의 기능 (다음 예약에서 다시 찾음)
                 elif tag == "media_reports":
                     by = dict(zip(ev[1], ev[2]))
                     self.media = [(p, by.get(str(p), r)) for p, r in self.media]

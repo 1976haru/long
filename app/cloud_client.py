@@ -22,9 +22,11 @@ from pathlib import Path
 from typing import Callable
 
 from .cloud_model import (
-    CLOUD_UNAVAILABLE, FREE_UNSURE, REMOTE_CONFIG, REMOTE_KEY, REMOTE_MEDIA, REMOTE_STATUS, REMOTE_WORKER,
-    SCHEDULER_SERVICE, SCHEDULER_WORKER_VERSION, SERVICE, SSH_MISSING, CloudConfigError, CloudProfile, find_ssh,
-    safe_remote_name, sha256_file, ssh_base_args, worker_files,
+    CLOUD_UNAVAILABLE, CONCURRENT_BUSY, FREE_UNSURE, MAX_CONCURRENT_LIVE, MULTI_CHANNEL_WORKER_VERSION,
+    REMOTE_CHANNELS_ETC, REMOTE_CONFIG, REMOTE_KEY, REMOTE_MEDIA, REMOTE_STATUS, REMOTE_WORKER, SCHEDULER_SERVICE,
+    SCHEDULER_WORKER_VERSION, SERVICE, SSH_MISSING, CloudConfigError, CloudProfile, find_ssh, is_default_profile,
+    profile_remote_paths, profile_service, safe_remote_name, sha256_file, ssh_base_args, validate_live_profile_id,
+    worker_files,
 )
 from .core import creationflags_no_window
 from .live_core import build_output_url
@@ -169,6 +171,53 @@ CONFIG_WRITE_CMD = (
         f"chmod 640 {REMOTE_CONFIG}.part && mv -f {REMOTE_CONFIG}.part {REMOTE_CONFIG}"))
 
 
+def key_write_cmd(profile_id=None) -> str:
+    """채널별 Stream Key 파일 (0600 longlive:longlive). 기본 채널은 기존 KEY_WRITE_CMD 그대로.
+    두 채널의 key는 절대 같은 파일에 쓰지 않는다 (/etc/long-live/channels/<id>/stream.key)."""
+    if is_default_profile(profile_id):
+        return KEY_WRITE_CMD
+    p = profile_remote_paths(profile_id)
+    d, key = p["etc"], p["key"]
+    return "sudo -n sh -c " + q(
+        f"umask 077; install -d -m 0750 -o root -g longlive {REMOTE_CHANNELS_ETC} {d} && "
+        f"cat > {key}.part && chown longlive:longlive {key}.part && chmod 600 {key}.part && mv -f {key}.part {key}")
+
+
+def config_write_cmd(profile_id=None) -> str:
+    if is_default_profile(profile_id):
+        return CONFIG_WRITE_CMD
+    p = profile_remote_paths(profile_id)
+    d, cfg = p["etc"], p["config"]
+    return "sudo -n sh -c " + q(
+        f"umask 027; install -d -m 0750 -o root -g longlive {REMOTE_CHANNELS_ETC} {d} && "
+        f"cat > {cfg}.part && chown root:longlive {cfg}.part && chmod 640 {cfg}.part && mv -f {cfg}.part {cfg}")
+
+
+# 채널 profile 상태 (기본 채널은 기존 STATUS_SCRIPT 그대로). 인자: 서비스 이름, status.json 경로 (검증된 값)
+PROFILE_STATUS_SCRIPT = r"""
+python3 - "$1" "$2" <<'PYEOF'
+import json, shutil, subprocess, sys
+svc, path = sys.argv[1], sys.argv[2]
+def sh(*a):
+    try:
+        return subprocess.run(list(a), capture_output=True, text=True, timeout=10).stdout.strip()
+    except Exception:
+        return ""
+out = {"active": sh("systemctl", "is-active", svc), "enabled": sh("systemctl", "is-enabled", svc),
+       "installed": bool(sh("systemctl", "cat", svc))}
+try:
+    out["status"] = json.load(open(path))
+except Exception:
+    out["status"] = None
+try:
+    out["disk_free_bytes"] = shutil.disk_usage("/opt/long-live/media").free
+except Exception:
+    out["disk_free_bytes"] = None
+print(json.dumps(out))
+PYEOF
+"""
+
+
 @dataclass
 class CloudStatus:
     reachable: bool = False
@@ -193,6 +242,7 @@ class CloudStatus:
     session_mode: str = ""
     session_limit: float | None = None
     session_remaining: float | None = None
+    profile_id: str = "default"
 
     @property
     def live(self) -> bool:
@@ -201,6 +251,37 @@ class CloudStatus:
     @property
     def session_complete(self) -> bool:
         return self.state == "SESSION_LIMIT_REACHED"
+
+
+@dataclass
+class ChannelLive:
+    """서버의 채널 1개 송출 상태 (list_live_profiles). Stream Key는 존재 여부만."""
+    profile_id: str
+    live: bool = False
+    state: str = ""
+    active: str = ""
+    runtime_seconds: float = 0.0
+    bitrate: str | None = None
+    reconnects: int = 0
+    key_set: bool = False
+
+
+@dataclass
+class CloudLiveOverview:
+    lives: list[ChannelLive] = field(default_factory=list)
+    slots_used: int = 0
+    max_concurrent: int = MAX_CONCURRENT_LIVE
+    scheduled_running: list[str] = field(default_factory=list)  # 송출 중인 예약 job의 채널 ID
+    resources: dict = field(default_factory=dict)
+
+    @property
+    def live_count(self) -> int:
+        """서버 전체 송출 수 (직접 시작 + 예약). slot 잠금 기준이 가장 정확하다."""
+        direct = sum(1 for c in self.lives if c.live)
+        return max(self.slots_used, direct + len(self.scheduled_running))
+
+    def is_live(self, profile_id: str) -> bool:
+        return any(c.profile_id == profile_id and c.live for c in self.lives) or profile_id in self.scheduled_running
 
 
 @dataclass
@@ -490,33 +571,74 @@ class CloudClient:
         digits = "".join(c for c in res.out if c.isdigit())
         return int(digits) if digits else 1
 
+    def require_multi_channel_worker(self) -> None:
+        if self.worker_version() < MULTI_CHANNEL_WORKER_VERSION:
+            raise CloudError("여러 채널 동시 LIVE는 Cloud LIVE Worker 업데이트가 필요합니다.\n"
+                             "현재 방송이 끝난 뒤 [처음 설정 도우미] → [무료 Cloud 자동 준비]를 다시 실행하세요.")
+
+    def list_live_profiles(self) -> CloudLiveOverview:
+        """서버의 모든 채널 송출 상태 + 전체 동시 송출 수 (worker v4 --live-status). Stream Key 내용 없음."""
+        d = self._worker_admin("--live-status")
+        lives = []
+        for c in d.get("lives") or []:
+            if not isinstance(c, dict):
+                continue
+            try:
+                pid = validate_live_profile_id(c.get("profile_id"))
+            except CloudConfigError:
+                continue
+            lives.append(ChannelLive(profile_id=pid, live=bool(c.get("live")), state=str(c.get("state") or ""),
+                                     active=str(c.get("active") or ""),
+                                     runtime_seconds=float(c.get("runtime_seconds") or 0),
+                                     bitrate=c.get("bitrate"), reconnects=int(c.get("reconnects") or 0),
+                                     key_set=bool(c.get("key_set"))))
+        sched = [str(j.get("profile_id") or "default") for j in d.get("scheduled_running") or [] if isinstance(j, dict)]
+        res = d.get("resources") if isinstance(d.get("resources"), dict) else {}
+        return CloudLiveOverview(lives=lives, slots_used=int(d.get("slots_used") or 0),
+                                 max_concurrent=int(d.get("max_concurrent") or MAX_CONCURRENT_LIVE),
+                                 scheduled_running=sched, resources=res)
+
     def start_live(self, *, remote_media, ingest_url: str, stream_key: str, wait_seconds: float = 25,
-                   sleep=time.sleep, session_mode: str = SESSION_CONTINUOUS, session_id: str | None = None) -> CloudStatus:
+                   sleep=time.sleep, session_mode: str = SESSION_CONTINUOUS, session_id: str | None = None,
+                   profile_id: str | None = None) -> CloudStatus:
         """remote_media: 서버 파일 이름 1개(str) 또는 Playlist(list). 설정은 schema v2.
 
         단일 영상 + 계속 방송은 media를 문자열로 써서 기존(v1) worker와도 그대로 호환된다.
-        Playlist/보관 안전 모드는 worker v2가 필요하다 (구버전이면 시작하지 않고 업데이트 안내)."""
+        Playlist/보관 안전 모드는 worker v2가 필요하다 (구버전이면 시작하지 않고 업데이트 안내).
+        profile_id(채널)를 주면 그 채널 전용 key/설정/서비스(long-live@<id>)만 쓴다 — 다른 채널 LIVE는 건드리지 않는다."""
         build_output_url(ingest_url, stream_key)  # 형식 검사 (예외에 key 없음)
+        profile = validate_live_profile_id(profile_id)
+        default = is_default_profile(profile)
+        service = profile_service(profile)
         names = [remote_media] if isinstance(remote_media, str) else list(remote_media)
         if not names or len(names) > MAX_PLAYLIST_ITEMS:
             raise CloudError(f"Playlist는 1~{MAX_PLAYLIST_ITEMS}개입니다.")
         if session_mode not in SESSION_MODES:
             raise CloudError("세션 모드가 올바르지 않습니다.")
         self._secrets = [stream_key.strip()]
-        chk = self.run(f"test -f {q(REMOTE_WORKER)} && systemctl cat {SERVICE} >/dev/null && echo OK", timeout=30)
+        unit = SERVICE if default else "long-live@.service"
+        chk = self.run(f"test -f {q(REMOTE_WORKER)} && systemctl cat {q(unit)} >/dev/null && echo OK", timeout=30)
         if chk.rc == 255:
             raise CloudError(friendly_ssh_error(chk.err), chk.err)
         if "OK" not in chk.out:
+            if not default:
+                raise CloudError("여러 채널 동시 LIVE는 Cloud LIVE Worker 업데이트가 필요합니다.\n"
+                                 "현재 방송이 끝난 뒤 [처음 설정 도우미] → [무료 Cloud 자동 준비]를 다시 실행하세요.")
             raise CloudError("Cloud LIVE Worker가 설치되지 않았습니다. [처음 설정 도우미]를 진행하세요.")
         needs_v2 = len(names) > 1 or session_mode != SESSION_CONTINUOUS
         if needs_v2 and self.worker_version() < 2:
             raise CloudError("Playlist/보관 안전 모드는 Cloud LIVE Worker 업데이트가 필요합니다.\n"
                              "현재 방송이 끝난 뒤 [처음 설정 도우미] → [무료 Cloud 자동 준비]를 다시 실행하세요.")
+        if not default:
+            self.require_multi_channel_worker()
+            ov = self.list_live_profiles()
+            if not ov.is_live(profile) and ov.live_count >= ov.max_concurrent:
+                raise CloudError(CONCURRENT_BUSY)  # 서버 worker도 slot 잠금으로 한 번 더 막는다
         for name in names:
             chk = self.run(f"test -s {q(REMOTE_MEDIA + '/' + name)} && echo OK", timeout=30)
             if "OK" not in chk.out:
                 raise CloudError("Cloud에 영상이 없습니다. [Cloud에 영상 보내기]를 먼저 진행하세요.")
-        self._must(self.run(KEY_WRITE_CMD, input_text=stream_key.strip() + "\n"), "Stream Key 저장 실패")
+        self._must(self.run(key_write_cmd(profile), input_text=stream_key.strip() + "\n"), "Stream Key 저장 실패")
         cfg = json.dumps({
             "schema_version": 2,
             "media": names[0] if len(names) == 1 else names,
@@ -526,29 +648,36 @@ class CloudClient:
             "session_mode": session_mode,
             "session_id": session_id or pysecrets.token_hex(8),
         })
-        self._must(self.run(CONFIG_WRITE_CMD, input_text=cfg + "\n"), "LIVE 설정 저장 실패")
-        self._must(self.run(f"sudo -n systemctl enable {SERVICE} >/dev/null 2>&1; sudo -n systemctl restart {SERVICE}"),
+        self._must(self.run(config_write_cmd(profile), input_text=cfg + "\n"), "LIVE 설정 저장 실패")
+        self._must(self.run(f"sudo -n systemctl enable {q(service)} >/dev/null 2>&1; sudo -n systemctl restart {q(service)}"),
                    "Cloud LIVE 시작 실패")
         deadline = time.monotonic() + wait_seconds
-        st = self.status()
+        st = self.status(profile)
         while time.monotonic() < deadline and st.state not in ("RUNNING", "FAILED", "SESSION_LIMIT_REACHED"):
             sleep(2)
-            st = self.status()
+            st = self.status(profile)
         if st.state == "FAILED" or (not st.service_active and st.state != "RUNNING"):
             raise CloudError("Cloud LIVE를 시작하지 못했습니다: " + (st.last_error or "서비스가 실행되지 않았습니다."))
         return st
 
-    def stop_live(self) -> None:
-        self._must(self.run(f"sudo -n systemctl disable --now {SERVICE}", timeout=60), "Cloud LIVE 종료 실패")
+    def stop_live(self, profile_id: str | None = None) -> None:
+        """이 채널의 송출만 정상 종료 (다른 채널 서비스는 건드리지 않음)."""
+        service = profile_service(profile_id)
+        self._must(self.run(f"sudo -n systemctl disable --now {q(service)}", timeout=60), "Cloud LIVE 종료 실패")
 
-    def status(self) -> CloudStatus:
-        res = self.script(STATUS_SCRIPT, timeout=40)
+    def status(self, profile_id: str | None = None) -> CloudStatus:
+        profile = validate_live_profile_id(profile_id)
+        if is_default_profile(profile):
+            res = self.script(STATUS_SCRIPT, timeout=40)
+        else:
+            res = self.script(PROFILE_STATUS_SCRIPT, profile_service(profile), profile_remote_paths(profile)["status"],
+                              timeout=40)
         if res.rc != 0:
-            return CloudStatus(reachable=False, message=friendly_ssh_error(res.err))
+            return CloudStatus(reachable=False, message=friendly_ssh_error(res.err), profile_id=profile)
         try:
             d = json.loads(res.out.strip().splitlines()[-1])
         except (ValueError, IndexError):
-            return CloudStatus(reachable=True, message="상태를 읽을 수 없습니다.")
+            return CloudStatus(reachable=True, message="상태를 읽을 수 없습니다.", profile_id=profile)
         s = d.get("status") or {}
         return CloudStatus(
             reachable=True,
@@ -572,11 +701,12 @@ class CloudClient:
             session_mode=str(s.get("session_mode") or ""),
             session_limit=s.get("session_limit"),
             session_remaining=s.get("session_remaining"),
+            profile_id=profile,
         )
 
-    def logs(self, n: int = LOG_LINES) -> list[str]:
+    def logs(self, n: int = LOG_LINES, profile_id: str | None = None) -> list[str]:
         n = max(1, min(int(n), LOG_LINES))
-        res = self.run(f"sudo -n journalctl -u {SERVICE} -n {n} --no-pager -o cat", timeout=30)
+        res = self.run(f"sudo -n journalctl -u {q(profile_service(profile_id))} -n {n} --no-pager -o cat", timeout=30)
         lines = (res.out or res.err).splitlines()[-n:]
         return [redact(l, self._secrets) for l in lines]
 
@@ -620,23 +750,26 @@ class CloudClient:
             raise CloudError(friendly_ssh_error(res.err), res.err)
         return res.out.strip() == "active"
 
-    def key_fingerprint(self) -> str:
-        return str(self._worker_admin("--key-fingerprint").get("fingerprint") or "")
+    def key_fingerprint(self, profile_id: str | None = None) -> str:
+        args = ["--key-fingerprint"] if is_default_profile(profile_id) else [
+            "--key-fingerprint", "--profile", validate_live_profile_id(profile_id)]
+        return str(self._worker_admin(*args).get("fingerprint") or "")
 
-    def ensure_stream_key(self, stream_key: str, ingest_url: str) -> bool:
+    def ensure_stream_key(self, stream_key: str, ingest_url: str, profile_id: str | None = None) -> bool:
         """Cloud stream.key를 예약 방송의 key로 맞춘다 (기존 0600 파일, stdin 전송). 같으면 쓰지 않음.
+        채널 profile이면 그 채널의 key 파일만 바꾼다 (다른 채널 key는 그대로).
 
         다른 key로 Cloud LIVE가 방송 중이면 바꾸지 않는다 (그 방송이 재접속할 때 다른 방송으로 가는 것을 막음)."""
         from .scheduled_live import key_fingerprint
         build_output_url(ingest_url, stream_key)  # 형식 검사 (예외에 key 없음)
         key = stream_key.strip()
         self._secrets = [key]
-        if self.key_fingerprint() == key_fingerprint(key):
+        if self.key_fingerprint(profile_id) == key_fingerprint(key):
             return False
-        st = self.status()
+        st = self.status(profile_id)
         if st.live:
             raise CloudError("Cloud에서 다른 Stream Key로 LIVE가 방송 중입니다.\n방송을 끝낸 뒤 예약을 준비하세요.")
-        self._must(self.run(KEY_WRITE_CMD, input_text=key + "\n"), "Stream Key 저장 실패")
+        self._must(self.run(key_write_cmd(profile_id), input_text=key + "\n"), "Stream Key 저장 실패")
         return True
 
     def add_job(self, job: dict) -> dict:
@@ -653,9 +786,12 @@ class CloudClient:
 class CloudLiveController:
     """UI용: 원격 작업을 백그라운드 스레드에서 실행하고 결과를 이벤트 큐로 전달한다."""
 
-    def __init__(self, client_factory: Callable[[], CloudClient], *, poll_seconds: float = POLL_SECONDS):
+    def __init__(self, client_factory: Callable[[], CloudClient], *, poll_seconds: float = POLL_SECONDS,
+                 profile_id: str | None = None):
         self._factory = client_factory
         self.poll_seconds = poll_seconds
+        # 채널 profile (None/default = 기존 1채널 경로). 채널마다 controller가 따로 있어 상태/중지가 독립이다.
+        self.profile_id = None if profile_id in (None, "", "default") else validate_live_profile_id(profile_id)
         self.events: queue.Queue = queue.Queue()
         self.status: CloudStatus | None = None
         self.live_started = False
@@ -721,15 +857,20 @@ class CloudLiveController:
             self.events.put(("progress", "start", 1.0, "Cloud LIVE 시작 중"))
             names = [u.remote_name for u in ups]
             st = c.start_live(remote_media=names[0] if len(names) == 1 else names, ingest_url=ingest_url,
-                              stream_key=stream_key, session_mode=session_mode, session_id=session_id)
+                              stream_key=stream_key, session_mode=session_mode, session_id=session_id,
+                              **self._profile_kw())
             self.live_started = True
             self.status = st
             return st
         return self._run("start", fn)
 
+    def _profile_kw(self) -> dict:
+        """기본 채널이면 인자를 넘기지 않는다 (기존 호출과 완전히 같음)."""
+        return {"profile_id": self.profile_id} if self.profile_id else {}
+
     def stop_async(self):
         def fn():
-            self._client().stop_live()
+            self._client().stop_live(**self._profile_kw())
             self.live_started = False
             return self._refresh()
         return self._run("stop", fn)
@@ -739,14 +880,14 @@ class CloudLiveController:
         if self._op and self._op.is_alive():
             self._op.join(timeout)
         try:
-            self._client().stop_live()
+            self._client().stop_live(**self._profile_kw())
             self.live_started = False
             return True
         except CloudError:
             return False
 
     def _refresh(self) -> CloudStatus:
-        st = self._client().status()
+        st = self._client().status(**self._profile_kw())
         self.status = st
         self.events.put(("status", st))
         return st

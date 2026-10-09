@@ -44,6 +44,42 @@ REMOTE_KEY = f"{REMOTE_ETC}/stream.key"
 SERVICE = "long-live.service"
 SCHEDULER_SERVICE = "long-live-scheduler.service"
 SCHEDULER_WORKER_VERSION = 3  # 예약 LIVE(Cloud scheduler)가 들어간 worker 버전
+MULTI_CHANNEL_WORKER_VERSION = 4  # 여러 채널 동시 LIVE (채널별 경로/잠금, long-live@<id>.service)
+
+# ---------------- 여러 채널 동시 Cloud LIVE (worker v4) ----------------
+# 기본 채널(default)은 위의 기존 1채널 경로/서비스를 그대로 쓴다 (기존 사용자 설정·서버 상태 보존).
+DEFAULT_LIVE_PROFILE = "default"
+MAX_CONCURRENT_LIVE = 2  # cloud/long_live_worker.py와 같은 값 (OCI Free VM 보호, DIRECT COPY만)
+REMOTE_CHANNELS_ETC = f"{REMOTE_ETC}/channels"
+REMOTE_CHANNELS_STATE = f"{REMOTE_ROOT}/state/channels"
+_LIVE_PROFILE_ID = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+CONCURRENT_BUSY = (f"현재 Cloud에서 LIVE {MAX_CONCURRENT_LIVE}개가 실행 중입니다.\n"
+                   f"동시 송출은 최대 {MAX_CONCURRENT_LIVE}개입니다.")
+
+
+def validate_live_profile_id(profile_id) -> str:
+    """채널 ID: 영문 소문자로 시작, 소문자/숫자/_ 32자 이하 (서버 경로·systemd 이름에 그대로 쓰므로 엄격히)."""
+    p = DEFAULT_LIVE_PROFILE if profile_id in (None, "") else profile_id
+    if p != DEFAULT_LIVE_PROFILE and (not isinstance(p, str) or not _LIVE_PROFILE_ID.match(p)):
+        raise CloudConfigError("채널 ID 형식이 올바르지 않습니다 (영문 소문자/숫자/_).")
+    return p
+
+
+def is_default_profile(profile_id) -> bool:
+    return validate_live_profile_id(profile_id) == DEFAULT_LIVE_PROFILE
+
+
+def profile_service(profile_id) -> str:
+    p = validate_live_profile_id(profile_id)
+    return SERVICE if p == DEFAULT_LIVE_PROFILE else f"long-live@{p}.service"
+
+
+def profile_remote_paths(profile_id) -> dict[str, str]:
+    p = validate_live_profile_id(profile_id)
+    if p == DEFAULT_LIVE_PROFILE:
+        return {"etc": REMOTE_ETC, "key": REMOTE_KEY, "config": REMOTE_CONFIG, "status": REMOTE_STATUS}
+    return {"etc": f"{REMOTE_CHANNELS_ETC}/{p}", "key": f"{REMOTE_CHANNELS_ETC}/{p}/stream.key",
+            "config": f"{REMOTE_CHANNELS_ETC}/{p}/live.json", "status": f"{REMOTE_CHANNELS_STATE}/{p}/status.json"}
 
 FREE_NOTICE = "이 프로그램은 유료 Cloud 자원을 자동 생성하지 않습니다."
 FREE_UNSURE = "무료 여부를 Oracle Console에서 확인하세요."
@@ -394,6 +430,7 @@ def worker_files() -> dict[str, Path]:
         "long_live_worker.py": root / "cloud" / "long_live_worker.py",
         "long-live.service": root / "deploy" / "linux" / "long-live.service",
         "long-live-scheduler.service": root / "deploy" / "linux" / "long-live-scheduler.service",
+        "long-live@.service": root / "deploy" / "linux" / "long-live@.service",
         "install.sh": root / "deploy" / "linux" / "install.sh",
         "uninstall.sh": root / "deploy" / "linux" / "uninstall.sh",
     }

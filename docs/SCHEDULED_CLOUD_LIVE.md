@@ -39,8 +39,17 @@
 - stop_at에 기존 Worker가 FFmpeg에 `q` → 정상 종료 → `COMPLETE`. Playlist는 기존 ffconcat + `-stream_loop -1` DIRECT COPY.
 - 늦은 시작: 예약 시각 + 5분 이내면 시작(`late_seconds` 기록), 넘으면 `MISSED`.
 - 재부팅/서비스 재시작: 상태 파일 유지. `LIVE`였던 job은 마지막 기록 후 5분 안이면 이어서 송출, 아니면 `FAILED`.
-- 중복 방지: `state/scheduler.lock` (scheduler 1개, 두 번째는 exit 3), `state/worker.lock` (수동 Cloud LIVE와 예약 송출 중 하나만).
+- 중복 방지: `state/scheduler.lock` (scheduler 1개, 두 번째는 exit 3), `state/worker.lock` (기본 채널의 수동 Cloud LIVE와
+  예약 송출 중 하나만, 채널 profile은 `state/channels/<id>/worker.lock`), `state/slots/live1~2.lock` (서버 전체 동시 2개).
 - 취소: PC가 `--cancel-job` → `<job_id>.cancel` 파일. 시작 전이면 `CANCELLED`, 송출 중이면 FFmpeg 정상 종료.
+
+## 여러 채널 (worker v4)
+
+- job의 `profile_id`(없으면 기본 채널)에 따라 채널 key(`/etc/long-live/channels/<id>/stream.key`)와
+  작업 폴더(`state/channels/<id>/jobs/<job_id>/`)를 쓴다. 기본 채널은 위 경로 그대로.
+- 같은 채널 겹침 예약은 저장 단계에서 거부, 다른 채널은 같은 시각 허용 (전체 동시 2개까지).
+- scheduler는 채널마다 job을 동시에 실행하며 한 job의 실패/취소가 다른 job을 멈추지 않는다.
+  상세: `docs/MULTI_CHANNEL_CLOUD_LIVE.md`.
 
 ## 알려진 주의점 (REAL Gate에서 확인)
 

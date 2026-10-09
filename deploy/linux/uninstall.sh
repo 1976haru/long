@@ -4,7 +4,10 @@ set -euo pipefail
 if [ "$(id -u)" -ne 0 ]; then echo "ERROR root required" >&2; exit 1; fi
 systemctl disable --now long-live-scheduler.service 2>/dev/null || true
 systemctl disable --now long-live.service 2>/dev/null || true
-rm -f /etc/systemd/system/long-live.service /etc/systemd/system/long-live-scheduler.service
+for unit in $(systemctl list-units --all --plain --no-legend 'long-live@*.service' 2>/dev/null | awk '{print $1}'); do
+  systemctl disable --now "$unit" 2>/dev/null || true
+done
+rm -f /etc/systemd/system/long-live.service /etc/systemd/system/long-live-scheduler.service "/etc/systemd/system/long-live@.service"
 systemctl daemon-reload
 rm -rf /opt/long-live/worker /opt/long-live/state /opt/long-live/logs /etc/long-live
 if [ "${1:-}" = "--purge" ]; then

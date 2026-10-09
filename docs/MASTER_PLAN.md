@@ -61,7 +61,9 @@ LIVE 실행 우선순위: ① OCI Always Free Cloud ② 내 PC DIRECT COPY ③ �
 - 두 경로는 실행 코드를 공유하지 않는다. 공유하는 것은 FFmpeg 탐색·절전 방지(`tooling.py`), 동시 실행 잠금(`FFMPEG_GUARD`), 읽기 전용 ffprobe 분석(`core.probe_video`)뿐이다.
 - `-c copy` 무재인코딩 원칙은 Long Video 경로의 원칙이며 LIVE 때문에 변경하지 않는다.
 - LIVE 기본은 LIVE READY 파일의 DIRECT COPY(재인코딩 없음)이며, libx264 재인코딩은 내 PC에서 사용자가 고를 때만 쓰는 고급 옵션이다.
-- FFmpeg 동시 1개 원칙은 두 경로 전체에 적용된다.
+- FFmpeg 동시 1개 원칙은 두 경로 전체에 적용된다 (이 PC 기준).
+  예외: 무료 Cloud 서버의 여러 채널 동시 LIVE는 채널마다 DIRECT COPY FFmpeg 1개, 서버 전체 최대 2개
+  (worker v4, 사용자 요청 2026-10-10, `docs/MULTI_CHANNEL_CLOUD_LIVE.md`).
 - Stream Key는 settings.json에 저장하지 않는다.
 - 상세 설계: `docs/LIVE_ARCHITECTURE.md`
 

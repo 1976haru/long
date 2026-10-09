@@ -13,7 +13,15 @@ SETTINGS_LOCK = _SAVE_LOCK  # 중첩 값을 읽기-수정-쓰기 하는 곳에�
 _REPLACE_RETRIES = (0.05, 0.1, 0.2, 0.4, 0.8)  # 백신/색인 프로그램이 잠깐 파일을 잡고 있을 때
 
 
+TEST_SETTINGS_ENV = "PLVM_TEST_SETTINGS_DIR"  # 테스트 전용: pytest 프로세스 전체가 실제 사용자 설정 폴더를 쓰지 않게
+
+
 def settings_dir() -> Path:
+    test_dir = os.environ.get(TEST_SETTINGS_ENV)
+    if test_dir:  # 테스트에서만 설정된다 (프로덕션 실행에는 없음 → 아래 기존 경로 그대로)
+        p = Path(test_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
     if os.name == "nt" and os.environ.get("APPDATA"):
         p = Path(os.environ["APPDATA"]) / "PlaylistLongVideoMaker"
     else:

@@ -64,6 +64,7 @@ class ChannelProfile:
     made_for_kids: bool = False
     client_file: str = ""  # OAuth secret reference: 파일 위치만
     default_template_id: str = ""  # 예약 업로드 기본 메타데이터 템플릿 (youtube_batch.UploadTemplateStore)
+    stream_id: str = ""  # 이 채널의 YouTube 재사용 송출 스트림 ID (여러 채널 LIVE: 채널마다 따로, 비밀 아님)
 
     def validate(self) -> "ChannelProfile":
         if not PROFILE_ID_RE.match(self.profile_id or ""):

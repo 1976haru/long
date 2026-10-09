@@ -174,11 +174,18 @@ def test_repeat_rule_one_job_per_occurrence_and_media_reused(api, client, remote
     before = remote.uploads()
     out2 = run(api, client, media, r=rule(mode="DAILY"), saved_playlist=saved["pl"])
     assert out2.made == 0 and not out2.failed_step and remote.uploads() == before and out2.reused == 2
-    # 하나를 목록에서 지운 뒤 보충 → YouTube 예약과 Cloud job이 함께 생김
+    # 하나를 목록에서만 지운 뒤 보충 → Cloud에는 같은 채널·같은 시각 예약이 아직 있음 → 겹침 차단 (v4)
+    # YouTube 예약을 만들기 전에 막으므로 유령 YouTube 예약/중복 Cloud job이 생기지 않는다
     first = store().all()[0]
     store().remove(first.broadcast_id)
+    n_broadcasts = len(fake.broadcasts)
     out3 = run(api, client, media, r=rule(mode="DAILY"), saved_playlist=saved["pl"])
-    assert out3.made == 1 and out3.ready == 1 and remote.uploads() == before
+    assert out3.made == 0 and out3.failed_step == "youtube" and "겹치는" in out3.errors[0]
+    assert len(fake.broadcasts) == n_broadcasts and len(list(remote.jobs_dir.glob("*.json"))) == 7
+    # Cloud 예약을 취소한 뒤 보충 → YouTube 예약과 Cloud job이 함께 생김 (영상은 다시 보내지 않음)
+    remote.store().request_cancel(first.cloud_job_id)
+    out4 = run(api, client, media, r=rule(mode="DAILY"), saved_playlist=saved["pl"])
+    assert out4.made == 1 and out4.ready == 1 and remote.uploads() == before
     assert len(list(remote.jobs_dir.glob("*.json"))) == 8
 
 

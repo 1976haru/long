@@ -1,5 +1,28 @@
 """모든 테스트에서 사용자의 실제 설정 폴더(%APPDATA%)를 건드리지 않도록 임시 폴더로 격리한다."""
+import os
+import tempfile
+
 import pytest
+
+from settings_guard import diff as _guard_diff
+from settings_guard import real_settings_dir as _real_settings_dir
+from settings_guard import snapshot as _guard_snapshot
+
+# 1) pytest 프로세스 전체 격리: 앱 모듈을 import하기 전에 테스트 전용 설정 폴더를 고정한다.
+#    테스트마다 바꾸는 settings_dir(아래 fixture)가 끝난 뒤 늦게 도는 thread가 저장해도 이 폴더로만 간다.
+#    프로세스가 끝날 때까지 실제 경로로 되돌리지 않는다.
+_REAL_SETTINGS_DIR = _real_settings_dir()
+_REAL_BEFORE = _guard_snapshot(_REAL_SETTINGS_DIR)  # READ-ONLY 지문 (존재/크기/mtime/SHA256)
+os.environ["PLVM_TEST_SETTINGS_DIR"] = tempfile.mkdtemp(prefix="plvm_test_settings_")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _real_user_settings_untouched():
+    """2) Release safety guard: 테스트 전체가 끝난 뒤 실제 설정/Key/token 파일이 하나라도 바뀌면 실패.
+    파일을 고치거나 복원하지 않는다. 내용은 출력하지 않는다 (이름 + 바뀐 항목만)."""
+    yield
+    changed = _guard_diff(_REAL_BEFORE, _guard_snapshot(_REAL_SETTINGS_DIR))
+    assert not changed, "RELEASE TEST FAIL — 실제 사용자 설정이 테스트 중 바뀌었습니다: " + "; ".join(changed)
 
 
 @pytest.fixture(autouse=True)

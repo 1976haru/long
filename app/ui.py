@@ -256,7 +256,7 @@ class MainWindow(tk.Tk):
         try:
             if w.controller.active:
                 return "local"
-            if w.cloud.cloud_live_active:
+            if getattr(w, "any_cloud_live", w.cloud.cloud_live_active):  # 여러 채널 중 하나라도
                 return "cloud"
         except Exception:
             pass
@@ -270,6 +270,13 @@ class MainWindow(tk.Tk):
         if kind == "local":
             return "● LIVE 송출 중 (내 PC)"
         if kind == "cloud":
+            try:
+                lives = w.live_channels() if len(getattr(w, "_channel_ids", ())) > 1 else []
+            except Exception:
+                lives = []
+            if lives:  # 실시간 LIVE: 시니어 채널 ● 01:42:16 · 일본 채널 ● 00:37:05
+                return "실시간 LIVE " + " · ".join(f"{name} ● {format_duration(sec) if sec else '00:00:00'}"
+                                                  for _, name, sec in lives)
             return "● CLOUD LIVE"
         try:
             if w.cloud.busy:

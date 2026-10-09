@@ -72,6 +72,15 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
             lw = app._live_window()
             ok("live_window", lw is not None and lw.winfo_exists() and hasattr(lw, "btn_pl_fix_all"),
                lw.title() if lw is not None else "")
+            # 여러 채널 Cloud LIVE: 채널 선택/관리 창 + EXE에 worker v4와 채널 서비스(template)가 들어 있는지
+            from .cloud_model import worker_files
+            from .live_channels_ui import LiveChannelsDialog
+            files = worker_files()
+            worker_v4 = 'WORKER_VERSION = "4"' in files["long_live_worker.py"].read_text(encoding="utf-8")
+            dlg = LiveChannelsDialog(lw, store=lw.channels)
+            ok("multi_channel", hasattr(lw, "cmb_channel") and dlg.winfo_exists() and worker_v4
+               and files["long-live@.service"].is_file(), f"worker_v4={worker_v4}")
+            dlg.destroy()
             sw = app._open_live_schedule()
             ok("live_schedule", sw.winfo_exists() and len(sw.step_vars) == 12 and sw.winfo_class() == "Toplevel",
                sw.title())

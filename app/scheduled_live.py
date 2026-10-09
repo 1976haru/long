@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .cloud_model import DEFAULT_LIVE_PROFILE, MAX_CONCURRENT_LIVE
 from .live_playlist import entry_durations, validate_playlist
 from .live_profile import YOUTUBE_RTMPS_INGEST, redact
 from .youtube_metadata import MetadataTemplate
@@ -78,15 +79,44 @@ def _epoch(value: str) -> float | None:
 
 def build_job(*, job_id: str, broadcast_id: str, stream_id: str, start_utc: datetime, end_utc: datetime,
               playlist: Sequence[dict], ingest_url: str, key_fp: str, now: datetime,
-              grace_seconds: int = LATE_GRACE_SECONDS) -> dict:
-    """서버 worker parse_job()이 받는 예약 job (Stream Key 없음, 로컬 경로 없음)."""
-    return {
+              grace_seconds: int = LATE_GRACE_SECONDS, profile_id: str | None = None) -> dict:
+    """서버 worker parse_job()이 받는 예약 job (Stream Key 없음, 로컬 경로 없음).
+    profile_id: 채널 (기본 채널이면 필드를 넣지 않는다 → worker v3와도 그대로 호환)."""
+    job = {
         "schema": 1, "job_id": job_id, "broadcast_id": broadcast_id, "stream_id": stream_id,
         "scheduled_at_utc": utc_z(start_utc), "stop_at_utc": utc_z(end_utc),
         "playlist": [{"name": p["name"], "sha256": p["sha256"], "size": int(p["size"])} for p in playlist],
         "ingest_url": ingest_url, "ingest_mode": "copy", "key_fingerprint": key_fp,
         "grace_seconds": int(grace_seconds), "created_at": utc_z(now),
     }
+    if profile_id and profile_id != DEFAULT_LIVE_PROFILE:
+        job["profile_id"] = profile_id
+    return job
+
+
+def schedule_conflict(start: datetime, end: datetime, listing: Sequence[dict], profile_id: str | None,
+                      max_live: int = MAX_CONCURRENT_LIVE) -> str:
+    """새 예약 구간이 Cloud의 기존 예약과 부딪히는지 (서버 JobStore.overlap_problem과 같은 규칙).
+    같은 채널 겹침 → 차단 / 다른 채널 → 허용하되 같은 시각 전체 max_live개까지. 문제 없으면 ""."""
+    profile = profile_id or DEFAULT_LIVE_PROFILE
+    s, e = start.timestamp(), end.timestamp()
+    others = []
+    for j in listing:
+        if not isinstance(j, dict) or j.get("cancel_requested"):
+            continue
+        if j.get("state", "PENDING") in ("COMPLETE", "FAILED", "CANCELLED", "MISSED"):
+            continue
+        js, je = _epoch(j.get("scheduled_at_utc")), _epoch(j.get("stop_at_utc"))
+        if js is None or je is None or not (js < e and s < je):
+            continue
+        if (j.get("profile_id") or DEFAULT_LIVE_PROFILE) == profile:
+            return "같은 채널에 시간이 겹치는 Cloud 예약이 이미 있습니다. 시간을 바꾸거나 기존 예약을 취소하세요."
+        others.append((js, je))
+    points = [s] + [js for js, _ in others if s <= js < e]
+    peak = max((sum(1 for js, je in others if js <= t < je) for t in points), default=0)
+    if peak + 1 > max_live:
+        return f"같은 시간에 Cloud 예약 LIVE가 이미 {peak}개 있습니다. 동시 송출은 최대 {max_live}개입니다."
+    return ""
 
 
 def verify_readback(listing: Sequence[dict], expected: dict[str, tuple[str, int]]) -> dict[str, str]:
@@ -215,11 +245,15 @@ def prepare_cloud_schedule(*, api, client, media_paths: Sequence[Path], reports:
                            saved_stream_id: str | None = None, channel: str = "", emit: Callable = _emit_noop,
                            cancel=None, saved_playlist: Sequence[dict] | None = None, start_session: int = 1,
                            thumb_counter: int = 0, on_stream: Callable[[str], None] | None = None,
-                           on_playlist: Callable[[list], None] | None = None) -> CloudScheduleOutcome:
-    """예약 준비 Pipeline. 예외 대신 outcome.failed_step/errors로 결과를 돌려준다 (부분 성공 보존)."""
+                           on_playlist: Callable[[list], None] | None = None,
+                           profile_id: str | None = None) -> CloudScheduleOutcome:
+    """예약 준비 Pipeline. 예외 대신 outcome.failed_step/errors로 결과를 돌려준다 (부분 성공 보존).
+    profile_id: 송출할 채널 (None/default = 기존 1채널 경로). 채널 key는 그 채널 key 파일에만 쓴다."""
     out = CloudScheduleOutcome(duration_minutes=int(rule.duration_minutes), media_count=len(media_paths),
                                privacy=template.privacy_status)
     secrets_: list[str] = []
+    profile = profile_id or DEFAULT_LIVE_PROFILE
+    pkw = {} if profile == DEFAULT_LIVE_PROFILE else {"profile_id": profile}
 
     def fail(step: str, msg: str) -> CloudScheduleOutcome:
         msg = redact(str(msg), secrets_)
@@ -240,6 +274,8 @@ def prepare_cloud_schedule(*, api, client, media_paths: Sequence[Path], reports:
     try:
         client.check_connection()
         client.require_scheduler_worker()
+        if pkw:
+            client.require_multi_channel_worker()
     except Exception as e:  # CloudError 등
         return fail("cloud", e)
     emit("step", "cloud", "ok", "")
@@ -265,7 +301,7 @@ def prepare_cloud_schedule(*, api, client, media_paths: Sequence[Path], reports:
         ingest = stream.rtmps_ingestion_address or YOUTUBE_RTMPS_INGEST
         if on_stream:
             on_stream(stream.id)
-        client.ensure_stream_key(key, ingest)
+        client.ensure_stream_key(key, ingest, **pkw)
         client.ensure_scheduler()
         out.scheduler_ok = True
     except Exception as e:
@@ -280,6 +316,15 @@ def prepare_cloud_schedule(*, api, client, media_paths: Sequence[Path], reports:
         emit("step", "job", "ok", "")
         emit("step", "readback", "ok", "")
         return out
+    # YouTube 예약을 만들기 전에 Cloud 예약 충돌 확인 (같은 채널 겹침 / 같은 시각 3개 이상) → 유령 예약 방지
+    try:
+        listing = client.list_jobs()
+    except Exception as e:
+        return fail("youtube", e)
+    for occ in occs:
+        problem = schedule_conflict(occ.start_utc, occ.end_utc, listing, profile)
+        if problem:
+            return fail("youtube", problem)
     emit("step", "youtube", "run", "")
     expected: dict[str, tuple[str, int]] = {}
     for i, occ in enumerate(occs):
@@ -297,13 +342,14 @@ def prepare_cloud_schedule(*, api, client, media_paths: Sequence[Path], reports:
             end_utc=occ.end_utc.isoformat(), privacy=md.privacy_status, thumbnail_name=res.thumbnail_name,
             rule_id=rule_id, session=session, metadata_ok=res.metadata_ok, thumbnail_ok=res.thumbnail_ok,
             execution=EXECUTION_CLOUD, stream_id=stream.id, ingest_url=ingest, cloud_playlist=cloud_pl,
-            cloud_state="PARTIAL")
+            cloud_state="PARTIAL", profile_id=profile)
         if not res.bind_ok:
             rec.cloud_error = "송출 스트림 연결 실패: " + res.errors.get("bind", "")
         else:
             job_id = new_job_id()
             job = build_job(job_id=job_id, broadcast_id=res.broadcast_id, stream_id=stream.id, start_utc=occ.start_utc,
-                            end_utc=occ.end_utc, playlist=cloud_pl, ingest_url=ingest, key_fp=key_fp, now=now)
+                            end_utc=occ.end_utc, playlist=cloud_pl, ingest_url=ingest, key_fp=key_fp, now=now,
+                            profile_id=profile)
             try:
                 client.add_job(job)
                 rec.cloud_job_id = job_id
@@ -366,13 +412,18 @@ def retry_cloud_job(rec: ReservationRecord, *, api, client, store: ReservationSt
         if b.bound_stream_id != stream.id:
             api.bind_broadcast(rec.broadcast_id, stream.id)
         ingest = stream.rtmps_ingestion_address or rec.ingest_url or YOUTUBE_RTMPS_INGEST
+        profile = rec.profile_id or DEFAULT_LIVE_PROFILE
+        pkw = {} if profile == DEFAULT_LIVE_PROFILE else {"profile_id": profile}
         client.check_connection()
         client.require_scheduler_worker()
-        client.ensure_stream_key(key, ingest)
+        if pkw:
+            client.require_multi_channel_worker()
+        client.ensure_stream_key(key, ingest, **pkw)
         client.ensure_scheduler()
         job_id = rec.cloud_job_id or new_job_id()
         job = build_job(job_id=job_id, broadcast_id=rec.broadcast_id, stream_id=stream.id, start_utc=start,
-                        end_utc=end, playlist=rec.cloud_playlist, ingest_url=ingest, key_fp=key_fingerprint(key), now=now)
+                        end_utc=end, playlist=rec.cloud_playlist, ingest_url=ingest, key_fp=key_fingerprint(key), now=now,
+                        profile_id=profile)
         client.add_job(job)
         rec.cloud_job_id, rec.stream_id, rec.ingest_url = job_id, stream.id, ingest
         problems = verify_readback(client.list_jobs(), {job_id: (job["scheduled_at_utc"], len(rec.cloud_playlist))})

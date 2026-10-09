@@ -155,7 +155,7 @@ def test_admin_cli_add_list_cancel_and_no_secret_output(tmp_path, monkeypatch):
     stored = (e.jobs / "sj_0001.json").read_text(encoding="utf-8")
     assert KEY not in stored and "stream_key" not in stored
     rc, out = cli("--list-jobs")
-    assert rc == 0 and [j["job_id"] for j in out["jobs"]] == ["sj_0001"] and out["worker_version"] == "3"
+    assert rc == 0 and [j["job_id"] for j in out["jobs"]] == ["sj_0001"] and out["worker_version"] == w.WORKER_VERSION
     rc, out = cli("--key-fingerprint")
     assert out["fingerprint"] == w.key_fingerprint(KEY) and KEY not in json.dumps(out)
     rc, out = cli("--add-job", stdin=json.dumps(job_dict(e, job_id="sj_0002", playlist=[
@@ -228,7 +228,7 @@ def test_reboot_recovers_pending_and_resumes_live_once(tmp_path):
 
 def test_late_start_within_grace_and_missed_after(tmp_path):
     e = env(tmp_path)
-    e.store.add(job_dict(e), e.media)
+    e.store.add(job_dict(e, minutes=60), e.media)  # 19:00~20:00 (같은 채널 예약은 겹칠 수 없음, v4)
     e.store.add(job_dict(e, job_id="sj_late", start=T0 + 3600), e.media)
     clock = Clock(hms(19, 3))  # 19:00 예약, 서버가 19:03에 켜짐
     s = scheduler(e, clock)
@@ -293,7 +293,10 @@ def test_other_live_holding_lock_marks_failed(tmp_path):
 def test_overlapping_jobs_second_is_not_started(tmp_path):
     e = env(tmp_path)
     e.store.add(job_dict(e), e.media)
-    e.store.add(job_dict(e, job_id="sj_0002", start=T0 + 1800), e.media)
+    # v4부터 같은 채널 겹침은 저장 단계에서 거부된다. v3 시절에 이미 저장된 겹침 job도 실행 단계에서 막히는지 확인
+    with pytest.raises(w.ConfigError, match="겹치는"):
+        e.store.add(job_dict(e, job_id="sj_0002", start=T0 + 1800), e.media)
+    (e.jobs / "sj_0002.json").write_text(json.dumps(job_dict(e, job_id="sj_0002", start=T0 + 1800)), encoding="utf-8")
     clock = Clock(hms(19, 0))
     s = scheduler(e, clock)
     s.tick()
