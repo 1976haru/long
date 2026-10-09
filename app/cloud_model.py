@@ -42,6 +42,8 @@ REMOTE_ETC = "/etc/long-live"
 REMOTE_CONFIG = f"{REMOTE_ETC}/live.json"
 REMOTE_KEY = f"{REMOTE_ETC}/stream.key"
 SERVICE = "long-live.service"
+SCHEDULER_SERVICE = "long-live-scheduler.service"
+SCHEDULER_WORKER_VERSION = 3  # 예약 LIVE(Cloud scheduler)가 들어간 worker 버전
 
 FREE_NOTICE = "이 프로그램은 유료 Cloud 자원을 자동 생성하지 않습니다."
 FREE_UNSURE = "무료 여부를 Oracle Console에서 확인하세요."
@@ -391,6 +393,7 @@ def worker_files() -> dict[str, Path]:
     return {
         "long_live_worker.py": root / "cloud" / "long_live_worker.py",
         "long-live.service": root / "deploy" / "linux" / "long-live.service",
+        "long-live-scheduler.service": root / "deploy" / "linux" / "long-live-scheduler.service",
         "install.sh": root / "deploy" / "linux" / "install.sh",
         "uninstall.sh": root / "deploy" / "linux" / "uninstall.sh",
     }

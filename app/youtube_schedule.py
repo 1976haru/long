@@ -24,6 +24,10 @@ MAX_FUTURE_BROADCASTS = 7
 DEFAULT_TZ = "Asia/Seoul"
 STATUS_LABELS = {"created": "예약됨", "ready": "예약됨", "testing": "예약됨", "testStarting": "예약됨",
                  "liveStarting": "LIVE", "live": "LIVE", "complete": "완료", "revoked": "오류", "error": "오류"}
+CLOUD_STATE_LABELS = {"READY": "✓ 자동 시작 준비", "PENDING": "✓ 자동 시작 준비", "PREPARING": "✓ 곧 시작",
+                      "STARTING": "● 송출 시작 중", "LIVE": "● Cloud 송출 중", "STOPPING": "종료 중",
+                      "COMPLETE": "완료", "PARTIAL": "⚠ Cloud 준비 실패", "FAILED": "✗ 실패",
+                      "CANCELLED": "취소됨", "MISSED": "✗ 시간 지남(미송출)"}
 
 
 class ScheduleError(ValueError):
@@ -208,13 +212,15 @@ def upload_thumbnail(api: YouTubeApiClient, video_id: str, path: str, result: Re
 
 
 def create_reservation(api: YouTubeApiClient, md: BroadcastMetadata, occ: ScheduleOccurrence, *,
-                       stream_id: str | None = None) -> ReservationResult:
+                       stream_id: str | None = None, auto_start_stop: bool = False) -> ReservationResult:
+    """auto_start_stop=True: Cloud 예약 LIVE (enableAutoStart/Stop). 기본 False는 기존 예약과 같다."""
     md.validate()
     r = ReservationResult(scheduled_start_utc=occ.start_utc.isoformat(), privacy=md.privacy_status)
     try:
         b = api.insert_broadcast(title=md.title, description=md.description, privacy=md.privacy_status,
                                  made_for_kids=md.made_for_kids, scheduled_start=occ.start_utc.timestamp(),
-                                 scheduled_end=occ.end_utc.timestamp())
+                                 scheduled_end=occ.end_utc.timestamp(), enable_auto_start=auto_start_stop,
+                                 enable_auto_stop=auto_start_stop)
     except YouTubeApiError as e:
         r.errors["broadcast"] = str(e)
         return r
@@ -252,6 +258,20 @@ class ReservationRecord:
     auto_rollover: bool = False
     metadata_ok: bool = True
     thumbnail_ok: bool | None = None
+    # Cloud 예약 LIVE (PC를 꺼도 자동 송출). execution="youtube"는 기존 예약 (방송 시작은 직접).
+    execution: str = "youtube"
+    cloud_job_id: str = ""
+    cloud_state: str = ""  # READY | PARTIAL | CANCELLED | 서버 job 상태(LIVE/COMPLETE/MISSED/FAILED ...)
+    cloud_error: str = ""
+    stream_id: str = ""
+    ingest_url: str = ""
+    cloud_playlist: list = field(default_factory=list)  # [{name, sha256, size, duration}] — 비밀 없음
+
+    @property
+    def cloud_label(self) -> str:
+        if self.execution != "cloud":
+            return "-"
+        return CLOUD_STATE_LABELS.get(self.cloud_state, self.cloud_state or "-")
 
     @property
     def status_label(self) -> str:

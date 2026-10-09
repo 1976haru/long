@@ -23,8 +23,8 @@ from typing import Callable
 
 from .cloud_model import (
     CLOUD_UNAVAILABLE, FREE_UNSURE, REMOTE_CONFIG, REMOTE_KEY, REMOTE_MEDIA, REMOTE_STATUS, REMOTE_WORKER,
-    SERVICE, SSH_MISSING, CloudConfigError, CloudProfile, find_ssh, safe_remote_name, sha256_file,
-    ssh_base_args, worker_files,
+    SCHEDULER_SERVICE, SCHEDULER_WORKER_VERSION, SERVICE, SSH_MISSING, CloudConfigError, CloudProfile, find_ssh,
+    safe_remote_name, sha256_file, ssh_base_args, worker_files,
 )
 from .core import creationflags_no_window
 from .live_core import build_output_url
@@ -579,6 +579,75 @@ class CloudClient:
         res = self.run(f"sudo -n journalctl -u {SERVICE} -n {n} --no-pager -o cat", timeout=30)
         lines = (res.out or res.err).splitlines()[-n:]
         return [redact(l, self._secrets) for l in lines]
+
+    # ---------- 예약 LIVE (Cloud scheduler, worker v3) ----------
+    def _worker_admin(self, *args: str, input_text: str | None = None, timeout: float = 60) -> dict:
+        """서버 worker의 관리 명령 (고정 명령 + quote된 인자, JSON은 stdin). 결과 JSON 한 줄."""
+        cmd = f"sudo -n python3 {q(REMOTE_WORKER)}" + "".join(" " + q(a) for a in args)
+        res = self.run(cmd, input_text=input_text, timeout=timeout)
+        if res.rc == 255:
+            raise CloudError(friendly_ssh_error(res.err), res.err)
+        try:
+            data = json.loads(res.out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            msg = friendly_ssh_error(res.err)
+            raise CloudError("Cloud 예약 정보를 읽을 수 없습니다." if msg == CLOUD_UNAVAILABLE else msg, res.err) from None
+        if res.rc != 0 or not isinstance(data, dict) or not data.get("ok"):
+            raise CloudError(str((data or {}).get("error") or "Cloud 예약 작업에 실패했습니다."), res.err)
+        return data
+
+    def require_scheduler_worker(self) -> None:
+        chk = self.run(f"test -f {q(REMOTE_WORKER)} && echo OK", timeout=30)
+        if chk.rc == 255:
+            raise CloudError(friendly_ssh_error(chk.err), chk.err)
+        if "OK" not in chk.out:
+            raise CloudError("Cloud LIVE Worker가 설치되지 않았습니다. [처음 설정 도우미]를 진행하세요.")
+        if self.worker_version() < SCHEDULER_WORKER_VERSION:
+            raise CloudError("예약 LIVE(PC를 꺼도 자동 송출)는 Cloud LIVE Worker 업데이트가 필요합니다.\n"
+                             "[처음 설정 도우미] → [무료 Cloud 자동 준비]를 다시 실행하세요.")
+
+    def ensure_scheduler(self) -> None:
+        """예약 scheduler 서비스 켜기 (재부팅 후에도 자동 실행). 이미 켜져 있으면 그대로."""
+        self._must(self.run(f"sudo -n systemctl enable --now {SCHEDULER_SERVICE}", timeout=60),
+                   "Cloud 자동 시작(예약 scheduler)을 켜지 못했습니다.")
+        res = self.run(f"systemctl is-active {SCHEDULER_SERVICE}", timeout=30)
+        if res.out.strip() != "active":
+            raise CloudError("Cloud 자동 시작(예약 scheduler)이 실행되지 않았습니다.", res.err)
+
+    def scheduler_active(self) -> bool:
+        res = self.run(f"systemctl is-active {SCHEDULER_SERVICE}", timeout=30)
+        if res.rc == 255:
+            raise CloudError(friendly_ssh_error(res.err), res.err)
+        return res.out.strip() == "active"
+
+    def key_fingerprint(self) -> str:
+        return str(self._worker_admin("--key-fingerprint").get("fingerprint") or "")
+
+    def ensure_stream_key(self, stream_key: str, ingest_url: str) -> bool:
+        """Cloud stream.key를 예약 방송의 key로 맞춘다 (기존 0600 파일, stdin 전송). 같으면 쓰지 않음.
+
+        다른 key로 Cloud LIVE가 방송 중이면 바꾸지 않는다 (그 방송이 재접속할 때 다른 방송으로 가는 것을 막음)."""
+        from .scheduled_live import key_fingerprint
+        build_output_url(ingest_url, stream_key)  # 형식 검사 (예외에 key 없음)
+        key = stream_key.strip()
+        self._secrets = [key]
+        if self.key_fingerprint() == key_fingerprint(key):
+            return False
+        st = self.status()
+        if st.live:
+            raise CloudError("Cloud에서 다른 Stream Key로 LIVE가 방송 중입니다.\n방송을 끝낸 뒤 예약을 준비하세요.")
+        self._must(self.run(KEY_WRITE_CMD, input_text=key + "\n"), "Stream Key 저장 실패")
+        return True
+
+    def add_job(self, job: dict) -> dict:
+        return self._worker_admin("--add-job", input_text=json.dumps(job, ensure_ascii=False) + "\n")["job"]
+
+    def list_jobs(self) -> list[dict]:
+        jobs = self._worker_admin("--list-jobs").get("jobs") or []
+        return [j for j in jobs if isinstance(j, dict)]
+
+    def cancel_job(self, job_id: str) -> dict:
+        return self._worker_admin("--cancel-job", job_id)["job"]
 
 
 class CloudLiveController:

@@ -321,8 +321,12 @@ class YouTubeApiClient:
 
     def insert_broadcast(self, *, title: str, description: str = "", privacy: str = "unlisted",
                          made_for_kids: bool = False, scheduled_start: float | None = None,
-                         scheduled_end: float | None = None) -> YouTubeBroadcastInfo:
-        """liveBroadcast에는 categoryId/tags가 없다 → 생성 후 videos.update로 적용 (update_video_metadata)."""
+                         scheduled_end: float | None = None, enable_auto_start: bool = False,
+                         enable_auto_stop: bool = False) -> YouTubeBroadcastInfo:
+        """liveBroadcast에는 categoryId/tags가 없다 → 생성 후 videos.update로 적용 (update_video_metadata).
+
+        enable_auto_start/stop은 Cloud 예약 LIVE 전용 (PC가 꺼져 있어도 송출 시작/종료로 YouTube가 직접 전환).
+        기본값 False = PC 프로그램이 전환을 직접 제어하는 기존 LIVE 동작 그대로."""
         validate_title(title)
         if privacy not in PRIVACY_VALUES:
             raise YouTubeApiError("공개 상태가 올바르지 않습니다.", kind="config", reason="invalidPrivacy")
@@ -334,8 +338,9 @@ class YouTubeApiClient:
             "snippet": snippet,
             "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": bool(made_for_kids)},
             "contentDetails": {
-                # 프로그램이 전환을 직접 제어: 자동 시작/종료 끔 (같은 active stream에 미리 bind해도 조기 시작 없음)
-                "enableAutoStart": False, "enableAutoStop": False,
+                # 기본: 프로그램이 전환을 직접 제어 → 자동 시작/종료 끔 (같은 active stream에 미리 bind해도 조기 시작 없음)
+                # Cloud 예약 LIVE: 자동 시작/종료 켬 (bound stream 송출 시작 → LIVE, 송출 종료 → 방송 종료)
+                "enableAutoStart": bool(enable_auto_start), "enableAutoStop": bool(enable_auto_stop),
                 "recordFromStart": True, "enableDvr": True,
                 # monitor stream 끔 → testing 단계 없이 ready → live 전환
                 "monitorStream": {"enableMonitorStream": False},

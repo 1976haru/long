@@ -1,6 +1,7 @@
 """EXE 화면 자가 점검 (`PlaylistLongVideoMaker_v0.3.exe --self-test 결과.json`).
 
-배포한 EXE 안에서 초보자 화면(Welcome → 처음 설정 Wizard → 도움말 → 매뉴얼 파일 → 예약 업로드 → 채널 연결)이
+배포한 EXE 안에서 초보자 화면(Welcome → 처음 설정 Wizard → 도움말 → 매뉴얼 파일 → 예약 업로드 → 채널 연결 → 댓글
+→ LIVE → 예약 LIVE → 일본어 도우미)이
 실제로 열리는지 차례로 확인하고 결과를 JSON으로 남긴 뒤 종료한다. 인터넷/YouTube/Google에는 접속하지 않는다.
 """
 from __future__ import annotations
@@ -59,6 +60,34 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
         app.after(step_ms, s5)
 
     def s5():
+        # LIVE 창 (Playlist 일괄 LIVE READY 버튼) → 예약 LIVE 창 (초보자 빠른 예약 · Cloud 준비 단계) → 일본어 도우미
+        for w in (getattr(app, "upload_win", None), getattr(app, "comment_win", None)):
+            try:
+                if w is not None and w.winfo_exists():
+                    w.destroy()
+            except Exception:
+                pass
+        try:
+            app._open_live()
+            lw = app._live_window()
+            ok("live_window", lw is not None and lw.winfo_exists() and hasattr(lw, "btn_pl_fix_all"),
+               lw.title() if lw is not None else "")
+            sw = app._open_live_schedule()
+            ok("live_schedule", sw.winfo_exists() and len(sw.step_vars) == 12 and sw.winfo_class() == "Toplevel",
+               sw.title())
+            jp = app._open_japanese_helper()
+            ok("japanese_assistant", jp.winfo_exists(), jp.title())
+        except Exception as e:  # 한 화면 오류로 결과 JSON이 안 남는 일이 없게
+            ok("live_steps", False, repr(e)[:300])
+        app.after(step_ms, s6)
+
+    def s6():
+        for w in (getattr(app, "jp_helper_win", None), getattr(app, "live_schedule_win", None), app._live_window()):
+            try:
+                if w is not None and w.winfo_exists():
+                    w.destroy()
+            except Exception:
+                pass
         results["seconds"] = round(time.monotonic() - t0, 1)
         results["all_ok"] = all(v["ok"] for v in results.values() if isinstance(v, dict))
         Path(out_path).write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -641,8 +641,14 @@ class MainWindow(tk.Tk):
         if w is not None:
             w.deiconify(); w.lift(); w.focus_set(); return w
         from .youtube_live_schedule_ui import LiveScheduleWindow
-        self.live_schedule_win = LiveScheduleWindow(self)
+        self.live_schedule_win = LiveScheduleWindow(self, playlist_source=self._live_playlist_snapshot,
+                                                    tools=self._live_tools)
         return self.live_schedule_win
+
+    def _live_playlist_snapshot(self):
+        """예약 LIVE 창: 열려 있는 LIVE 창의 Playlist (없으면 빈 목록)."""
+        w = self._live_window()
+        return w.playlist_snapshot() if w is not None else []
 
     def _send_to_upload(self):
         sel = self.qtree.selection()

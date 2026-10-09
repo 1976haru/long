@@ -411,6 +411,11 @@ class FakeYouTube:
             self.broadcasts[bid] = {"id": bid, "snippet": body["snippet"], "contentDetails": dict(body["contentDetails"]),
                                     "status": {**body["status"], "lifeCycleStatus": "created"}, "body": body}
             return 200, self.broadcasts[bid]
+        if op == "liveBroadcasts" and method == "DELETE":
+            if q.get("id") not in self.broadcasts:
+                return self._err(404, "liveBroadcastNotFound")
+            del self.broadcasts[q["id"]]
+            return 200, {}
         if op == "liveBroadcasts" and method == "GET":
             b = self.broadcasts.get(q.get("id", ""))
             if not b:

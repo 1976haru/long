@@ -72,6 +72,16 @@ class LivePlaylist:
     def clear(self) -> None:
         self.items.clear()
 
+    def replace_path(self, index: int, path) -> PlaylistItem:
+        """같은 순서 자리의 영상을 다른 파일로 교체 (LIVE READY 변환본). 분석은 다시 한다. 원본 파일은 건드리지 않는다."""
+        p = Path(path)
+        if not 0 <= index < len(self.items):
+            raise PlaylistError("Playlist 항목을 찾을 수 없습니다.")
+        if any(_key(i.path) == _key(p) for n, i in enumerate(self.items) if n != index):
+            raise PlaylistError(f"이미 추가된 영상입니다: {p.name}")
+        self.items[index] = PlaylistItem(p)
+        return self.items[index]
+
     def set_report(self, path, report) -> None:
         for i in self.items:
             if _key(i.path) == _key(Path(path)):

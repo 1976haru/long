@@ -657,7 +657,8 @@ def test_exe_self_test_sequence_from_source(tmp_path, monkeypatch):
         time.sleep(0.02)
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data["all_ok"], data
-    assert {"welcome", "setup_wizard", "help", "manual", "diagnostics", "upload_window", "channel_manager"} <= set(data)
+    assert {"welcome", "setup_wizard", "help", "manual", "diagnostics", "upload_window", "channel_manager",
+            "comment_manager", "live_window", "live_schedule", "japanese_assistant"} <= set(data)
 
 
 def test_terminology_unified_in_ui_sources():

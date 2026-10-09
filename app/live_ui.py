@@ -27,6 +27,7 @@ from .live_profile import (
 )
 from .live_playlist import LivePlaylist, PlaylistError, entry_durations, validate_playlist, write_ffconcat
 from .live_ready import LiveReadyCancelled, analyze_live_ready, make_live_ready_file
+from .live_ready_batch import SOURCE_KEPT, plan_bulk_conversion, run_bulk_live_ready, summary_lines
 from .live_session import (
     ARCHIVE_SAFE_SECONDS, SESSION_ARCHIVE_SAFE, SESSION_CONTINUOUS, ManualSessionProvider, archive_notice,
     session_limit_seconds,
@@ -79,6 +80,34 @@ def ask_cloud_close(parent, message: str) -> str:
 
 
 CLOUD_CLOSE_MESSAGE = "Cloud에서 LIVE가 계속 방송 중입니다.\n\nPC 프로그램만 종료할까요?"
+
+
+def ask_choice(parent, title: str, message: str, choices: list[tuple[str, str]], default: str, cancel: str = "") -> str:
+    """버튼 이름이 분명한 선택 창 (예: [바꾸기] / [그대로 두기]). 첫 버튼이 기본(추천). Esc → cancel 값."""
+    result = {"v": cancel or default}
+    d = tk.Toplevel(parent)
+    d.title(title)
+    d.transient(parent)
+    d.resizable(False, False)
+    ttk.Label(d, text=message, padding=16, justify="left", wraplength=560).pack()
+    row = ttk.Frame(d, padding=(16, 0, 16, 16)); row.pack()
+
+    def pick(v):
+        result["v"] = v
+        d.destroy()
+    first = None
+    for label, value in choices:
+        b = ttk.Button(row, text=label, command=lambda v=value: pick(v),
+                       style="Primary.TButton" if value == default else "TButton")
+        b.pack(side="left", padx=(0, 6))
+        first = first or b
+    d.bind("<Escape>", lambda e: pick(cancel or default))
+    d.bind("<Return>", lambda e: pick(default))
+    if first is not None:
+        first.focus_set()
+    d.grab_set()
+    parent.wait_window(d)
+    return result["v"]
 
 
 def default_cloud_client() -> CloudClient:
@@ -241,6 +270,19 @@ class LiveWindow(tk.Toplevel):
         self.ptree.pack(fill="x", pady=(4, 0))
         self.lbl_playlist = ttk.Label(self.playlist_frame, textvariable=self.playlist_summary, justify="left")
         self.lbl_playlist.pack(anchor="w", pady=(4, 0))
+        # 초보자: 경고만 보여주지 않고 [문제 영상 모두 LIVE READY로 만들기]로 바로 해결 (원본은 그대로)
+        self.pl_ready_row = ttk.Frame(self.playlist_frame)
+        self.pl_ready_row.pack(fill="x", pady=(4, 0))
+        self.btn_pl_fix_all = ttk.Button(self.pl_ready_row, text="문제 영상 모두 LIVE READY로 만들기",
+                                         style="Primary.TButton", command=self._pl_make_ready_all)
+        self.btn_pl_fix_sel = ttk.Button(self.pl_ready_row, text="선택 영상 LIVE READY로 만들기",
+                                         command=self._pl_make_ready_selected)
+        self.btn_pl_cancel = ttk.Button(self.pl_ready_row, text="변환 중지", command=self._convert_cancel.set)
+        self.pl_bar = ttk.Progressbar(self.pl_ready_row, maximum=100, length=200)
+        self.pl_progress = tk.StringVar()
+        self.lbl_pl_progress = ttk.Label(self.playlist_frame, textvariable=self.pl_progress, justify="left")
+        self.lbl_pl_note = ttk.Label(self.playlist_frame, text=SOURCE_KEPT, foreground="gray30")
+        self._bulk_expected = 0
         rr = ttk.Frame(self.single_frame); rr.pack(fill="x", pady=(4, 0))
         self.btn_make_ready = ttk.Button(rr, text="LIVE READY 파일 만들기", command=self._make_ready)
         self.btn_cancel_ready = ttk.Button(rr, text="변환 중지", command=self._convert_cancel.set)
@@ -727,8 +769,113 @@ class LiveWindow(tk.Toplevel):
         self.playlist.clear()
         self._refresh_playlist()
 
+    # ---------- Playlist 일괄 LIVE READY ----------
+    def pl_problem_indices(self) -> list[int]:
+        return plan_bulk_conversion([i.report for i in self.playlist.items])
+
+    def _pl_make_ready_all(self):
+        idx = self.pl_problem_indices()
+        if not idx:
+            messagebox.showinfo("LIVE READY", "변환이 필요한 영상이 없습니다." if self.playlist.analyzed
+                                else "영상 분석 중입니다. 잠시 후 다시 눌러 주세요.", parent=self)
+            return
+        self._pl_make_ready(idx)
+
+    def _pl_make_ready_selected(self):
+        i = self._pl_selected()
+        if i is None:
+            messagebox.showinfo("LIVE READY", "변환할 영상을 표에서 선택하세요.", parent=self)
+            return
+        self._pl_make_ready([i])
+
+    def _pl_make_ready(self, indices: list[int]) -> bool:
+        """선택한 Playlist 영상을 하나씩 LIVE READY로 변환 (백그라운드 스레드, 취소 가능, 원본 보관)."""
+        if self.converting or self.busy_any:
+            return False
+        ffmpeg, ffprobe = self._tools()
+        if not (ffmpeg and ffprobe):
+            messagebox.showerror("FFmpeg", "FFmpeg/ffprobe를 찾을 수 없습니다. 메인 창에서 FFmpeg 설정을 확인하세요.", parent=self)
+            return False
+        items = [(i, self.playlist.items[i].path, self.playlist.items[i].report) for i in indices
+                 if 0 <= i < len(self.playlist) and self.playlist.items[i].report is not None]
+        if not items:
+            messagebox.showinfo("LIVE READY", "영상 분석 중입니다. 잠시 후 다시 눌러 주세요.", parent=self)
+            return False
+        if not FFMPEG_GUARD.try_acquire(CONVERT_OWNER):
+            messagebox.showwarning("FFmpeg 사용 중", busy_message(FFMPEG_GUARD.owner), parent=self)
+            return False
+        self._convert_cancel.clear()
+        self._bulk_expected = len(items)
+        self.pl_bar["value"] = 0
+        self.pl_progress.set(f"LIVE READY 변환 1 / {len(items)}\n{Path(items[0][1]).name}\n준비 중")
+        q, cancel = self._ui_q, self._convert_cancel  # 스레드에는 Tk 객체를 넘기지 않는다
+
+        def work():
+            try:
+                results, cancelled = run_bulk_live_ready(
+                    ffmpeg=ffmpeg, ffprobe=ffprobe, items=items, cancel=cancel,
+                    progress=lambda k, n, name, f, t: q.put(("bulk_progress", k, n, name, f, t)))
+                q.put(("bulk_done", results, cancelled))
+            except Exception as e:  # 예상 밖 오류도 UI가 멈추지 않게
+                q.put(("bulk_done", [], False, f"변환 중 오류 ({type(e).__name__})"))
+            finally:
+                FFMPEG_GUARD.release(CONVERT_OWNER)
+        self._convert_thread = threading.Thread(target=work, name="live-ready-bulk", daemon=True)
+        self._convert_thread.start()
+        self._sync_widgets()
+        return True
+
+    def _pl_bulk_done(self, results, cancelled: bool, error: str = ""):
+        self.pl_progress.set("")
+        self.pl_bar["value"] = 0
+        lines = summary_lines(results, cancelled)
+        if error:
+            lines.insert(0, "✗ " + error)
+        done = [r for r in results if r.ok]
+        all_ok = bool(results) and len(done) == self._bulk_expected and not cancelled and not error
+        if self._closing:
+            return
+        if all_ok:
+            choice = ask_choice(self, "LIVE READY 변환 완료", "\n".join(lines) + "\n\nPlaylist의 원본 영상을\nLIVE READY 파일로 바꿀까요?",
+                                [("바꾸기 (추천)", "replace"), ("그대로 두기", "keep")], default="replace", cancel="keep")
+            if choice == "replace":
+                self.replace_with_ready(done)
+        else:
+            messagebox.showwarning("LIVE READY 변환", "\n".join(lines), parent=self)
+        self._refresh_playlist()
+        self._sync_widgets()
+
+    def replace_with_ready(self, results) -> int:
+        """변환 결과로 Playlist 항목 교체 (순서 유지) → 새 파일 다시 분석. 원본 파일은 디스크에 그대로."""
+        _, ffprobe = self._tools()
+        replaced = []
+        for r in results:
+            item = self.playlist.items[r.index] if r.index < len(self.playlist) else None
+            if item is None or Path(item.path) != Path(r.source):
+                continue  # 변환 중 Playlist가 바뀐 경우 건드리지 않음
+            try:
+                replaced.append(self.playlist.replace_path(r.index, r.output).path)
+            except PlaylistError:
+                continue
+        if replaced and ffprobe:
+            q = self._ui_q
+
+            def work():
+                for path in replaced:
+                    q.put(("pl_ready", path, analyze_live_ready(path, ffprobe)))
+            threading.Thread(target=work, name="playlist-analyze", daemon=True).start()
+        self._refresh_playlist()
+        return len(replaced)
+
     def playlist_validation(self):
         return validate_playlist([i.report for i in self.playlist.items])
+
+    def playlist_snapshot(self) -> list[tuple[Path, object]]:
+        """예약 LIVE 창용: 현재 LIVE 영상 순서 (경로, LiveReadyReport|None). Tk 객체 없음."""
+        if self.playlist_mode:
+            return [(Path(i.path), i.report) for i in self.playlist.items]
+        p = self.input_path.get()
+        return [(Path(p), self.ready_report)] if p else []
 
     def _refresh_playlist(self, select: int | None = None):
         if not hasattr(self, "ptree"):
@@ -760,6 +907,8 @@ class LiveWindow(tk.Toplevel):
                 color = "darkgreen"
             else:
                 lines += ["⚠ " + m for m in v.messages]
+                if self.pl_problem_indices():
+                    lines.append("→ [문제 영상 모두 LIVE READY로 만들기]를 누르면 자동으로 맞춥니다 (원본 파일은 그대로 보관).")
                 color = "darkorange"
             text = "\n".join(lines)
         self.playlist_summary.set(text)
@@ -914,8 +1063,26 @@ class LiveWindow(tk.Toplevel):
                     pass
             threading.Thread(target=work, name="youtube-complete", daemon=True).start()
 
+    def _scheduled_cloud_conflict_ok(self) -> bool:
+        """Cloud 예약 LIVE(자동 시작)가 기다리는 동안 같은 송출 스트림으로 직접 송출하면 예약 방송이 일찍 LIVE가 될 수 있다."""
+        try:
+            from datetime import datetime, timezone
+            from .scheduled_live import pending_cloud_reservations
+            from .youtube_live_schedule_ui import reservation_store
+            pending = pending_cloud_reservations(reservation_store(), datetime.now(timezone.utc))
+        except Exception:
+            return True
+        if not pending:
+            return True
+        return messagebox.askyesno(
+            "예약 LIVE 확인", f"Cloud 자동 시작 예약 LIVE가 {len(pending)}개 있습니다.\n\n"
+            "같은 YouTube 송출 스트림(Stream Key)으로 지금 직접 송출하면\n예약 방송이 예약 시각보다 일찍 LIVE로 바뀔 수 있습니다.\n\n"
+            "그래도 지금 LIVE를 시작할까요?", parent=self)
+
     def _start(self, api_stream: tuple | None = None):
         if self.busy_any or self.cloud.cloud_live_active or self._yt_busy:
+            return
+        if api_stream is None and not self._scheduled_cloud_conflict_ok():
             return
         if self.api_mode and api_stream is None:
             # 분석 확인 먼저 (API 호출 전에)
@@ -1092,6 +1259,12 @@ class LiveWindow(tk.Toplevel):
             elif kind == "pl_ready":
                 self.playlist.set_report(ev[1], ev[2])
                 self._refresh_playlist()
+            elif kind == "bulk_progress":
+                _, k, n, name, f, text = ev
+                self.pl_bar["value"] = f * 100
+                self.pl_progress.set(f"LIVE READY 변환 {k} / {n}\n{name}\n진행률 {f * 100:.0f}% · {text}")
+            elif kind == "bulk_done":
+                self._pl_bulk_done(ev[1], ev[2], ev[3] if len(ev) > 3 else "")
             elif kind == "convert_progress":
                 self.ready_bar["value"] = ev[1] * 100
                 self.ready_progress.set(ev[2])
@@ -1297,13 +1470,35 @@ class LiveWindow(tk.Toplevel):
             self.btn_make_ready.configure(state="disabled" if locked else "normal")
         else:
             self.btn_make_ready.pack_forget()
-        if self.converting:
+        bulk = self.converting and self.playlist_mode
+        if self.converting and not bulk:
             self.btn_cancel_ready.pack(side="left")
             self.ready_bar.pack(side="left", padx=(6, 0))
             self.lbl_ready_progress.pack(side="left", padx=(6, 0))
         else:
             for w in (self.btn_cancel_ready, self.ready_bar, self.lbl_ready_progress):
                 w.pack_forget()
+        # Playlist 일괄 LIVE READY: 문제 영상이 있을 때만 [모두] 버튼, 변환 중에는 진행률 + [변환 중지]
+        problems = bool(self.playlist.items) and not bulk and bool(self.pl_problem_indices())
+        layout = (bulk, bool(self.playlist.items), problems)
+        if layout != getattr(self, "_pl_layout", None):  # 바뀔 때만 다시 배치 (500ms tick 깜빡임 방지)
+            self._pl_layout = layout
+            for w in (self.btn_pl_fix_all, self.btn_pl_fix_sel, self.btn_pl_cancel, self.pl_bar, self.lbl_pl_progress,
+                      self.lbl_pl_note):
+                w.pack_forget()
+            if bulk:
+                self.btn_pl_cancel.pack(side="left")
+                self.pl_bar.pack(side="left", padx=(6, 0))
+                self.lbl_pl_progress.pack(anchor="w", pady=(2, 0))
+                self.lbl_pl_note.pack(anchor="w")
+            elif self.playlist.items:
+                if problems:
+                    self.btn_pl_fix_all.pack(side="left")
+                    self.lbl_pl_note.pack(anchor="w")
+                self.btn_pl_fix_sel.pack(side="left", padx=(6 if problems else 0, 0))
+        st = "disabled" if locked else "normal"
+        self.btn_pl_fix_all.configure(state=st)
+        self.btn_pl_fix_sel.configure(state=st)
         if is_cloud:
             note = "무료 Cloud는 LIVE READY 파일을 재인코딩 없이 그대로 송출합니다 (DIRECT COPY)."
         elif transcode:

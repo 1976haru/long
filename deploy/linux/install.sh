@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Long Live worker 설치 (Ubuntu/Debian). root로 실행: sudo bash install.sh <업로드용 SSH 사용자>
 # 서비스는 설치만 하고 켜지 않는다. LIVE 시작 시 PC 프로그램이 enable --now 한다.
+# 예약 LIVE scheduler는 첫 Cloud 예약을 만들 때 PC 프로그램이 enable --now 한다 (이미 켜져 있으면 새 코드로 재시작).
 set -euo pipefail
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 UPLOAD_USER="${1:-${SUDO_USER:-ubuntu}}"
@@ -12,9 +13,13 @@ fi
 install -d -m 0755 -o root -g root /opt/long-live /opt/long-live/worker
 install -d -m 0755 -o "$UPLOAD_USER" -g longlive /opt/long-live/media
 install -d -m 0755 -o longlive -g longlive /opt/long-live/state /opt/long-live/logs
-install -d -m 0750 -o root -g longlive /etc/long-live
+install -d -m 0750 -o root -g longlive /etc/long-live /etc/long-live/jobs
 install -m 0644 -o root -g root "$SRC_DIR/long_live_worker.py" /opt/long-live/worker/long_live_worker.py
 install -m 0644 -o root -g root "$SRC_DIR/long-live.service" /etc/systemd/system/long-live.service
+if [ -f "$SRC_DIR/long-live-scheduler.service" ]; then
+  install -m 0644 -o root -g root "$SRC_DIR/long-live-scheduler.service" /etc/systemd/system/long-live-scheduler.service
+fi
 install -m 0755 -o root -g root "$SRC_DIR/uninstall.sh" /opt/long-live/worker/uninstall.sh
 systemctl daemon-reload
+systemctl try-restart long-live-scheduler.service 2>/dev/null || true
 echo INSTALL_OK

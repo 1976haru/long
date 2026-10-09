@@ -30,7 +30,8 @@ def test_prepare_runs_six_steps_in_order(tmp_path):
     assert env["shape"] == "VM.Standard.A1.Flex"
     assert "Oracle Console" in env["free_notice"]
     uploaded = {k.rsplit("/", 1)[1] for k in remote.files if k.startswith("/tmp/long-live-install-")}
-    assert uploaded == {"long_live_worker.py", "long-live.service", "install.sh", "uninstall.sh"}
+    assert uploaded == {"long_live_worker.py", "long-live.service", "long-live-scheduler.service", "install.sh",
+                        "uninstall.sh"}
     for k, v in remote.files.items():
         if k.startswith("/tmp/long-live-install-"):
             assert b"\r\n" not in v  # Linux 줄바꿈

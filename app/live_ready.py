@@ -270,12 +270,13 @@ def make_live_ready_file(
     cancel: Event,
     progress_cb: Callable[[float, str], None] | None = None,
     popen=subprocess.Popen,
+    fps: int = 30,
 ) -> Path:
     """원본 → *_LIVE_READY.mp4. .part.mp4로 만들고 LIVE READY 검증 성공 후 최종 이름으로 교체."""
     src = Path(src)
     dst = live_ready_output_path(src)
     part = dst.with_name(dst.name + ".part.mp4")
-    cmd = build_live_ready_command(ffmpeg=ffmpeg, src=src, dst=part, height=height)
+    cmd = build_live_ready_command(ffmpeg=ffmpeg, src=src, dst=part, height=height, fps=fps)
     proc = None
     try:
         proc = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",

@@ -115,6 +115,11 @@ South Korea North(Chuncheon) 등 일부 리전은 A1 무료 용량이 부족하�
 - **Cloud LIVE 중**: "Cloud에서 LIVE가 계속 방송 중입니다. PC 프로그램만 종료할까요?" → **[PC만 종료 (권장)]** / [LIVE도 종료] / [취소]. PC만 종료는 서버에 아무 명령도 보내지 않습니다.
 - **내 PC LIVE 중**: 기존처럼 확인 후 FFmpeg 정상 종료(q) → 프로그램 종료.
 
+## 예약 LIVE (PC를 꺼도 예약 시각에 자동 송출)
+
+worker v3부터 `long-live-scheduler.service`가 예약 job을 확인해 예약 시각에 송출합니다 (YouTube 예약 방송은 autoStart/autoStop).
+구조·상태·안전장치는 [SCHEDULED_CLOUD_LIVE.md](SCHEDULED_CLOUD_LIVE.md). 기존 서버는 [처음 설정 도우미] → [무료 Cloud 자동 준비]를 다시 실행하면 v3로 업데이트됩니다.
+
 ## 상태 확인
 
 10초마다 SSH 1회로 상태를 읽습니다 (서버/Worker/LIVE/방송 시간/영상/방식/FPS/Bitrate/재접속/오류/디스크). 서버 로그는 [상세 보기]에서 요청할 때만 최근 50줄. PC 메모리에 무한 로그를 쌓지 않습니다 (작업 기록 200줄, FFmpeg 오류 30줄, 상태/재접속 기록 100건).
