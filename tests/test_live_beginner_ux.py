@@ -332,15 +332,15 @@ def test_small_window_scrolls_and_cards_stack(root, shown_boxes):
         w.destroy()
 
 
-def test_metadata_info_and_placeholders(root, shown_boxes):
+def test_metadata_panel_replaces_placeholders(root, shown_boxes):
     w, store, ctls = make(root)
     try:
-        assert not shown(w.meta_frame)
-        w.btn_meta.invoke()
-        assert shown(w.meta_frame) and set(w.meta_widgets) == {"title", "description", "privacy", "thumbnail",
-                                                                 "category", "playlist"}
-        assert all(str(e.cget("state")) == "disabled" for e in w.meta_widgets.values())
-        assert w.meta_widgets["playlist"].get() == "추후 지원 예정 · API 연결 시 사용"
+        p = w.meta_panel  # 비활성 placeholder 대신 실제 입력 칸 (⑦ YouTube 방송 정보)
+        assert shown(p.frame) and p.frame.cget("text").startswith("⑦ YouTube 방송 정보")
+        for widget in (p.ent_title, p.txt_desc, p.txt_tags, p.cmb_category, p.cmb_playlist, p.cmb_privacy, p.btn_thumb,
+                       p.btn_save):
+            assert str(widget.cget("state")) in ("normal", "readonly")
+        assert not hasattr(w, "meta_widgets")
     finally:
         w.destroy()
 

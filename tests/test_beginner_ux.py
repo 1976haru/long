@@ -659,7 +659,7 @@ def test_exe_self_test_sequence_from_source(tmp_path, monkeypatch):
     assert data["all_ok"], data
     assert {"welcome", "setup_wizard", "help", "manual", "diagnostics", "upload_window", "channel_manager",
             "comment_manager", "live_window", "live_schedule", "japanese_assistant", "multi_channel",
-            "live_beginner"} <= set(data)
+            "live_beginner", "live_metadata"} <= set(data)
 
 
 def test_terminology_unified_in_ui_sources():

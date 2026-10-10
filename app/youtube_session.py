@@ -114,10 +114,16 @@ class YouTubeRolloverManager:
                  transition_poll: float = TRANSITION_POLL_SECONDS,
                  transition_timeout: float = TRANSITION_TIMEOUT_SECONDS,
                  on_event: Callable[[str, str], None] | None = None,
-                 metadata_template=None, channel: str = "", timezone_name: str = "Asia/Seoul"):
-        """metadata_template(MetadataTemplate)을 주면 새 Broadcast마다 제목/설명 변수, 태그, 카테고리, 언어, 썸네일을 적용한다."""
+                 metadata_template=None, channel: str = "", timezone_name: str = "Asia/Seoul",
+                 after_create: Callable[[YouTubeApiClient, str], object] | None = None):
+        """metadata_template(MetadataTemplate)을 주면 새 Broadcast마다 제목/설명 변수, 태그, 카테고리, 언어, 썸네일을 적용한다.
+
+        after_create(api, broadcast_id): 새 Broadcast insert+bind 성공 뒤 채널별 방송 정보(태그·카테고리·썸네일·
+        YouTube 재생목록)를 적용한다. 결과는 metadata_result에 남고, 실패해도 방송 시작/교체는 계속한다."""
         template.validate()
         self.metadata_template = metadata_template
+        self.after_create = after_create
+        self.metadata_result = None
         self.channel = channel
         self.timezone_name = timezone_name
         self.metadata_warnings: list[str] = []
@@ -231,6 +237,12 @@ class YouTubeRolloverManager:
         bid, self._pending_next_id = self._pending_next_id, ""
         self._apply_extras(bid, getattr(self, "_pending_md", None))
         self._pending_md = None
+        if self.after_create is not None:
+            try:
+                self.metadata_result = self.after_create(self.api, bid)
+            except Exception as e:  # 방송 정보 실패로 이미 만든 방송을 지우거나 시작을 막지 않는다
+                self.metadata_warnings = [f"방송 정보 적용 오류 ({type(e).__name__})"]
+                self._event("metadata_partial", self.metadata_warnings[0])
         return bid
 
     # ---------- 첫 방송 ----------

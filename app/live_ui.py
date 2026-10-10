@@ -56,6 +56,7 @@ from .youtube_config import (
     RolloverRunner, build_api_client, is_connected, load_youtube_settings, save_youtube_settings,
     template_from_settings,
 )
+from .youtube_metadata import MetadataError
 from .youtube_oauth import TESTING_TOKEN_WARNING, OAuthError
 from .youtube_session import (
     SESSION_YOUTUBE_AUTO, STATE_LABELS as YT_LABELS, STREAM_MODE_API, STREAM_MODE_MANUAL, TITLE_RULE_NUMBERED,
@@ -529,8 +530,9 @@ class LiveWindow(tk.Toplevel):
         self.btn_next_session = ttk.Button(self.next_frame, text="▶ 다음 세션 시작", command=self._next_session)
         self.btn_next_session.pack(anchor="w", pady=(4, 0))
 
-        from .live_ui_beginner import build_checklist_panel, build_metadata_panel
-        build_metadata_panel(self, root)  # 제목·설명·썸네일… 어디서 정하나요? + 채널별 방송 정보 자리 (추후 지원)
+        from .live_metadata_ui import MetadataPanel
+        from .live_ui_beginner import build_checklist_panel
+        self.meta_panel = MetadataPanel(self, root)  # ⑦ 채널별 YouTube 방송 정보 (저장 = 이 PC, 적용 = 명시적으로만)
         build_checklist_panel(self, root)  # 지금 설정하는 채널 준비 상태 (□ 6항목 → 시작 가능)
         ar = ttk.Frame(root); ar.pack(fill="x", pady=(10, 0))
         self.btn_check = ttk.Button(ar, text="송출 설정 검사", command=self._check)
@@ -1692,6 +1694,13 @@ class LiveWindow(tk.Toplevel):
         op = oauth_profile_for(self.current_channel)
         return op.channel_title if op else ""
 
+    def _yt_expected_channel_id(self) -> str:
+        """이 채널에 연결된 YouTube 채널 ID (적용 전 계정 확인용 — 다른 채널 token으로 쓰지 않게)."""
+        if self._legacy_youtube():
+            return str(load_youtube_settings().get("channel_id") or "")
+        op = oauth_profile_for(self.current_channel)
+        return op.channel_id if op else ""
+
     def _saved_stream_id(self) -> str | None:
         if self._legacy_youtube():
             return load_youtube_settings().get("stream_id")
@@ -1716,6 +1725,8 @@ class LiveWindow(tk.Toplevel):
     def _update_yt_status(self):
         self._cloud_cfg = load_cloud_profile() is not None  # 준비 체크리스트용 (3초마다 갱신, tick마다 파일을 읽지 않게)
         self._yt_ok = self._yt_connected()
+        if getattr(self, "meta_panel", None) is not None:
+            self.meta_panel.sync()
         if self._yt_ok:
             self.yt_status.set(f"✓ 연결됨 · 채널: {self._yt_channel_title()}")
             self.lbl_yt.configure(foreground="darkgreen")
@@ -1738,6 +1749,14 @@ class LiveWindow(tk.Toplevel):
         YouTubeSetupWizard(self, on_done=lambda settings: self._update_yt_status())
 
     def _yt_template(self) -> BroadcastTemplate:
+        """⑦ 채널별 방송 정보에 제목이 있으면 그 제목·설명·공개 상태로 방송을 만든다 (③의 아동용/제목 규칙은 그대로).
+        ⑦ 제목이 비어 있으면 기존처럼 ③의 LIVE 제목/설명/공개 상태."""
+        md = self.meta_panel.session_metadata() if getattr(self, "meta_panel", None) is not None else None
+        self._yt_session_meta = (self.channel_id, md, self._yt_expected_channel_id()) if md is not None else None
+        if md is not None:
+            t = BroadcastTemplate(md.title, md.description, md.privacy, bool(self.yt_kids.get()), self.yt_title_rule.get())
+            t.validate()
+            return t
         t = BroadcastTemplate(self.yt_title.get().strip(), self.yt_desc.get().strip(), self.yt_privacy.get(),
                               bool(self.yt_kids.get()), self.yt_title_rule.get())
         t.validate()
@@ -1764,7 +1783,7 @@ class LiveWindow(tk.Toplevel):
             return
         try:
             template = self._yt_template()
-        except YouTubeApiError as e:
+        except (YouTubeApiError, MetadataError) as e:
             messagebox.showerror("LIVE 제목/설정", str(e), parent=self)
             return
         self._yt_busy = True
@@ -1795,13 +1814,21 @@ class LiveWindow(tk.Toplevel):
             return
         api, stream_id, template = pending
         q, auto = self._ui_q, self.session_mode.get() == SESSION_YOUTUBE_AUTO
+        meta, self._yt_session_meta = getattr(self, "_yt_session_meta", None), None
+        after_create = None
+        if meta is not None:  # ⑦ 방송 정보: 생성/bind 뒤 태그·카테고리·썸네일·YouTube 재생목록 (실패해도 방송은 계속)
+            from .youtube_metadata_control import apply_after_create
+            _pid, md, yt_channel_id = meta
+
+            def after_create(a, bid, md=md, cid=yt_channel_id):
+                return apply_after_create(a, bid, md, channel_id=cid)
 
         def work():
             m = YouTubeRolloverManager(api, stream_id=stream_id, template=template,
-                                       session_seconds=session_seconds_for_run())
+                                       session_seconds=session_seconds_for_run(), after_create=after_create)
             try:
                 m.go_live_first()
-                q.put(("yt_live", True, (m, auto)))
+                q.put(("yt_live", True, (m, auto, meta)))
             except (YouTubeApiError, OAuthError) as e:
                 q.put(("yt_live", False, str(e)))
             except Exception as e:
@@ -2041,9 +2068,12 @@ class LiveWindow(tk.Toplevel):
                 self._yt_busy = False
                 ok, payload = ev[1], ev[2]
                 if ok:
-                    manager, auto = payload
+                    manager, auto, meta = payload
                     self.yt_manager = manager
                     self._yt_snap = manager.snapshot()
+                    if meta is not None and manager.metadata_result is not None:
+                        self.meta_panel.set_session_result(meta[0], manager.api, meta[1], manager.metadata_result,
+                                                           meta[2])
                     if auto:
                         self.yt_runner = RolloverRunner(manager)
                         self.yt_runner.start()
@@ -2399,6 +2429,9 @@ class LiveWindow(tk.Toplevel):
         wiz = getattr(self, "quick_wizard", None)
         if wiz is not None:
             wiz.destroy()  # 간단 시작 창의 Variable도 main thread에서 정리
+        panel = getattr(self, "meta_panel", None)
+        if panel is not None:
+            panel.destroy()  # ⑦ 방송 정보 칸 polling 취소 + Variable 정리
         super().destroy()
         release_tk_variables(self)  # 이후 어느 스레드에서 GC가 돌아도 Tcl 호출이 없도록 (main thread에서 정리)
         from .live_ui_beginner import release_card_variables

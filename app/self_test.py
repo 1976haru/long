@@ -87,6 +87,11 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
                         and len(getattr(lw, "check_vars", [])) == 6 and bool(lw.server_auto.winfo_manager())
                         and not lw.ent_custom.winfo_ismapped())
             ok("live_beginner", beginner, lw.title_text.get())
+            # ⑦ 채널별 YouTube 방송 정보: 입력 칸이 있고, 연결이 없으면 [YouTube에 적용]은 꺼져 있다 (저장/쓰기 없음)
+            mp = getattr(lw, "meta_panel", None)
+            meta_ok = (mp is not None and mp.pid == lw.channel_id and str(mp.ent_title.cget("state")) == "normal"
+                       and (getattr(lw, "_yt_ok", False) or str(mp.btn_apply.cget("state")) == "disabled"))
+            ok("live_metadata", meta_ok, mp.frame.cget("text") if mp is not None else "")
             sw = app._open_live_schedule()
             ok("live_schedule", sw.winfo_exists() and len(sw.step_vars) == 12 and sw.winfo_class() == "Toplevel",
                sw.title())

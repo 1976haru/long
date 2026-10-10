@@ -34,7 +34,7 @@ QUOTA_COSTS = {
     "liveBroadcasts.delete": 50, "videoCategories.list": 1, "videos.insert": 1600,
     "commentThreads.list": 1, "commentThreads.insert": 50, "comments.list": 1, "comments.insert": 50,
     "comments.delete": 50,
-    "playlists.list": 1, "playlists.insert": 50, "playlistItems.insert": 50,
+    "playlists.list": 1, "playlists.insert": 50, "playlistItems.insert": 50, "playlistItems.list": 1,
 }
 # videos.update(part=snippet): 요청에 없는 기존 snippet 값은 삭제된다(공식 문서) → 읽은 값을 모두 다시 보낸다.
 SNIPPET_MUTABLE = ("title", "description", "categoryId", "tags", "defaultLanguage")
@@ -373,7 +373,14 @@ class YouTubeApiClient:
         return self.transition_broadcast(broadcast_id, "complete")
 
     def list_upcoming_broadcasts(self) -> list[YouTubeBroadcastInfo]:
-        d = self._request("GET", "liveBroadcasts", {"part": "id,snippet,status,contentDetails", "broadcastStatus": "upcoming",
+        return self._list_broadcasts("upcoming")
+
+    def list_active_broadcasts(self) -> list[YouTubeBroadcastInfo]:
+        """지금 진행 중인 내 방송 (Stream Key 직접 송출 중인 방송에 방송 정보를 적용할 때 사용자가 고른다)."""
+        return self._list_broadcasts("active")
+
+    def _list_broadcasts(self, status: str) -> list[YouTubeBroadcastInfo]:
+        d = self._request("GET", "liveBroadcasts", {"part": "id,snippet,status,contentDetails", "broadcastStatus": status,
                                                     "broadcastType": "all", "maxResults": "50"}, None, "liveBroadcasts.list")
         return [self._broadcast(i) for i in d.get("items") or []]
 
@@ -496,6 +503,12 @@ class YouTubeApiClient:
             raise YouTubeApiError("공개 상태가 올바르지 않습니다.", kind="config", reason="invalidPrivacy")
         body = {"snippet": {"title": t, "description": (description or "")[:5000]}, "status": {"privacyStatus": privacy}}
         return self._playlist(self._request("POST", "playlists", {"part": "snippet,status"}, body, "playlists.insert"))
+
+    def playlist_contains(self, playlist_id: str, video_id: str) -> bool:
+        """playlistItems.list(playlistId, videoId): 이미 들어 있으면 다시 넣지 않는다 (YouTube는 중복 추가를 허용할 수 있음)."""
+        d = self._request("GET", "playlistItems", {"part": "id", "playlistId": playlist_id, "videoId": video_id,
+                                                   "maxResults": "1"}, None, "playlistItems.list")
+        return bool(d.get("items"))
 
     def add_video_to_playlist(self, playlist_id: str, video_id: str) -> str:
         """playlistItems.insert → 재생목록 항목 ID. 이미 들어 있으면(videoAlreadyInPlaylist) 성공으로 보고 'already'."""

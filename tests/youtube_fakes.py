@@ -356,6 +356,12 @@ class FakeYouTube:
                 return self._err(409, "videoAlreadyInPlaylist")
             p["items"].append(vid)
             return 200, {"id": self._id("PLI"), "snippet": {"playlistId": pid, "resourceId": {"videoId": vid}}}
+        if op == "playlistItems" and method == "GET":
+            p = self.playlists.get(q.get("playlistId", ""))
+            if p is None:
+                return self._err(404, "playlistNotFound")
+            vid = q.get("videoId")
+            return 200, {"items": [{"id": f"PLI-{v}"} for v in p["items"] if not vid or v == vid]}
         return None
 
     def route(self, method, op, q, body):
@@ -409,13 +415,23 @@ class FakeYouTube:
         if op == "liveBroadcasts" and method == "POST":
             bid = self._id("bcast")
             self.broadcasts[bid] = {"id": bid, "snippet": body["snippet"], "contentDetails": dict(body["contentDetails"]),
-                                    "status": {**body["status"], "lifeCycleStatus": "created"}, "body": body}
+                                    "status": {**body["status"], "lifeCycleStatus": "created"}, "body": body,
+                                    "channel": self.channel_for(getattr(self, "current_token", ""))["id"]}
             return 200, self.broadcasts[bid]
         if op == "liveBroadcasts" and method == "DELETE":
             if q.get("id") not in self.broadcasts:
                 return self._err(404, "liveBroadcastNotFound")
             del self.broadcasts[q["id"]]
             return 200, {}
+        if op == "videoCategories" and method == "GET":
+            cats = getattr(self, "categories", [("10", "음악"), ("24", "엔터테인먼트"), ("22", "인물/블로그")])
+            return 200, {"items": [{"id": i, "snippet": {"title": t, "assignable": True}} for i, t in cats]}
+        if op == "liveBroadcasts" and method == "GET" and "broadcastStatus" in q:
+            want = {"active": ("live", "liveStarting", "testing"), "upcoming": ("created", "ready")}.get(
+                q["broadcastStatus"], ())
+            me = self.channel_for(getattr(self, "current_token", ""))["id"]
+            return 200, {"items": [b for b in self.broadcasts.values() if b["status"]["lifeCycleStatus"] in want
+                                   and b.get("channel", me) == me]}
         if op == "liveBroadcasts" and method == "GET":
             b = self.broadcasts.get(q.get("id", ""))
             if not b:

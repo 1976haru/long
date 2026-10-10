@@ -1,4 +1,4 @@
-"""LIVE 창 초보자 화면 조각 (Tk): 채널 A/B 카드 · 빠른 시작 버튼 · 간단 시작 마법사 · 준비 체크리스트 · 방송 정보 안내.
+"""LIVE 창 초보자 화면 조각 (Tk): 채널 A/B 카드 · 빠른 시작 버튼 · 간단 시작 마법사 · 준비 체크리스트.
 
 계산은 live_readiness.py (Tk 비의존). 이 파일은 LiveWindow(w)의 기존 동작(_switch_channel/_start/_stop)을 부를 뿐
 송출 로직을 새로 만들지 않는다. Stream Key 값은 어디에도 표시하지 않는다 (저장 여부만).
@@ -259,43 +259,7 @@ def update_checklist(w) -> None:
         w.lbl_check_big.configure(foreground="darkgreen" if not miss else "darkorange")
 
 
-# ---------------- 방송 정보 (제목·설명·…) 안내 + 자리 ----------------
-
-META_INFO = (
-    "• Stream Key 직접 송출: 제목·설명·썸네일·공개 상태·카테고리·재생목록은 YouTube Studio(라이브 스트리밍 화면)에서 정합니다. "
-    "이 앱은 영상만 보냅니다.\n"
-    "• YouTube API 자동 세션: 제목·설명·공개 상태는 이 창 ③에서 정할 수 있습니다.\n"
-    "• ② 예약 LIVE 창: 제목·설명·태그·썸네일·카테고리·공개 상태를 앱에서 정합니다.\n"
-    "• 채널별 방송 정보 저장(태그·썸네일·카테고리·YouTube 재생목록)은 추후 지원 예정입니다.")
-META_FIELDS = (("title", "제목"), ("description", "설명"), ("privacy", "공개 상태"), ("thumbnail", "썸네일"),
-               ("category", "카테고리"), ("playlist", "YouTube 재생목록"))
-
-
-def build_metadata_panel(w, root) -> None:
-    f = ttk.LabelFrame(root, text="방송 정보는 어디서 정하나요? (제목·설명·태그·썸네일·카테고리·재생목록·공개 상태)", padding=7)
-    f.pack(fill="x", pady=(8, 0))
-    ttk.Label(f, text=META_INFO, justify="left", wraplength=780, foreground="gray25").pack(anchor="w")
-    w.meta_frame = ttk.Frame(f)
-    w.meta_widgets = {}  # 향후 채널별 방송 정보 저장용 자리 (지금은 비활성)
-    for key, label in META_FIELDS:
-        r = ttk.Frame(w.meta_frame); r.pack(fill="x", pady=1)
-        ttk.Label(r, text=label, width=14).pack(side="left")
-        e = ttk.Entry(r)
-        e.insert(0, "추후 지원 예정 · API 연결 시 사용")
-        e.configure(state="disabled")
-        e.pack(side="left", fill="x", expand=True)
-        w.meta_widgets[key] = e
-    w.btn_meta = ttk.Button(f, text="채널별 방송 정보 칸 보기 (추후 지원 예정) ▸", command=lambda: toggle_meta(w))
-    w.btn_meta.pack(anchor="w", pady=(4, 0))
-
-
-def toggle_meta(w) -> None:
-    if w.meta_frame.winfo_manager():
-        w.meta_frame.pack_forget()
-        w.btn_meta.configure(text="채널별 방송 정보 칸 보기 (추후 지원 예정) ▸")
-    else:
-        w.meta_frame.pack(fill="x", pady=(4, 0), before=w.btn_meta)
-        w.btn_meta.configure(text="채널별 방송 정보 칸 접기 ▾")
+# (채널별 YouTube 방송 정보 칸은 live_metadata_ui.MetadataPanel — LIVE 창 ⑦)
 
 
 # ---------------- 간단 시작 마법사 ----------------
