@@ -81,6 +81,12 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
             ok("multi_channel", hasattr(lw, "cmb_channel") and dlg.winfo_exists() and worker_v4
                and files["long-live@.service"].is_file(), f"worker_v4={worker_v4}")
             dlg.destroy()
+            # 초보자 LIVE 화면: 채널 A/B 카드 · 빠른 시작 · 준비 체크리스트 · 서버 주소 자동 (고급 모드는 꺼진 상태가 기본)
+            lw._tick()
+            beginner = (len(getattr(lw, "channel_cards", [])) == 2 and hasattr(lw, "btn_quick_both")
+                        and len(getattr(lw, "check_vars", [])) == 6 and bool(lw.server_auto.winfo_manager())
+                        and not lw.ent_custom.winfo_ismapped())
+            ok("live_beginner", beginner, lw.title_text.get())
             sw = app._open_live_schedule()
             ok("live_schedule", sw.winfo_exists() and len(sw.step_vars) == 12 and sw.winfo_class() == "Toplevel",
                sw.title())

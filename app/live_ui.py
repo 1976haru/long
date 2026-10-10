@@ -34,6 +34,10 @@ from .live_profile import (
 )
 from .live_playlist import LivePlaylist, PlaylistError, entry_durations, validate_playlist, write_ffconcat
 from .live_ready import LiveReadyCancelled, analyze_live_ready, make_live_ready_file
+from .live_readiness import (
+    DEFAULT_SERVER, DEFAULT_SERVER_PLAIN, KEY_EXAMPLE, MAX_TEXT, SERVER_EXAMPLE_BAD, SERVER_EXAMPLE_OK, YT_NOT_NEEDED,
+    channel_checklist, channel_label, check_server_and_key,
+)
 from .live_ready_batch import SOURCE_KEPT, plan_bulk_conversion, run_bulk_live_ready, summary_lines
 from .live_session import (
     ARCHIVE_SAFE_SECONDS, SESSION_ARCHIVE_SAFE, SESSION_CONTINUOUS, ManualSessionProvider, archive_notice,
@@ -59,6 +63,7 @@ TICK_MS = 500
 LOC_CLOUD, LOC_LOCAL = "cloud", "local"
 SEND_AUTO, SEND_TRANSCODE = "auto", "transcode"
 CONVERT_OWNER = "convert"
+ADVANCED_KEY = "live_advanced_mode"
 
 
 def ask_cloud_close(parent, message: str) -> str:
@@ -154,7 +159,11 @@ class LiveWindow(tk.Toplevel):
         self._channel_ids: list[str] = []
         self._overview = None  # 서버 전체 채널 송출 상태 (worker v4)
         self._yt_channel: str | None = None  # YouTube 자동 세션(API)을 쓰는 채널 (한 번에 1채널)
-        self.channel_var = tk.StringVar(value="기본 채널")
+        self.channel_var = tk.StringVar(value="채널 A (기본)")
+        # 초보자 모드가 기본: 고급 모드(서버 주소 직접 입력 등)는 사용자가 켤 때만 (설정에 기억, 비밀 아님)
+        from .settings import load_settings
+        self.advanced = tk.BooleanVar(value=bool(load_settings().get(ADVANCED_KEY)))
+        self._local_channel: str | None = None  # 내 PC LIVE를 시작한 채널
         self.channel_live_text = tk.StringVar()
         self.bandwidth_text = tk.StringVar()
         self._closing = False
@@ -252,10 +261,19 @@ class LiveWindow(tk.Toplevel):
 
     def _ui(self):
         root = self._scroll_area()
-        head = ttk.Frame(root); head.pack(anchor="w")
+        self._root_frame = root
+        head = ttk.Frame(root); head.pack(fill="x")
         ttk.Label(head, text="●", foreground="red", font="PLS.Title").pack(side="left")
-        ttk.Label(head, text=" 24H Playlist LIVE Studio", font="PLS.Title").pack(side="left")
-        ttk.Label(root, text="완성 MP4 1개 또는 여러 개(Playlist)를 YouTube LIVE로 무한 반복 송출합니다.").pack(anchor="w", pady=(0, 6))
+        self.title_text = tk.StringVar()
+        ttk.Label(head, textvariable=self.title_text, font="PLS.Title").pack(side="left")
+        self.chk_advanced = ttk.Checkbutton(head, text="고급 모드", variable=self.advanced, command=self._on_advanced)
+        self.chk_advanced.pack(side="right")
+        ttk.Label(root, text="채널별로 영상과 Stream Key를 넣고 시작하세요. 기본 서버 주소는 자동 사용됩니다.",
+                  font="PLS.Strong").pack(anchor="w")
+        ttk.Label(root, text="완성 MP4 1개 또는 여러 개(Playlist)를 YouTube LIVE로 무한 반복 송출합니다.",
+                  foreground="gray30").pack(anchor="w", pady=(0, 6))
+        from .live_ui_beginner import build_channel_cards
+        build_channel_cards(self, root)  # 채널 A / 채널 B 카드 + 빠른 시작 버튼
         gr = ttk.Frame(root); gr.pack(fill="x", pady=(0, 6))
         ttk.Button(gr, text="초보자 추천 설정", command=self.apply_beginner_preset).pack(side="left")
         ttk.Label(gr, text="잘 모르겠으면 누르세요: 재인코딩 없이 그대로 송출 · 11시간 50분 안전 종료 · 끊기면 자동 재연결",
@@ -358,15 +376,14 @@ class LiveWindow(tk.Toplevel):
         f2.pack(fill="x", pady=(8, 0))
         # 채널 선택: 채널마다 영상 Playlist · Stream Key · YouTube 연결 · Cloud 송출 상태가 따로
         chr_ = ttk.Frame(f2); chr_.pack(fill="x", pady=(0, 4))
-        ttk.Label(chr_, text="현재 채널", width=11).pack(side="left")
-        self.cmb_channel = ttk.Combobox(chr_, textvariable=self.channel_var, state="disabled", width=24,
-                                        values=["기본 채널"])
-        self.cmb_channel.pack(side="left")
+        ttk.Label(chr_, text="지금 설정하는 채널", font="PLS.Strong").pack(side="left")
+        self.cmb_channel = ttk.Combobox(chr_, textvariable=self.channel_var, state="disabled", width=30,
+                                        values=["채널 A (기본)"])
+        self.cmb_channel.pack(side="left", padx=(6, 0))
         self.cmb_channel.bind("<<ComboboxSelected>>", lambda e: self._on_channel_selected())
         self.btn_channels = ttk.Button(chr_, text="채널 관리", command=self._open_channels)
         self.btn_channels.pack(side="left", padx=(5, 0))
-        ttk.Label(chr_, text=f"무료 Cloud 동시 송출 최대 {MAX_CONCURRENT_LIVE}채널", foreground="gray30").pack(
-            side="left", padx=8)
+        ttk.Label(f2, text=MAX_TEXT + " 위의 채널 카드에서 바꿀 수도 있습니다.", foreground="gray30").pack(anchor="w", pady=(0, 4))
         # YouTube 계정 연결 상태: 송출 방식과 상관없이 항상 표시 (예약 LIVE도 이 연결을 쓴다)
         yr = ttk.Frame(f2); yr.pack(fill="x", pady=(0, 4))
         ttk.Label(yr, text="YouTube 계정", width=11).pack(side="left")
@@ -408,23 +425,51 @@ class LiveWindow(tk.Toplevel):
         ttk.Label(self.yt_frame, foreground="gray30", justify="left", wraplength=780, text=(
             "Stream Key는 YouTube API가 관리하는 재사용 스트림을 씁니다 (화면에 표시하지 않음). "
             "자동 교체는 이번 버전에서 PC 프로그램이 켜져 있을 때 동작합니다.")).pack(anchor="w", pady=(3, 0))
-        sr = ttk.Frame(f2); sr.pack(fill="x")
-        ttk.Label(sr, text="서버", width=11).pack(side="left")
-        self.rb_youtube = ttk.Radiobutton(sr, text="YouTube RTMPS 기본", variable=self.server_mode, value="youtube", command=self._sync_widgets)
+        # 서버 주소 — 초보자: 자동 (입력칸 없음) / 고급: 'YouTube 기본' 또는 '서버 주소 직접 입력(고급)'
+        self.server_auto = ttk.Frame(f2)
+        sa = ttk.Frame(self.server_auto); sa.pack(fill="x")
+        ttk.Label(sa, text="서버 주소", width=11).pack(side="left")
+        ttk.Label(sa, text="자동 사용 (YouTube 기본) — 따로 넣지 않아도 됩니다", font="PLS.Strong",
+                  foreground="darkgreen").pack(side="left")
+        ttk.Button(sa, text="이게 뭔가요?", command=self.show_server_help).pack(side="left", padx=(8, 0))
+        ttk.Label(self.server_auto, foreground="gray30", wraplength=780, justify="left", text=(
+            f"사용 주소: {DEFAULT_SERVER}\n(YouTube Studio에 보이는 {DEFAULT_SERVER_PLAIN} 와 같은 YouTube 서버입니다. "
+            "다른 주소가 필요하면 위의 '고급 모드'를 켜세요.)")).pack(anchor="w", padx=(4, 0))
+        self.server_adv = ttk.Frame(f2)
+        sr = ttk.Frame(self.server_adv); sr.pack(fill="x")
+        ttk.Label(sr, text="서버 주소", width=11).pack(side="left")
+        self.rb_youtube = ttk.Radiobutton(sr, text="YouTube 기본 서버 사용 (권장)", variable=self.server_mode, value="youtube",
+                                          command=self._sync_widgets)
         self.rb_youtube.pack(side="left")
-        self.rb_custom = ttk.Radiobutton(sr, text="직접 입력 (고급)", variable=self.server_mode, value="custom", command=self._sync_widgets)
+        self.rb_custom = ttk.Radiobutton(sr, text="서버 주소 직접 입력(고급)", variable=self.server_mode, value="custom",
+                                         command=self._sync_widgets)
         self.rb_custom.pack(side="left", padx=(10, 0))
-        cr = ttk.Frame(f2); cr.pack(fill="x", pady=(4, 0))
+        ttk.Button(sr, text="이게 뭔가요?", command=self.show_server_help).pack(side="left", padx=(8, 0))
+        self.custom_box = ttk.Frame(self.server_adv)
+        ttk.Label(self.custom_box, text="⚠ 여기에는 Stream Key가 아니라 서버 주소만 넣습니다.", foreground="firebrick",
+                  font="PLS.Section").pack(anchor="w", pady=(4, 2))
+        cr = ttk.Frame(self.custom_box); cr.pack(fill="x")
         ttk.Label(cr, text="", width=11).pack(side="left")
         self.ent_custom = ttk.Entry(cr, textvariable=self.custom_url)
         self.ent_custom.pack(side="left", fill="x", expand=True)
-        ttk.Label(f2, text=f"기본 주소: {YOUTUBE_RTMPS_INGEST}  (Live Control Room의 스트림 URL과 다르면 직접 입력)").pack(anchor="w", pady=(2, 0))
+        ttk.Label(self.custom_box, text=f"✓ 맞는 예: {SERVER_EXAMPLE_OK}", foreground="darkgreen").pack(anchor="w")
+        ttk.Label(self.custom_box, text=f"✗ 틀린 예: {SERVER_EXAMPLE_BAD}   ← 서버 주소 뒤에 Stream Key를 붙이지 마세요",
+                  foreground="firebrick").pack(anchor="w")
+        self.server_check_text = tk.StringVar()
+        self.lbl_server_check = ttk.Label(self.server_adv, textvariable=self.server_check_text, foreground="firebrick",
+                                          wraplength=780, justify="left")
+        self.lbl_server_check.pack(anchor="w")
+        self._server_anchor = ttk.Frame(f2)
+        self._server_anchor.pack(fill="x")
         kr = ttk.Frame(f2); kr.pack(fill="x", pady=(6, 0))
         ttk.Label(kr, text="Stream Key", width=11).pack(side="left")
         self.ent_key = ttk.Entry(kr, textvariable=self.key_var, show="●")
         self.ent_key.pack(side="left", fill="x", expand=True)
         self.btn_reveal = ttk.Button(kr, text="보기", width=6, command=self._toggle_reveal)
         self.btn_reveal.pack(side="left", padx=(5, 0))
+        ttk.Label(f2, text=f"여기에는 Stream Key만 넣습니다 (예: {KEY_EXAMPLE}). 서버 주소(rtmp://…)는 넣지 마세요. "
+                           "YouTube Studio → 라이브 스트리밍 → 'Stream Key'를 복사해 붙여넣으세요.",
+                  foreground="gray30", wraplength=780, justify="left").pack(anchor="w", padx=(4, 0))
         rr2 = ttk.Frame(f2); rr2.pack(fill="x", pady=(4, 0))
         self.chk_remember = ttk.Checkbutton(rr2, text="이 PC에 안전하게 기억 (Windows 암호화)", variable=self.remember, command=self._apply_remember)
         self.chk_remember.pack(side="left")
@@ -473,6 +518,9 @@ class LiveWindow(tk.Toplevel):
         self.btn_next_session = ttk.Button(self.next_frame, text="▶ 다음 세션 시작", command=self._next_session)
         self.btn_next_session.pack(anchor="w", pady=(4, 0))
 
+        from .live_ui_beginner import build_checklist_panel, build_metadata_panel
+        build_metadata_panel(self, root)  # 제목·설명·썸네일… 어디서 정하나요? + 채널별 방송 정보 자리 (추후 지원)
+        build_checklist_panel(self, root)  # 지금 설정하는 채널 준비 상태 (□ 6항목 → 시작 가능)
         ar = ttk.Frame(root); ar.pack(fill="x", pady=(10, 0))
         self.btn_check = ttk.Button(ar, text="송출 설정 검사", command=self._check)
         self.btn_check.pack(fill="x")
@@ -484,6 +532,11 @@ class LiveWindow(tk.Toplevel):
 
         f5 = ttk.LabelFrame(root, text="상태", padding=7)
         f5.pack(fill="x", pady=(8, 0))
+        # 전체 상태: 실행 중 채널 수 / 최대 / Cloud / 내 PC FFmpeg / 경고 + 상세 로그
+        self.overall_text = tk.StringVar()
+        ov = ttk.Frame(f5); ov.grid(row=100, column=0, columnspan=2, sticky="we", pady=(6, 0))
+        ttk.Label(ov, textvariable=self.overall_text, justify="left", wraplength=640, font="PLS.Strong").pack(side="left")
+        ttk.Button(ov, text="상세 로그 보기", command=self._show_details).pack(side="right")
         rows = (("state", "상태"), ("where", "실행 위치"), ("session", "방송 시간"), ("media", "현재 영상"),
                 ("playlist", "Playlist 회차"), ("session_time", "세션 시간"), ("session_left", "세션 종료까지"),
                 ("yt_broadcast", "YouTube Broadcast"), ("yt_next", "다음 세션"), ("yt_rollover", "다음 교체"),
@@ -647,6 +700,234 @@ class LiveWindow(tk.Toplevel):
             messagebox.showinfo("키 파일 권한", "변경했습니다. [다시 확인]을 눌러 주세요." if ok else "변경하지 못했습니다.", parent=self)
             self.btn_keyfix.pack_forget()
 
+    # ---------- 초보자 화면: 채널 카드 · 준비 체크리스트 · 빠른 시작 ----------
+    def channel_label_of(self, pid: str) -> str:
+        idx = self._channel_ids.index(pid) if pid in self._channel_ids else 0
+        return channel_label(idx, self.channel_name(pid), pid)
+
+    def channel_is_live(self, pid: str) -> bool:
+        ctl = self.clouds.get(pid)
+        if ctl is not None and ctl.cloud_live_active:
+            return True
+        return self.controller.active and self._local_channel == pid
+
+    def _key_saved(self, pid: str) -> bool:
+        """저장 여부만 (값을 복호화하지 않음)."""
+        prof = self.channels.get(pid)
+        if prof is None:
+            return False
+        store = self._default_store if prof.is_default else key_store_for(prof.key_store_id)
+        has = getattr(store, "has_saved", None)
+        try:
+            return bool(has()) if has else store.get() is not None
+        except Exception:
+            return False
+
+    def _channel_media(self, pid: str) -> tuple[int, bool | None, str]:
+        """(영상 수, LIVE READY 여부, 화면 문구). 지금 채널은 화면 값, 다른 채널은 기억해 둔 값."""
+        if pid == self.channel_id:
+            if self.playlist_mode:
+                items = self.playlist.items
+                n = len(items)
+                ready = None if not n or not self.playlist.analyzed else self.playlist_validation().ok
+                return n, ready, f"Playlist {n}개" if n else "선택 안 됨"
+            p = self.input_path.get()
+            ready = None if not p or self.ready_report is None else self.ready_report.ready
+            return (1, ready, f"영상 1개 · {Path(p).name}") if p else (0, None, "선택 안 됨")
+        st = self._channel_ui.get(pid)
+        if st is not None:
+            if st["source"] == "playlist":
+                reps = [r for _, r in st["items"]]
+                n = len(reps)
+                ready = None if not n or any(r is None for r in reps) else validate_playlist(reps).ok
+                return n, ready, f"Playlist {n}개" if n else "선택 안 됨"
+            ready = None if st["ready"] is None else st["ready"].ready
+            return (1, ready, f"영상 1개 · {Path(st['input']).name}") if st["input"] else (0, None, "선택 안 됨")
+        prof = self.channels.get(pid)
+        paths = list(prof.media_playlist) if prof else []
+        n = len(paths)
+        return n, None, ((f"Playlist {n}개" if n > 1 else f"영상 1개 · {Path(paths[0]).name}") + " (이 채널을 열면 확인)"
+                         if n else "선택 안 됨")
+
+    def channel_readiness(self, pid: str):
+        n, ready, _ = self._channel_media(pid)
+        current = pid == self.channel_id
+        prof = self.channels.get(pid)
+        if current:
+            key = self.key_var.get().strip()
+            key_present, api = bool(key), self.api_mode
+        else:
+            key, key_present = None, self._key_saved(pid)
+            api = bool(prof and (prof.stream_mode == CH_STREAM_API if not prof.is_default else
+                                 load_youtube_settings().get("stream_mode") == STREAM_MODE_API))
+        return channel_checklist(media_count=n, ready=ready, location_cloud=self.location.get() == LOC_CLOUD,
+                                 cloud_configured=getattr(self, "_cloud_cfg", load_cloud_profile() is not None),
+                                 key_present=key_present, server_mode=self.server_mode.get(), custom_url=self.custom_url.get(),
+                                 stream_key=key, api_mode=api, yt_connected=getattr(self, "_yt_ok", False) if current else True)
+
+    def card_info(self, pid: str) -> dict:
+        from .live_readiness import card_state, missing, summary_line
+        items = self.channel_readiness(pid)
+        ctl = self.clouds.get(pid)
+        live = self.channel_is_live(pid)
+        busy = bool(ctl is not None and ctl.busy) or (pid == self.channel_id and (self._yt_busy or self.converting))
+        local = self.controller.active and self._local_channel == pid
+        st = ctl.status if ctl is not None else None
+        failed = bool(st is not None and st.state == "FAILED") or (
+            pid == self.channel_id and self.controller.state is LiveState.FAILED)
+        seconds = self.controller.snapshot().session_seconds if local else (st.runtime_seconds if st and live else 0)
+        _, _, media_text = self._channel_media(pid)
+        key_ok = next(i for i in items if i.key == "key").ok
+        server = "자동 (YouTube 기본)" if self.server_mode.get() != "custom" else "직접 입력 (고급)"
+        where = "내 PC" if local or self.location.get() == LOC_LOCAL else "무료 Cloud"
+        return {"state": card_state(live=live, busy=busy, failed=failed, ready=not missing(items)),
+                "seconds": seconds,
+                "lines": [f"영상: {media_text}",
+                          f"Stream Key: {'저장됨 / 입력됨' if key_ok else '없음'}",
+                          f"서버 주소: {server}", f"실행 위치: {where}"],
+                "ready_text": summary_line(items), "ready_ok": not missing(items),
+                "can_start": not live and not busy, "can_stop": live and not busy}
+
+    def _update_beginner(self) -> None:
+        from .live_ui_beginner import update_cards, update_checklist
+        update_cards(self)
+        update_checklist(self)
+        lives = [p for p in self._channel_ids if self.channel_is_live(p)]
+        cs = self.cloud.status
+        cloud = ("설정 안 됨" if not getattr(self, "_cloud_cfg", False) else
+                 "연결 안 됨" if self._cloud_reachable is False else "연결됨" if cs is not None and cs.reachable else "확인 중")
+        warn = ""
+        if cs is not None and cs.last_error and cs.state in ("FAILED", "RECONNECT_WAIT"):
+            warn = " · ⚠ " + redact(cs.last_error, [self.key_var.get().strip()])[:120]
+        text = (f"실행 중 채널 {len(lives)} / 최대 {MAX_CONCURRENT_LIVE}"
+                + (f" ({', '.join(self.channel_name(p) for p in lives)})" if lives else "")
+                + f" · 무료 Cloud: {cloud} · 내 PC FFmpeg: {'실행 중' if self.controller.active else '없음'}" + warn)
+        if self.overall_text.get() != text:
+            self.overall_text.set(text)
+
+    def start_channel(self, pid: str) -> bool:
+        """채널 카드/간단 시작의 [▶ 시작]: 그 채널로 바꾸고, 부족한 것이 있으면 쉬운 말로 알려 주고, 아니면 시작."""
+        if pid != self.channel_id:
+            why = self._channel_switch_blocked()
+            if why:
+                messagebox.showinfo("채널 바꾸기", why, parent=self)
+                return False
+            self._switch_channel(pid)
+        label = self.channel_label_of(pid)
+        if self.channel_is_live(pid):
+            messagebox.showinfo("LIVE", f"{label}\n이미 송출 중입니다.", parent=self)
+            return False
+        from .live_readiness import missing
+        miss = missing(self.channel_readiness(pid))
+        if miss:
+            messagebox.showwarning("아직 시작할 수 없습니다", f"{label}\n\n부족한 것:\n" +
+                                   "\n".join(f"☐ {i.label} — {i.hint}" for i in miss), parent=self)
+            return False
+        self._start()
+        return bool(self.cloud.busy or self.controller.active or self.cloud.cloud_live_active or self._yt_busy)
+
+    def stop_channel(self, pid: str) -> None:
+        """채널별 중지: 다른 채널 LIVE는 건드리지 않는다."""
+        if pid == self.channel_id:
+            self._stop()
+            return
+        ctl = self.clouds.get(pid)
+        if ctl is None or not ctl.cloud_live_active or ctl.busy:
+            return
+        if self.confirm_stop.get() and not messagebox.askyesno(
+                "Cloud LIVE 종료", f"[{self.channel_label_of(pid)}] Cloud LIVE 송출을 종료할까요?\n(다른 채널 LIVE는 계속됩니다)",
+                parent=self):
+            return
+        ctl.stop_async()
+        if self._yt_channel == pid:
+            self._yt_end(complete=True)
+
+    def create_channel(self, name: str):
+        try:
+            prof = self.channels.add(name)
+        except (ChannelError, ValueError) as e:
+            messagebox.showwarning("채널 만들기", str(e), parent=self)
+            return None
+        self._refresh_channel_list()
+        messagebox.showinfo("채널 만들기", f"✓ '{name}' 채널을 만들었습니다.\n카드의 [이 채널 설정하기]를 누르고 영상과 Stream Key를 넣으세요.",
+                            parent=self)
+        return prof
+
+    def rename_channel(self, pid: str, name: str) -> bool:
+        prof = self.channels.get(pid)
+        if prof is None:
+            return False
+        old, prof.display_name = prof.display_name, name
+        try:
+            self.channels.save(prof)
+        except (ChannelError, ValueError) as e:
+            prof.display_name = old
+            messagebox.showwarning("채널 이름 바꾸기", str(e), parent=self)
+            return False
+        self._refresh_channel_list()
+        return True
+
+    def open_quick_start(self, letters: list[str]):
+        from .live_ui_beginner import QuickStartWizard, card_slots
+        slots = dict(zip("AB", card_slots(self)))
+        pids = [slots.get(x) for x in letters]
+        if None in pids:
+            messagebox.showinfo("간단 시작", "채널 B가 아직 없습니다. 위 채널 카드에서 [＋ 채널 B 만들기]를 먼저 누르세요.", parent=self)
+            return None
+        need = sum(1 for p in pids if not self.channel_is_live(p))
+        if need and self.live_count() + need > MAX_CONCURRENT_LIVE:
+            messagebox.showwarning("간단 시작", CONCURRENT_BUSY, parent=self)
+            return None
+        self.quick_wizard = QuickStartWizard(self, pids)
+        return self.quick_wizard
+
+    def scroll_to(self, widget) -> None:
+        try:
+            self.update_idletasks()
+            inner = self._root_frame
+            y = widget.winfo_rooty() - inner.winfo_rooty()
+            self._canvas.yview_moveto(max(0.0, (y - 20) / max(1, inner.winfo_height())))
+        except tk.TclError:
+            pass
+
+    def show_server_help(self):
+        from .live_ui_beginner import SERVER_HELP
+        messagebox.showinfo("서버 주소와 Stream Key — 이게 뭔가요?", SERVER_HELP, parent=self)
+
+    def _on_advanced(self):
+        adv = bool(self.advanced.get())
+        if not adv and self.server_mode.get() == "custom":
+            if self.custom_url.get().strip() and not messagebox.askyesno(
+                    "고급 모드 끄기", "직접 입력한 서버 주소 대신 YouTube 기본 서버를 사용할까요?", parent=self):
+                self.advanced.set(True)
+                return
+            self.server_mode.set("youtube")
+        try:
+            from .settings import update_settings
+            update_settings(**{ADVANCED_KEY: adv})
+        except OSError:
+            pass
+        self._sync_widgets()
+
+    def _sync_server_widgets(self):
+        adv = bool(self.advanced.get())
+        self.title_text.set(" 실시간 스트리밍 (고급 모드)" if adv else " 실시간 스트리밍 (초보자 모드)")
+        want, other = (self.server_adv, self.server_auto) if adv else (self.server_auto, self.server_adv)
+        if not want.winfo_manager():
+            other.pack_forget()
+            want.pack(fill="x", before=self._server_anchor)
+        custom = adv and self.server_mode.get() == "custom"
+        if custom and not self.custom_box.winfo_manager():
+            self.custom_box.pack(fill="x", before=self.lbl_server_check)
+        elif not custom and self.custom_box.winfo_manager():
+            self.custom_box.pack_forget()
+        text = ""
+        if custom:
+            sc = check_server_and_key("custom", self.custom_url.get(), self.key_var.get())
+            text = "\n".join([f"✗ {e}" for e in sc.errors] + [f"⚠ {x}" for x in sc.warnings])
+        if self.server_check_text.get() != text:
+            self.server_check_text.set(text)
+
     # ---------- 채널 (여러 채널 동시 Cloud LIVE) ----------
     def _controller_for(self, pid: str) -> CloudLiveController:
         ctl = self.clouds.get(pid)
@@ -672,11 +953,9 @@ class LiveWindow(tk.Toplevel):
             self._channel_ids = [p.channel_profile_id for p in profiles]
             self._channel_names = {p.channel_profile_id: p.display_name for p in profiles}
         labels = []
-        for pid in self._channel_ids:
-            ctl = self.clouds.get(pid)
-            live = ctl is not None and ctl.cloud_live_active
-            name = self._channel_names.get(pid, pid)
-            labels.append(f"{name}  ● LIVE" if live else name)
+        for i, pid in enumerate(self._channel_ids):
+            name = channel_label(i, self._channel_names.get(pid, pid), pid)  # 채널 A (기본) · 시니어 채널
+            labels.append(f"{name}  ● LIVE" if self.channel_is_live(pid) else name)
         if list(self.cmb_channel.cget("values") or ()) != labels:
             self.cmb_channel.configure(values=labels)
         if self.channel_id in self._channel_ids:
@@ -685,7 +964,7 @@ class LiveWindow(tk.Toplevel):
                 self.channel_var.set(label)
         multi = len(self._channel_ids) > 1
         self.cmb_channel.configure(state="readonly" if multi else "disabled")
-        title = f"① LIVE 영상 — {self.channel_name(self.channel_id)}" if multi else "① LIVE 영상"
+        title = f"① LIVE 영상 — {self.channel_label_of(self.channel_id)}" if multi else "① LIVE 영상"
         if self.f_video.cget("text") != title:
             self.f_video.configure(text=title)
 
@@ -1354,18 +1633,21 @@ class LiveWindow(tk.Toplevel):
                 pass
 
     def _update_yt_status(self):
-        if self._yt_connected():
+        self._cloud_cfg = load_cloud_profile() is not None  # 준비 체크리스트용 (3초마다 갱신, tick마다 파일을 읽지 않게)
+        self._yt_ok = self._yt_connected()
+        if self._yt_ok:
             self.yt_status.set(f"✓ 연결됨 · 채널: {self._yt_channel_title()}")
             self.lbl_yt.configure(foreground="darkgreen")
             self.btn_yt_setup.configure(text="다시 연결")
+            return
+        self.btn_yt_setup.configure(text="YouTube 연결")
+        self.lbl_yt.configure(foreground="gray30")
+        if not self.api_mode:  # Stream Key 방식: 연결 없이도 송출 가능하다는 것을 먼저 알려 준다
+            self.yt_status.set("○ 연결 안 됨 — " + YT_NOT_NEEDED.replace("\n", " "))
         elif self._legacy_youtube():
-            self.yt_status.set("○ 연결 안 됨 — 예약 LIVE / API 자동 세션에 필요합니다.")
-            self.lbl_yt.configure(foreground="gray30")
-            self.btn_yt_setup.configure(text="YouTube 연결")
+            self.yt_status.set("○ 연결 안 됨 — API 자동 세션·예약 LIVE에는 YouTube 연결이 필요합니다. [YouTube 연결]을 누르세요.")
         else:
             self.yt_status.set("○ 이 채널의 YouTube 연결이 없습니다 — [YouTube 연결]로 Google 계정을 연결하세요.")
-            self.lbl_yt.configure(foreground="gray30")
-            self.btn_yt_setup.configure(text="YouTube 연결")
 
     def _open_yt_wizard(self):
         if not self._legacy_youtube():  # 채널 Profile: 채널별 Google 연결은 [채널 관리]에서 (실제 채널 이름 확인)
@@ -1488,6 +1770,15 @@ class LiveWindow(tk.Toplevel):
             # 다른 채널 LIVE는 그대로 두고 이 채널만 시작하지 않는다 (서버 worker도 한 번 더 막는다)
             messagebox.showwarning("Cloud LIVE", CONCURRENT_BUSY, parent=self)
             return
+        if api_stream is None and not self.api_mode:
+            # 서버 주소 / Stream Key 혼동 검사 (값은 문구에 넣지 않는다)
+            sc = check_server_and_key(self.server_mode.get(), self.custom_url.get(), self.key_var.get())
+            if sc.errors:
+                messagebox.showerror("시작할 수 없습니다", "\n\n".join(sc.errors), parent=self)
+                return
+            if sc.warnings and not messagebox.askyesno(
+                    "확인해 주세요", "\n\n".join(sc.warnings) + "\n\n그래도 이대로 시작할까요?", parent=self):
+                return
         if api_stream is None and not self._scheduled_cloud_conflict_ok():
             return
         if self.api_mode and api_stream is None:
@@ -1546,6 +1837,7 @@ class LiveWindow(tk.Toplevel):
             self._yt_pending_golive = None
             messagebox.showwarning("LIVE 시작 불가", str(e), parent=self)
             return
+        self._local_channel = self.channel_id  # 내 PC LIVE가 어느 채널 것인지 (카드 표시/중지)
         if state is LiveState.FAILED:
             self._yt_pending_golive = None
             self._show_failed()
@@ -1635,6 +1927,7 @@ class LiveWindow(tk.Toplevel):
             self._drain_other_clouds()
             self._refresh_channel_list(reload=False)
             self._update_multi_live()
+            self._update_beginner()
             self._yt_status_ticks = getattr(self, "_yt_status_ticks", 0) + 1
             if self._yt_status_ticks % 6 == 0:  # 3초마다: 다른 창에서 연결/해제해도 바로 반영
                 self._update_yt_status()
@@ -1853,6 +2146,7 @@ class LiveWindow(tk.Toplevel):
             self.next_frame.pack_forget()
 
     def _sync_widgets(self):
+        self._sync_server_widgets()
         local_live = self.controller.active
         cloud_live = self.cloud.cloud_live_active
         locked = local_live or cloud_live or self.cloud.busy or self.converting
@@ -2019,5 +2313,10 @@ class LiveWindow(tk.Toplevel):
                 except tk.TclError:
                     pass
         self.key_var.set("")
+        wiz = getattr(self, "quick_wizard", None)
+        if wiz is not None:
+            wiz.destroy()  # 간단 시작 창의 Variable도 main thread에서 정리
         super().destroy()
         release_tk_variables(self)  # 이후 어느 스레드에서 GC가 돌아도 Tcl 호출이 없도록 (main thread에서 정리)
+        from .live_ui_beginner import release_card_variables
+        release_card_variables(self)

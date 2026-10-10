@@ -57,7 +57,7 @@ def test_youtube_connect_button_visible_in_both_modes(root, monkeypatch):
         assert w.yt_mode.get() == STREAM_MODE_MANUAL
         assert shown(w.btn_yt_setup) and w.btn_yt_setup.cget("text") == "YouTube 연결"
         assert "연결 안 됨" in w.yt_status.get() and shown(w.lbl_yt)
-        assert shown(w.cmb_channel) and w.channel_var.get() == "기본 채널"  # 채널 자리 (지금은 1채널)
+        assert shown(w.cmb_channel) and w.channel_var.get() == "채널 A (기본)"  # 초보자 문구: 기본 채널 → 채널 A (기본)
         w.yt_mode.set(STREAM_MODE_API)
         w._on_yt_mode()
         assert shown(w.btn_yt_setup) and shown(w.yt_frame)

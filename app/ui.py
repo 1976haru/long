@@ -138,6 +138,15 @@ class MainWindow(tk.Tk):
                 sched = tk.Label(ac, text="예약 LIVE", bg=bg, fg="#1d4fa8", cursor="hand2", font="PLS.Strong")
                 sched.pack(side="left")
                 sched.bind("<Button-1>", lambda e: (self._open_live_schedule(), "break")[1])
+                # 초보자 빠른 시작: 채널 A만 / 채널 B만 / 2채널 동시 → LIVE 창 + 간단 시작 마법사
+                qk = tk.Frame(card, bg=bg); qk.pack(fill="x", padx=10, pady=(0, 6), before=ac)
+                self.live_quick_links = []
+                for letters, text in ((["A"], self._quick_live_text("A")), (["B"], self._quick_live_text("B")),
+                                      (["A", "B"], "▶▶ 2채널 동시송출")):
+                    q = tk.Label(qk, text=text, bg=bg, fg="#1d4fa8", cursor="hand2")
+                    q.pack(side="left", padx=(0, 10))
+                    q.bind("<Button-1>", lambda e, x=letters: (self._live_quick(x), "break")[1])
+                    self.live_quick_links.append(q)
             if cmd:
                 for w in (card, hd, ft, hp, ac, *hd.winfo_children(), *ft.winfo_children(), *ac.winfo_children()):
                     if w.bind("<Button-1>"):
@@ -579,6 +588,24 @@ class MainWindow(tk.Tk):
         w=self._live_window()
         if w:w.deiconify();w.lift();w.focus_set();return
         self.live_win=LiveWindow(self,tools=self._live_tools)
+
+    @staticmethod
+    def _quick_live_text(letter: str) -> str:
+        """② 카드 빠른 시작 이름: 채널 이름이 있으면 '시니어 채널 시작', 없으면 '채널 A 시작'."""
+        try:
+            from .live_channels import LiveChannelStore
+            ids = [p for p in LiveChannelStore().all()]
+            prof = ids[0] if letter == "A" else next((p for p in ids if not p.is_default), None)
+            name = prof.display_name if prof is not None and prof.display_name != "기본 채널" else f"채널 {letter}"
+        except Exception:
+            name = f"채널 {letter}"
+        return f"▶ {name if len(name) <= 12 else name[:11] + '…'} 시작"
+
+    def _live_quick(self, letters):
+        """② 카드의 빠른 시작: LIVE 창을 열고 간단 시작 마법사를 띄운다 (송출은 마법사에서 사용자가 누를 때만)."""
+        self._open_live()
+        w = self._live_window()
+        return w.open_quick_start(list(letters)) if w is not None else None
 
     @staticmethod
     def _alive(w):
