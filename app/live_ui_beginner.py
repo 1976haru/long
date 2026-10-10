@@ -36,6 +36,16 @@ class ChannelCard:
         self.lbl_title = tk.Label(top, textvariable=self.title, bg=bg, font="PLS.Section", anchor="w")
         self.lbl_title.pack(side="left")
         self.lbl_now = tk.Label(top, text="◀ 지금 설정 중", bg=bg, fg="#1d4fa8", font="PLS.Strong")
+        self.cmb_secondary = None
+        self._secondary_ids: list[str] = []
+        if slot == 1:  # 두 번째 카드: 등록된 채널 중 '어느 채널을 보여 줄지' 선택 (채널 만들기와 별개)
+            self.secondary_var = tk.StringVar()
+            self.sec_row = tk.Frame(self.frame, bg=bg); self.sec_row.pack(fill="x", padx=10, pady=(2, 0))
+            self.cmb_secondary = ttk.Combobox(self.sec_row, textvariable=self.secondary_var, state="readonly", width=24)
+            self.cmb_secondary.pack(side="left")
+            self.cmb_secondary.bind("<<ComboboxSelected>>", lambda e: self._on_secondary())
+            self.btn_new = ttk.Button(self.sec_row, text="＋ 새 채널", command=self.create)
+            self.btn_new.pack(side="left", padx=(5, 0))
         self.lbl_state = tk.Label(self.frame, textvariable=self.state, bg=bg, font="PLS.Section", anchor="w")
         self.lbl_state.pack(fill="x", padx=10)
         self.lbl_lines = tk.Label(self.frame, textvariable=self.lines, bg=bg, justify="left", anchor="w")
@@ -52,7 +62,12 @@ class ChannelCard:
         self.btn_stop.pack(side="left", padx=(5, 0))
         self.btn_rename = ttk.Button(btns, text="이름 바꾸기", command=self.rename)
         self.btn_rename.pack(side="right")
-        self.btn_create = ttk.Button(self.frame, text="＋ 채널 B 만들기", style="Primary.TButton", command=self.create)
+        self.btn_create = ttk.Button(self.frame, text="＋ 두 번째 채널 만들기", style="Primary.TButton", command=self.create)
+
+    def _on_secondary(self):
+        i = self.cmb_secondary.current()
+        if 0 <= i < len(self._secondary_ids):
+            self.w.set_secondary(self._secondary_ids[i])  # 카드 표시만 바뀐다 (어떤 LIVE도 멈추지 않음)
 
     # actions
     def select(self):
@@ -85,7 +100,7 @@ class ChannelCard:
         self.w.rename_channel(self.pid, name.strip())
 
     def create(self):
-        name = simpledialog.askstring("채널 B 만들기", "두 번째 채널 이름을 입력하세요 (예: 일본 CHILI LAB)", parent=self.w)
+        name = simpledialog.askstring("새 채널 만들기", "채널 이름을 입력하세요 (예: 도쿄칠)", parent=self.w)
         if name and name.strip():
             self.w.create_channel(name.strip())
 
@@ -94,8 +109,18 @@ class ChannelCard:
         self.pid = pid
         for x in (self.lbl_state, self.lbl_lines, self.lbl_ready, self.btn_create):
             x.pack_forget()
+        if self.cmb_secondary is not None:
+            others = [p for p in self.w._channel_ids if p != DEFAULT_LIVE_PROFILE]
+            self._secondary_ids = others
+            self.cmb_secondary.configure(values=[self.w.channel_name(p) for p in others])
+            if pid in others:
+                self.cmb_secondary.current(others.index(pid))
+            if others:
+                self.sec_row.pack(fill="x", padx=10, pady=(2, 0))
+            else:
+                self.sec_row.pack_forget()
         if pid is None:
-            self.title.set(f"채널 {chr(ord('A') + self.slot)}")
+            self.title.set("두 번째 송출 채널" if self.slot == 1 else f"채널 {chr(ord('A') + self.slot)}")
             self.lbl_now.pack_forget()
             self.lbl_lines.pack(fill="x", padx=10)
             self.lines.set("아직 없습니다. 두 번째 YouTube 채널로도 송출하려면 만드세요.")
@@ -105,7 +130,7 @@ class ChannelCard:
             self.frame.configure(highlightbackground="#c4c4c4")
             return
         prof = self.w.channels.get(pid)
-        self.title.set(channel_label(index, prof.display_name if prof else "", pid))
+        self.title.set("두 번째 송출 채널" if self.slot == 1 else channel_label(index, prof.display_name if prof else "", pid))
         self.lbl_state.pack(fill="x", padx=10)
         self.lbl_lines.pack(fill="x", padx=10)
         self.lbl_ready.pack(fill="x", padx=10, pady=(2, 0))
@@ -134,7 +159,7 @@ class ChannelCard:
 
 
 def build_channel_cards(w, root) -> None:
-    box = ttk.LabelFrame(root, text="채널 (한 화면에서 채널 A · 채널 B를 함께 봅니다)", padding=6)
+    box = ttk.LabelFrame(root, text="채널 (채널 A와 두 번째 송출 채널을 한 화면에서 봅니다)", padding=6)
     box.pack(fill="x", pady=(0, 6))
     ttk.Label(box, text=MAX_TEXT + " 각 채널은 영상·Stream Key가 따로 저장됩니다.", foreground="gray30",
               wraplength=780, justify="left").pack(anchor="w")
@@ -142,7 +167,7 @@ def build_channel_cards(w, root) -> None:
     ttk.Label(quick, text="빠른 시작", font="PLS.Strong").pack(side="left", padx=(0, 6))
     w.btn_quick_a = ttk.Button(quick, text="▶ 채널 A만 시작", command=lambda: w.open_quick_start(["A"]))
     w.btn_quick_a.pack(side="left")
-    w.btn_quick_b = ttk.Button(quick, text="▶ 채널 B만 시작", command=lambda: w.open_quick_start(["B"]))
+    w.btn_quick_b = ttk.Button(quick, text="▶ 두 번째 채널만 시작", command=lambda: w.open_quick_start(["B"]))
     w.btn_quick_b.pack(side="left", padx=(5, 0))
     w.btn_quick_both = ttk.Button(quick, text="▶▶ 두 채널 동시 시작", style="Primary.TButton",
                                   command=lambda: w.open_quick_start(["A", "B"]))
@@ -169,10 +194,8 @@ def build_channel_cards(w, root) -> None:
 
 
 def card_slots(w) -> list:
-    """카드 2칸: A = 기본 채널, B = 그 다음 채널 (없으면 None)."""
-    ids = list(w._channel_ids)
-    others = [p for p in ids if p != DEFAULT_LIVE_PROFILE]
-    return [DEFAULT_LIVE_PROFILE, others[0] if others else None]
+    """카드 2칸: A = 기본 채널 (항상), 두 번째 = 사용자가 고른 채널 (저장된 선택, 없으면 첫 채널, 없으면 None)."""
+    return [DEFAULT_LIVE_PROFILE, w.secondary_profile_id()]
 
 
 def update_cards(w) -> None:
@@ -182,11 +205,13 @@ def update_cards(w) -> None:
         w._cards_sig = sig
         for card, pid in zip(w.channel_cards, slots):
             card.show(pid, w._channel_ids.index(pid) if pid in w._channel_ids else 1, pid == w.channel_id)
-        names = [w.channel_name(p) if p else None for p in slots]
-        w.btn_quick_a.configure(text=f"▶ {short(names[0], 'A')}만 시작")
-        w.btn_quick_b.configure(text=f"▶ {short(names[1], 'B')}만 시작" if names[1] else "▶ 채널 B만 시작",
+        a = short(w.channel_name(slots[0]), "A")
+        b = short(w.channel_name(slots[1]), "B") if slots[1] else None
+        w.btn_quick_a.configure(text=f"▶ {a}만 시작")
+        w.btn_quick_b.configure(text=f"▶ {b}만 시작" if b else "▶ 두 번째 채널만 시작",
                                 state="normal" if slots[1] else "disabled")
-        w.btn_quick_both.configure(state="normal" if slots[1] else "disabled")
+        w.btn_quick_both.configure(text=f"▶▶ {a} + {b} 동시 시작" if b else "▶▶ 두 채널 동시 시작",
+                                   state="normal" if slots[1] else "disabled")
     for card, pid in zip(w.channel_cards, slots):
         if pid:
             card.update(w.card_info(pid))

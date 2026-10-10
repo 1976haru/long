@@ -38,7 +38,12 @@ from .live_readiness import (
     DEFAULT_SERVER, DEFAULT_SERVER_PLAIN, KEY_EXAMPLE, MAX_TEXT, SERVER_EXAMPLE_BAD, SERVER_EXAMPLE_OK, YT_NOT_NEEDED,
     channel_checklist, channel_label, check_server_and_key,
 )
-from .live_ready_batch import SOURCE_KEPT, plan_bulk_conversion, run_bulk_live_ready, summary_lines
+from .live_ready_batch import (
+    SOURCE_KEPT, find_reusable_output, plan_bulk_conversion, plan_items, plan_target_spec, run_bulk_live_ready,
+    summary_lines,
+)
+
+ALREADY_READY_TEXT = ("이 영상은 이미 LIVE READY이며\n현재 Playlist와도 호환됩니다.\n다시 변환할 필요가 없습니다.")
 from .live_session import (
     ARCHIVE_SAFE_SECONDS, SESSION_ARCHIVE_SAFE, SESSION_CONTINUOUS, ManualSessionProvider, archive_notice,
     session_limit_seconds,
@@ -64,6 +69,7 @@ LOC_CLOUD, LOC_LOCAL = "cloud", "local"
 SEND_AUTO, SEND_TRANSCODE = "auto", "transcode"
 CONVERT_OWNER = "convert"
 ADVANCED_KEY = "live_advanced_mode"
+SECONDARY_KEY = "live_secondary_card_profile_id"
 
 
 def ask_cloud_close(parent, message: str) -> str:
@@ -163,6 +169,8 @@ class LiveWindow(tk.Toplevel):
         # 초보자 모드가 기본: 고급 모드(서버 주소 직접 입력 등)는 사용자가 켤 때만 (설정에 기억, 비밀 아님)
         from .settings import load_settings
         self.advanced = tk.BooleanVar(value=bool(load_settings().get(ADVANCED_KEY)))
+        sec = load_settings().get(SECONDARY_KEY)
+        self._secondary_sel = sec if isinstance(sec, str) else None  # 두 번째 카드에 보일 채널 ID (비밀 아님)
         self._local_channel: str | None = None  # 내 PC LIVE를 시작한 채널
         self.channel_live_text = tk.StringVar()
         self.bandwidth_text = tk.StringVar()
@@ -326,10 +334,13 @@ class LiveWindow(tk.Toplevel):
         self.ptree.pack(fill="x", pady=(4, 0))
         self.lbl_playlist = ttk.Label(self.playlist_frame, textvariable=self.playlist_summary, justify="left")
         self.lbl_playlist.pack(anchor="w", pady=(4, 0))
-        # 초보자: 경고만 보여주지 않고 [문제 영상 모두 LIVE READY로 만들기]로 바로 해결 (원본은 그대로)
+        # 초보자: 경고만 보여주지 않고 [문제 영상 N개 모두 자동 변환]으로 바로 해결 (원본은 그대로)
+        self.pl_counts = tk.StringVar()  # 총 8개 · ✓ 그대로 사용 5개 · ⚠ 변환 필요 3개
+        self.lbl_pl_counts = ttk.Label(self.playlist_frame, textvariable=self.pl_counts, font="PLS.Strong")
+        self.lbl_pl_counts.pack(anchor="w", pady=(4, 0))
         self.pl_ready_row = ttk.Frame(self.playlist_frame)
         self.pl_ready_row.pack(fill="x", pady=(4, 0))
-        self.btn_pl_fix_all = ttk.Button(self.pl_ready_row, text="문제 영상 모두 LIVE READY로 만들기",
+        self.btn_pl_fix_all = ttk.Button(self.pl_ready_row, text="문제 영상 모두 자동 변환",
                                          style="Primary.TButton", command=self._pl_make_ready_all)
         self.btn_pl_fix_sel = ttk.Button(self.pl_ready_row, text="선택 영상 LIVE READY로 만들기",
                                          command=self._pl_make_ready_selected)
@@ -780,11 +791,14 @@ class LiveWindow(tk.Toplevel):
         key_ok = next(i for i in items if i.key == "key").ok
         server = "자동 (YouTube 기본)" if self.server_mode.get() != "custom" else "직접 입력 (고급)"
         where = "내 PC" if local or self.location.get() == LOC_LOCAL else "무료 Cloud"
+        lines = [f"영상: {media_text}", f"Stream Key: {'저장됨 / 입력됨' if key_ok else '없음'}",
+                 f"서버 주소: {server}", f"실행 위치: {where}"]
+        prof = self.channels.get(pid)
+        if prof is not None and prof.is_default and prof.display_name == "기본 채널":
+            lines.append("↳ [이름 바꾸기]로 '시니어 채널'처럼 알아보기 쉬운 이름을 붙일 수 있습니다.")
         return {"state": card_state(live=live, busy=busy, failed=failed, ready=not missing(items)),
                 "seconds": seconds,
-                "lines": [f"영상: {media_text}",
-                          f"Stream Key: {'저장됨 / 입력됨' if key_ok else '없음'}",
-                          f"서버 주소: {server}", f"실행 위치: {where}"],
+                "lines": lines,
                 "ready_text": summary_line(items), "ready_ok": not missing(items),
                 "can_start": not live and not busy, "can_stop": live and not busy}
 
@@ -842,6 +856,26 @@ class LiveWindow(tk.Toplevel):
         if self._yt_channel == pid:
             self._yt_end(complete=True)
 
+    def secondary_profile_id(self) -> str | None:
+        """두 번째 카드에 보일 채널: 저장된 선택 → (지워졌으면) 첫 추가 채널 → 없으면 None."""
+        others = [p for p in self._channel_ids if p != DEFAULT_LIVE_PROFILE]
+        sel = self._secondary_sel
+        return sel if sel in others else (others[0] if others else None)
+
+    def set_secondary(self, pid: str) -> bool:
+        """두 번째 카드에 보일 채널만 바꾼다. 다른 채널의 Cloud LIVE · profile · Stream Key는 그대로."""
+        if pid not in self._channel_ids or pid == DEFAULT_LIVE_PROFILE:
+            return False
+        self._secondary_sel = pid
+        try:
+            from .settings import update_settings
+            update_settings(**{SECONDARY_KEY: pid})  # 프로필 ID만 저장 (비밀 아님)
+        except OSError:
+            pass
+        from .live_ui_beginner import update_cards
+        update_cards(self)
+        return True
+
     def create_channel(self, name: str):
         try:
             prof = self.channels.add(name)
@@ -849,6 +883,7 @@ class LiveWindow(tk.Toplevel):
             messagebox.showwarning("채널 만들기", str(e), parent=self)
             return None
         self._refresh_channel_list()
+        self.set_secondary(prof.channel_profile_id)  # 방금 만든 채널을 두 번째 카드에 보여 준다
         messagebox.showinfo("채널 만들기", f"✓ '{name}' 채널을 만들었습니다.\n카드의 [이 채널 설정하기]를 누르고 영상과 Stream Key를 넣으세요.",
                             parent=self)
         return prof
@@ -872,7 +907,8 @@ class LiveWindow(tk.Toplevel):
         slots = dict(zip("AB", card_slots(self)))
         pids = [slots.get(x) for x in letters]
         if None in pids:
-            messagebox.showinfo("간단 시작", "채널 B가 아직 없습니다. 위 채널 카드에서 [＋ 채널 B 만들기]를 먼저 누르세요.", parent=self)
+            messagebox.showinfo("간단 시작", "두 번째 채널이 아직 없습니다. 위 채널 카드에서 [＋ 두 번째 채널 만들기]를 먼저 누르세요.",
+                                parent=self)
             return None
         need = sum(1 for p in pids if not self.channel_is_live(p))
         if need and self.live_count() + need > MAX_CONCURRENT_LIVE:
@@ -1394,6 +1430,13 @@ class LiveWindow(tk.Toplevel):
         if i is None:
             messagebox.showinfo("LIVE READY", "변환할 영상을 표에서 선택하세요.", parent=self)
             return
+        reports = [it.report for it in self.playlist.items]
+        if reports[i] is None or any(r is None for r in reports):
+            messagebox.showinfo("LIVE READY", "영상 분석 중입니다. 잠시 후 다시 눌러 주세요.", parent=self)
+            return
+        if not plan_items(reports)[i].needs_conversion:  # 이미 LIVE READY + 현재 Playlist와 호환 → FFmpeg 실행 안 함
+            messagebox.showinfo("LIVE READY", ALREADY_READY_TEXT, parent=self)
+            return
         self._pl_make_ready([i])
 
     def _pl_make_ready(self, indices: list[int]) -> bool:
@@ -1414,14 +1457,24 @@ class LiveWindow(tk.Toplevel):
             return False
         self._convert_cancel.clear()
         self._bulk_expected = len(items)
+        self._bulk_names = [Path(p).name for _, p, _ in items]
+        self._bulk_done: list[str] = []
         self.pl_bar["value"] = 0
-        self.pl_progress.set(f"LIVE READY 변환 1 / {len(items)}\n{Path(items[0][1]).name}\n준비 중")
+        self.pl_progress.set(self._bulk_text(1, len(items), self._bulk_names[0], 0.0, "준비 중"))
         q, cancel = self._ui_q, self._convert_cancel  # 스레드에는 Tk 객체를 넘기지 않는다
+        # 이미 원본 옆에 유효한 변환본(같은 규격·같은 길이·원본보다 새것)이 있으면 다시 변환하지 않고 재사용
+        target = plan_target_spec([it.report for it in self.playlist.items])
+
+        def reuse(src, rep):
+            return find_reusable_output(src, rep, target, lambda p: analyze_live_ready(p, ffprobe))
+
+        def item_done(r):
+            q.put(("bulk_item", ("↺ " if r.reused else "✓ " if r.ok else "✗ ") + r.source.name))
 
         def work():
             try:
                 results, cancelled = run_bulk_live_ready(
-                    ffmpeg=ffmpeg, ffprobe=ffprobe, items=items, cancel=cancel,
+                    ffmpeg=ffmpeg, ffprobe=ffprobe, items=items, cancel=cancel, reuse=reuse, on_item=item_done,
                     progress=lambda k, n, name, f, t: q.put(("bulk_progress", k, n, name, f, t)))
                 q.put(("bulk_done", results, cancelled))
             except Exception as e:  # 예상 밖 오류도 UI가 멈추지 않게
@@ -1432,6 +1485,20 @@ class LiveWindow(tk.Toplevel):
         self._convert_thread.start()
         self._sync_widgets()
         return True
+
+    def _bulk_text(self, k: int, n: int, name: str, f: float, text: str) -> str:
+        """'왜 하나만 변환하나' 오해가 없도록: 전체 k/n · 현재 파일 · 완료 · 남음."""
+        names = getattr(self, "_bulk_names", [])
+        done = getattr(self, "_bulk_done", [])
+        rest = names[k:] if k <= len(names) else []
+        return "\n".join([
+            f"LIVE READY 자동 변환 {k} / {n}",
+            f"문제 영상 {n}개를 하나씩 자동 변환합니다. 한 파일이 끝나면 다음 파일이 자동으로 시작됩니다." if n > 1 else
+            "선택한 영상 1개를 변환합니다.",
+            f"현재: {name} · {f * 100:.0f}% · {text}",
+            "완료: " + (", ".join(done) if done else "-"),
+            "남음: " + (", ".join(rest) if rest else "없음"),
+        ])
 
     def _pl_bulk_done(self, results, cancelled: bool, error: str = ""):
         self.pl_progress.set("")
@@ -1491,9 +1558,13 @@ class LiveWindow(tk.Toplevel):
         for x in self.ptree.get_children():
             self.ptree.delete(x)
         v = self.playlist_validation() if self.playlist.items else None
+        plans = plan_items([i.report for i in self.playlist.items])
         for n, item in enumerate(self.playlist.items, 1):
             rep_ = item.report
-            status = (v.item_status[n - 1] if v and n - 1 < len(v.item_status) and v.item_status[n - 1] else "확인 중")
+            p = plans[n - 1]
+            vs = v.item_status[n - 1] if v and n - 1 < len(v.item_status) and v.item_status[n - 1] else ""
+            # 변환으로 맞출 수 없는 문제(예: 해상도 차이)는 검사 결과 문구를 그대로 보여 준다
+            status = vs if p.kind == "ok" and vs.startswith("✗") else p.status
             self.ptree.insert("", "end", values=(
                 n, item.name,
                 format_duration(rep_.duration) if rep_ else "-",
@@ -1503,6 +1574,12 @@ class LiveWindow(tk.Toplevel):
         if select is not None and self.ptree.get_children():
             self.ptree.selection_set(self.ptree.get_children()[select])
         n = len(self.playlist)
+        conv = sum(1 for p in plans if p.needs_conversion)
+        if n and self.playlist.analyzed:
+            self.pl_counts.set(f"총 {n}개 · ✓ 그대로 사용 {n - conv}개 · ⚠ 변환 필요 {conv}개")
+        else:
+            self.pl_counts.set(f"총 {n}개 · 영상 확인 중…" if n else "")
+        self.btn_pl_fix_all.configure(text=f"문제 영상 {conv}개 모두 자동 변환" if conv else "문제 영상 모두 자동 변환")
         if n == 0:
             text, color = "[영상 추가]로 LIVE READY MP4를 2개 이상 넣으세요.", "gray30"
         else:
@@ -1515,8 +1592,12 @@ class LiveWindow(tk.Toplevel):
                 color = "darkgreen"
             else:
                 lines += ["⚠ " + m for m in v.messages]
-                if self.pl_problem_indices():
-                    lines.append("→ [문제 영상 모두 LIVE READY로 만들기]를 누르면 자동으로 맞춥니다 (원본 파일은 그대로 보관).")
+                for p in plans:
+                    if p.kind == "match":  # LIVE READY지만 Playlist 규격만 다른 영상: 이유를 정확히
+                        lines.append(f"⚠ {p.index + 1}번 영상: LIVE READY이지만 Playlist 규격 맞춤 필요 — {p.reason}")
+                if conv:
+                    lines.append(f"→ [문제 영상 {conv}개 모두 자동 변환]을 누르면 하나씩 자동으로 맞춥니다 "
+                                 "(이미 준비된 영상은 다시 변환하지 않고, 원본 파일은 그대로 보관).")
                 color = "darkorange"
             text = "\n".join(lines)
         self.playlist_summary.set(text)
@@ -1975,7 +2056,9 @@ class LiveWindow(tk.Toplevel):
             elif kind == "bulk_progress":
                 _, k, n, name, f, text = ev
                 self.pl_bar["value"] = f * 100
-                self.pl_progress.set(f"LIVE READY 변환 {k} / {n}\n{name}\n진행률 {f * 100:.0f}% · {text}")
+                self.pl_progress.set(self._bulk_text(k, n, name, f, text))
+            elif kind == "bulk_item":
+                self._bulk_done = getattr(self, "_bulk_done", []) + [ev[1]]
             elif kind == "bulk_done":
                 self._pl_bulk_done(ev[1], ev[2], ev[3] if len(ev) > 3 else "")
             elif kind == "convert_progress":

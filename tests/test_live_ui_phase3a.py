@@ -106,7 +106,7 @@ def test_playlist_mode_table_summary_and_reorder(root, tmp_path):
     paths = fill_playlist(w, tmp_path)
     rows = [w.ptree.item(x, "values") for x in w.ptree.get_children()]
     assert [r[1] for r in rows] == [p.name for p in paths]
-    assert rows[0][2] == "00:10:00" and rows[0][3] == "1920×1080" and rows[0][5] == "✓ LIVE READY"
+    assert rows[0][2] == "00:10:00" and rows[0][3] == "1920×1080" and rows[0][5] == "✓ LIVE READY · 변환 안 함"
     s = w.playlist_summary.get()
     assert "총 3개" in s and "총 재생시간 00:30:00" in s and "✓ 모두 LIVE READY" in s and "✓ DIRECT COPY Playlist 가능" in s
     assert w.effective_mode() == MODE_COPY
@@ -129,7 +129,7 @@ def test_playlist_incompatible_message(root, tmp_path):
     s = w.playlist_summary.get()
     assert "2번 영상의 FPS가 29.97fps" in s and "LIVE READY 파일 만들기" in s
     status = [w.ptree.item(x, "values")[5] for x in w.ptree.get_children()]
-    assert status[0] == "✓ LIVE READY" and status[1].startswith("✗")
+    assert status[0] == "✓ LIVE READY · 변환 안 함" and status[1].startswith(("✗", "⚠"))
     w.destroy()
 
 

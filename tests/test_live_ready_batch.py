@@ -147,7 +147,7 @@ def test_live_window_bulk_converts_5s_keyframe_playlist_and_replaces(root, tmp_p
         w._refresh_playlist()
         w._sync_widgets()
         root.update()
-        assert "Keyframe 간격 5초" in w.playlist_summary.get() and "문제 영상 모두 LIVE READY로 만들기" in w.playlist_summary.get()
+        assert "Keyframe 간격 5초" in w.playlist_summary.get() and "문제 영상 2개 모두 자동 변환" in w.playlist_summary.get()
         assert w.btn_pl_fix_all.winfo_ismapped() and w.pl_problem_indices() == [0, 1]
         w._pl_make_ready_all()
         assert w.converting

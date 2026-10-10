@@ -594,11 +594,16 @@ class MainWindow(tk.Tk):
         """② 카드 빠른 시작 이름: 채널 이름이 있으면 '시니어 채널 시작', 없으면 '채널 A 시작'."""
         try:
             from .live_channels import LiveChannelStore
+            from .settings import load_settings
             ids = [p for p in LiveChannelStore().all()]
-            prof = ids[0] if letter == "A" else next((p for p in ids if not p.is_default), None)
-            name = prof.display_name if prof is not None and prof.display_name != "기본 채널" else f"채널 {letter}"
+            others = [p for p in ids if not p.is_default]
+            sel = load_settings().get("live_secondary_card_profile_id")  # LIVE 창 두 번째 카드에서 고른 채널
+            prof = ids[0] if letter == "A" else next((p for p in others if p.channel_profile_id == sel),
+                                                    others[0] if others else None)
+            name = prof.display_name if prof is not None and prof.display_name != "기본 채널" else (
+                "채널 A" if letter == "A" else "두 번째 채널")
         except Exception:
-            name = f"채널 {letter}"
+            name = "채널 A" if letter == "A" else "두 번째 채널"
         return f"▶ {name if len(name) <= 12 else name[:11] + '…'} 시작"
 
     def _live_quick(self, letters):

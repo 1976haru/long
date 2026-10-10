@@ -41,8 +41,9 @@ def test_server_and_key_confusion_checks():
 
 def test_labels_checklist_and_states():
     assert channel_label(0, "기본 채널", "default") == "채널 A (기본)"
-    assert channel_label(0, "시니어 채널", "default") == "채널 A (기본) · 시니어 채널"
-    assert channel_label(1, "일본 CHILI LAB", "chili") == "채널 B · 일본 CHILI LAB"
+    assert channel_label(0, "시니어 채널", "default") == "시니어 채널 (채널 A)"  # v1.1: 실제 이름 우선
+    assert channel_label(1, "일본 CHILI LAB", "chili") == "일본 CHILI LAB"
+    assert channel_label(2, "", "x") == "채널 C"
     base = dict(media_count=0, ready=None, location_cloud=True, cloud_configured=False, key_present=False,
                 server_mode="youtube", custom_url="", stream_key="", api_mode=False, yt_connected=False)
     items = channel_checklist(**base)
@@ -208,7 +209,7 @@ def test_channel_cards_show_a_and_b(root, shown_boxes, monkeypatch):
     try:
         w._tick()
         a, b = w.channel_cards
-        assert a.title.get() == "채널 A (기본) · 시니어 채널" and a.state.get().startswith("● 미설정")
+        assert a.title.get() == "시니어 채널 (채널 A)" and a.state.get().startswith("● 미설정")
         assert "Stream Key: 없음" in a.lines.get() and "서버 주소: 자동 (YouTube 기본)" in a.lines.get()
         assert "실행 위치: 무료 Cloud" in a.lines.get() and "부족" in a.ready.get()
         assert b.pid is None and shown(b.btn_create) and str(b.btn_start.cget("state")) == "disabled"
@@ -217,14 +218,15 @@ def test_channel_cards_show_a_and_b(root, shown_boxes, monkeypatch):
         monkeypatch.setattr(lub.simpledialog, "askstring", lambda *a, **k: "일본 CHILI LAB")
         b.create()
         w._tick()
-        assert b.pid is not None and b.title.get() == "채널 B · 일본 CHILI LAB" and not shown(b.btn_create)
+        assert b.pid is not None and b.title.get() == "두 번째 송출 채널" and not shown(b.btn_create)
+        assert b.secondary_var.get() == "일본 CHILI LAB"  # 두 번째 카드는 고른 채널 이름을 보여 줌
         assert "일본 CHILI LAB만 시작" in w.btn_quick_b.cget("text") and str(w.btn_quick_both.cget("state")) == "normal"
-        assert "채널 A (기본) · 시니어 채널" in w.cmb_channel.cget("values")
+        assert "시니어 채널 (채널 A)" in w.cmb_channel.cget("values")
         # 카드 [이 채널 설정하기] → 지금 설정하는 채널이 바뀜
         b.select()
         w._tick()
         assert w.channel_id == b.pid and shown(b.lbl_now) and not shown(a.lbl_now)
-        assert "채널 B · 일본 CHILI LAB" in w.check_title.get() and len(w.check_vars) == 6
+        assert "일본 CHILI LAB" in w.check_title.get() and len(w.check_vars) == 6
     finally:
         w.destroy()
 

@@ -43,10 +43,11 @@ def channel_letter(index: int) -> str:
 
 
 def channel_label(index: int, display_name: str, profile_id: str) -> str:
-    """'채널 A (기본)' / '채널 A (기본) · 시니어 채널' / '채널 B · 일본 CHILI LAB'."""
-    head = f"채널 {channel_letter(index)}" + (" (기본)" if profile_id == DEFAULT_LIVE_PROFILE else "")
+    """실제 이름 우선: '시니어 채널 (채널 A)' / 이름이 없으면 '채널 A (기본)' · 그 외 채널은 이름 그대로 ('도쿄칠')."""
     name = (display_name or "").strip()
-    return head if not name or name == "기본 채널" else f"{head} · {name}"
+    if profile_id == DEFAULT_LIVE_PROFILE:
+        return "채널 A (기본)" if not name or name == "기본 채널" else f"{name} (채널 A)"
+    return name or f"채널 {channel_letter(index)}"
 
 
 @dataclass
