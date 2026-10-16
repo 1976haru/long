@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.cloud_client import CloudLiveController, CloudStatus
+from app.cloud_client import ChannelLive, CloudLiveController, CloudLiveOverview, CloudStatus
 from app.cloud_model import CONCURRENT_BUSY
 from app.live_channels import LiveChannelStore, key_store_for
 from app.live_secrets import SessionStreamKeyStore
@@ -123,6 +123,8 @@ def test_independent_stop_and_third_channel_blocked(root, quiet):
         assert any("● LIVE" in v for v in w.cmb_channel.cget("values"))
         # 세 번째 채널: 시작 거부 (다른 채널은 그대로)
         pick(w, "third")
+        fresh = CloudLiveOverview(slots_used=2, lives=[ChannelLive("senior", live=True), ChannelLive("chili", live=True)])
+        w._overview_async = lambda **kw: w._finish_start_gate(fresh) or True
         w._start()
         assert ("showwarning", ("Cloud LIVE", CONCURRENT_BUSY)) in [(n, a[:2]) for n, a in quiet]
         assert not any(c[0] == "start" for c in ctls["third"].calls if isinstance(c, tuple))

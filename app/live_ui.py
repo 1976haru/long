@@ -11,6 +11,7 @@ from __future__ import annotations
 import queue
 import secrets as pysecrets
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -42,6 +43,8 @@ from .live_ready_batch import (
     SOURCE_KEPT, find_reusable_output, plan_bulk_conversion, plan_items, plan_target_spec, run_bulk_live_ready,
     summary_lines,
 )
+
+OVERVIEW_INTERVAL_SECONDS = 12.0
 
 ALREADY_READY_TEXT = ("이 영상은 이미 LIVE READY이며\n현재 Playlist와도 호환됩니다.\n다시 변환할 필요가 없습니다.")
 from .live_session import (
@@ -136,6 +139,20 @@ def default_cloud_client() -> CloudClient:
         raise CloudConfigError("무료 Cloud가 아직 설정되지 않았습니다. [처음 설정 도우미]를 진행하세요.")
     return CloudClient(profile.validated())
 
+
+def cloud_start_decision(overview, profile_id: str) -> str:
+    """fresh 서버 상태만으로 시작 gate를 판단한다. None은 worker 최종 guard로 넘긴다."""
+    if overview is None:
+        return "start"
+    if overview.is_live(profile_id):
+        return "sync"
+    return "busy" if overview.live_count >= MAX_CONCURRENT_LIVE else "start"
+
+
+def cloud_runtime_text(status: CloudStatus | None) -> str:
+    """종료된 지난 세션 runtime을 현재 방송 시간처럼 표시하지 않는다."""
+    return format_duration(status.runtime_seconds) if status and status.live and status.runtime_seconds else "-"
+
 # 주의: 백그라운드 스레드의 함수는 Tk 객체(self, 위젯, StringVar)를 참조하면 안 된다.
 # 스레드가 Tk 창의 마지막 참조를 놓으면 tkinter Variable이 다른 스레드에서 해제되어
 # "main thread is not in main loop" 오류로 Tk 상태가 깨진다. 큐/일반 값만 넘긴다.
@@ -165,6 +182,13 @@ class LiveWindow(tk.Toplevel):
         self._channel_ui: dict[str, dict] = {}  # 채널별 화면 상태 (영상/Playlist) — 메모리
         self._channel_ids: list[str] = []
         self._overview = None  # 서버 전체 채널 송출 상태 (worker v4)
+        self._overview_busy = False
+        self._overview_last_success = 0.0
+        self._overview_last_request = 0.0
+        self._overview_refresh_pending = False
+        self._start_gate_busy = False
+        self._start_gate_pending = False
+        self._start_gate_continue = None
         self._yt_channel: str | None = None  # YouTube 자동 세션(API)을 쓰는 채널 (한 번에 1채널)
         self.channel_var = tk.StringVar(value="채널 A (기본)")
         # 초보자 모드가 기본: 고급 모드(서버 주소 직접 입력 등)는 사용자가 켤 때만 (설정에 기억, 비밀 아님)
@@ -213,6 +237,7 @@ class LiveWindow(tk.Toplevel):
         self.ready_text = tk.StringVar()
         self.location = tk.StringVar(value=LOC_CLOUD)
         self.cloud_line = tk.StringVar()
+        self.cloud_actual_text = tk.StringVar(value="Cloud 실제 상태: 확인 중...")
         self.send_mode = tk.StringVar(value=SEND_AUTO)
         self.send_note = tk.StringVar()
         self.server_mode = tk.StringVar(value="youtube")
@@ -371,6 +396,7 @@ class LiveWindow(tk.Toplevel):
         ttk.Label(cl, text="무료 Cloud 상태", width=14).pack(side="left")
         self.lbl_cloud = ttk.Label(cl, textvariable=self.cloud_line, justify="left")
         self.lbl_cloud.pack(side="left")
+        ttk.Label(f0, textvariable=self.cloud_actual_text, font="PLS.Strong").pack(anchor="w", pady=(4, 0))
         cb = ttk.Frame(f0); cb.pack(fill="x", pady=(4, 0))
         self.btn_wizard = ttk.Button(cb, text="처음 설정 도우미", command=self._open_wizard)
         self.btn_wizard.pack(side="left")
@@ -672,6 +698,7 @@ class LiveWindow(tk.Toplevel):
         self.cloud.client = None
         self._cloud_msg = "확인 중..."
         self.cloud.check_async()
+        self._overview_async(force=True)
         self._update_cloud_line()
 
     def _cloud_upload(self):
@@ -783,7 +810,8 @@ class LiveWindow(tk.Toplevel):
         items = self.channel_readiness(pid)
         ctl = self.clouds.get(pid)
         live = self.channel_is_live(pid)
-        busy = bool(ctl is not None and ctl.busy) or (pid == self.channel_id and (self._yt_busy or self.converting))
+        busy = bool(ctl is not None and ctl.busy) or (
+            pid == self.channel_id and (self._yt_busy or self.converting or self._start_gate_busy))
         local = self.controller.active and self._local_channel == pid
         st = ctl.status if ctl is not None else None
         failed = bool(st is not None and st.state == "FAILED") or (
@@ -1161,12 +1189,20 @@ class LiveWindow(tk.Toplevel):
         return out
 
     def live_count(self) -> int:
-        """서버 전체 송출 수 (알고 있는 값 중 큰 값: 이 PC의 채널 상태 / 서버 slot 수)."""
+        """화면 표시용 추정치. 시작 가능 여부 판단에는 절대 사용하지 않는다."""
         mine = len(self.live_channels())
         ov = self._overview
         return max(mine, ov.live_count if ov is not None else 0)
 
-    def _overview_async(self):
+    def _overview_async(self, *, force: bool = False):
+        """서버 전체 상태를 한 번에 하나만 조회한다. Tk 객체는 worker에서 만지지 않는다."""
+        if self._overview_busy:
+            if force:
+                self._overview_refresh_pending = True
+            return False
+        self._overview_busy = True
+        self._overview_last_request = time.monotonic()
+        self.cloud_actual_text.set("Cloud 실제 상태: 확인 중...")
         q = self._ui_q
 
         def work():
@@ -1175,17 +1211,57 @@ class LiveWindow(tk.Toplevel):
             except Exception:  # worker v3 이하 / 연결 실패: 화면 표시만 생략
                 q.put(("overview", None))
         threading.Thread(target=work, name="cloud-overview", daemon=True).start()
+        return True
+
+    def _begin_start_gate(self, continuation) -> None:
+        """Cloud 시작 직전 fresh overview를 요청한다. 실패하면 worker의 최종 guard로 진행한다."""
+        if self._start_gate_busy:
+            return
+        self._start_gate_busy = True
+        self._start_gate_pending = True
+        self._start_gate_continue = continuation
+        self._overview_async(force=True)
+        self._sync_widgets()
+
+    def _finish_start_gate(self, ov) -> None:
+        continuation = self._start_gate_continue
+        self._start_gate_pending = False
+        self._start_gate_continue = None
+        self._start_gate_busy = False
+        self._sync_widgets()
+        if self._closing or getattr(self, "_destroyed", False):
+            return
+        decision = cloud_start_decision(ov, self.channel_id)
+        if decision == "sync":
+            self._yt_pending_golive = None
+            self._apply_overview(ov)
+            ctl = self._controller_for(self.channel_id)
+            if not ctl.busy:
+                ctl.check_async()
+            ctl.start_polling()
+            messagebox.showinfo("Cloud LIVE", "이 채널은 Cloud에서 이미 송출 중입니다.", parent=self)
+            return
+        if decision == "busy":
+            self._yt_pending_golive = None
+            messagebox.showwarning("Cloud LIVE", CONCURRENT_BUSY, parent=self)
+            return
+        if continuation is not None:
+            continuation()
 
     def _apply_overview(self, ov) -> None:
         self._overview = ov
         if ov is None:
             return
+        self._overview_last_success = time.monotonic()
         for c in ov.lives:  # PC를 다시 켰을 때: Cloud에서 송출 중인 다른 채널도 상태 확인 시작
             if c.live and self.channels.get(c.profile_id) is not None:
                 ctl = self._controller_for(c.profile_id)
                 if ctl.status is None and not ctl.busy:
                     ctl.check_async()
                 ctl.start_polling()
+        used = ov.live_count
+        detail = "시작 가능" if used == 0 else "한 채널 사용 중" if used == 1 else "최대 사용 중"
+        self.cloud_actual_text.set(f"Cloud 실제 상태: {used} / {ov.max_concurrent} 채널 사용 중 · {detail}")
 
     def _update_multi_live(self) -> None:
         lives = self.live_channels()
@@ -1237,6 +1313,8 @@ class LiveWindow(tk.Toplevel):
                                          parent=self)
                 elif ok and name == "start":
                     messagebox.showinfo("Cloud LIVE", f"● [{who}] CLOUD LIVE 시작", parent=self)
+                if ok and name in ("start", "stop"):
+                    self._overview_async(force=True)
 
     def _update_cloud_line(self):
         if load_cloud_profile() is None:
@@ -1871,12 +1949,8 @@ class LiveWindow(tk.Toplevel):
             "같은 YouTube 송출 스트림(Stream Key)으로 지금 직접 송출하면\n예약 방송이 예약 시각보다 일찍 LIVE로 바뀔 수 있습니다.\n\n"
             "그래도 지금 LIVE를 시작할까요?", parent=self)
 
-    def _start(self, api_stream: tuple | None = None):
+    def _start(self, api_stream: tuple | None = None, *, fresh_cloud_checked: bool = False):
         if self.busy_any or self.cloud.cloud_live_active or self._yt_busy:
-            return
-        if self.location.get() == LOC_CLOUD and api_stream is None and self.live_count() >= MAX_CONCURRENT_LIVE:
-            # 다른 채널 LIVE는 그대로 두고 이 채널만 시작하지 않는다 (서버 worker도 한 번 더 막는다)
-            messagebox.showwarning("Cloud LIVE", CONCURRENT_BUSY, parent=self)
             return
         if api_stream is None and not self.api_mode:
             # 서버 주소 / Stream Key 혼동 검사 (값은 문구에 넣지 않는다)
@@ -1887,7 +1961,7 @@ class LiveWindow(tk.Toplevel):
             if sc.warnings and not messagebox.askyesno(
                     "확인해 주세요", "\n\n".join(sc.warnings) + "\n\n그래도 이대로 시작할까요?", parent=self):
                 return
-        if api_stream is None and not self._scheduled_cloud_conflict_ok():
+        if api_stream is None and not fresh_cloud_checked and not self._scheduled_cloud_conflict_ok():
             return
         if self.api_mode and api_stream is None:
             # 분석 확인 먼저 (API 호출 전에)
@@ -1905,6 +1979,9 @@ class LiveWindow(tk.Toplevel):
             self.ready_report is None and self.effective_mode() == MODE_COPY and self.input_path.get())
         if analyzing:
             messagebox.showinfo("LIVE READY", "영상 분석 중입니다. 잠시 후 다시 눌러 주세요.", parent=self)
+            return
+        if self.location.get() == LOC_CLOUD and not fresh_cloud_checked:
+            self._begin_start_gate(lambda: self._start(api_stream=api_stream, fresh_cloud_checked=True))
             return
         api_ingest = api_key = None
         if api_stream is not None:
@@ -2033,6 +2110,9 @@ class LiveWindow(tk.Toplevel):
             self._drain_ui()
             self._drain_cloud()
             self._drain_other_clouds()
+            if (load_cloud_profile() is not None and not self._overview_busy
+                    and time.monotonic() - self._overview_last_request >= OVERVIEW_INTERVAL_SECONDS):
+                self._overview_async()
             self._refresh_channel_list(reload=False)
             self._update_multi_live()
             self._update_beginner()
@@ -2054,7 +2134,16 @@ class LiveWindow(tk.Toplevel):
             if kind == "ready" and ev[1] == self._analyze_token:
                 self._apply_ready(ev[2])
             elif kind == "overview":
-                self._apply_overview(ev[1])
+                ov = ev[1]
+                self._overview_busy = False
+                self._apply_overview(ov)
+                if ov is None and not self._start_gate_pending:
+                    self.cloud_actual_text.set("Cloud 실제 상태: 확인하지 못했습니다 · 다시 확인해 주세요.")
+                if self._start_gate_pending:
+                    self._finish_start_gate(ov)
+                if self._overview_refresh_pending:
+                    self._overview_refresh_pending = False
+                    self._overview_async(force=True)
             elif kind == "yt_stream":
                 self._yt_busy = False
                 ok, payload = ev[1], ev[2]
@@ -2152,6 +2241,8 @@ class LiveWindow(tk.Toplevel):
                         self._begin_golive()
                     elif name == "start" and not self._closing:
                         messagebox.showinfo("Cloud LIVE", "● CLOUD LIVE 시작\n\n이제 PC 프로그램을 종료해도 Cloud에서 방송이 계속됩니다.", parent=self)
+                    if name in ("start", "stop"):
+                        self._overview_async(force=True)
                 else:
                     msg = redact(str(payload), [self.key_var.get().strip()])
                     if name == "start":
@@ -2177,13 +2268,13 @@ class LiveWindow(tk.Toplevel):
             st["state"].set(label)
             self.lbl_state.configure(foreground="red" if live else ("darkorange" if self.cloud.busy else ""))
             st["where"].set("무료 Cloud")
-            st["session"].set(format_duration(cs.runtime_seconds) if cs and cs.runtime_seconds else "-")
+            st["session"].set(cloud_runtime_text(cs))
             if cs and cs.playlist_count > 1 and cs.current_playlist_index is not None:
                 st["media"].set(f"{cs.current_playlist_index + 1}/{cs.playlist_count} {cs.media}")
             else:
                 st["media"].set(cs.media if cs and cs.media else "-")
             st["playlist"].set(f"{cs.playlist_round}회" if cs and cs.playlist_round else "-")
-            self._set_session_rows(cs.runtime_seconds if cs else 0.0, cs.session_limit if cs else None,
+            self._set_session_rows(cs.runtime_seconds if cs and live else 0.0, cs.session_limit if cs else None,
                                    cs.session_remaining if cs and live else None)
             st["mode"].set(cs.mode if cs and cs.mode else "DIRECT COPY")
             st["fps"].set(f"{cs.fps:.1f}" if cs and cs.fps is not None else "-")
@@ -2262,7 +2353,7 @@ class LiveWindow(tk.Toplevel):
         self._sync_server_widgets()
         local_live = self.controller.active
         cloud_live = self.cloud.cloud_live_active
-        locked = local_live or cloud_live or self.cloud.busy or self.converting
+        locked = local_live or cloud_live or self.cloud.busy or self.converting or self._start_gate_busy
         normal = "disabled" if locked else "normal"
         for w in (self.btn_video, self.btn_reveal, self.rb_youtube, self.rb_custom, self.btn_check,
                   self.btn_start, self.chk_reconnect, self.chk_awake, self.rb_cloud, self.rb_local,

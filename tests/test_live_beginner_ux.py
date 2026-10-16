@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.cloud_client import CloudLiveController, CloudStatus
+from app.cloud_client import ChannelLive, CloudLiveController, CloudLiveOverview, CloudStatus
 from app.cloud_model import CONCURRENT_BUSY
 from app.live_channels import LiveChannelStore
 from app.live_readiness import (
@@ -259,6 +259,8 @@ def test_start_a_b_both_third_blocked_and_independent_stop(root, shown_boxes, tm
         w._start = w._start_real
         w._switch_channel("third")
         make_ready(w, tmp_path, KEY_C, "c_LIVE_READY.mp4")
+        fresh = CloudLiveOverview(slots_used=2, lives=[ChannelLive("default", live=True), ChannelLive("chili", live=True)])
+        w._overview_async = lambda **kw: w._finish_start_gate(fresh) or True
         w.start_channel("third")
         assert ("showwarning", "Cloud LIVE", CONCURRENT_BUSY) in shown_boxes and not w.channel_is_live("third")
         # 채널 A 중지 (지금 보는 채널이 아님) → B 유지
