@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tools
-        run: python -m pip install --upgrade pip pyinstaller pytest
+        run: python -m pip install --upgrade pip pyinstaller pytest tzdata
 
       - name: Run tests
         run: python -m pytest -q
