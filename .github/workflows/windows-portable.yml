@@ -2,7 +2,7 @@ name: Build Windows Portable
 
 on:
   push:
-    branches: [main]
+    branches: [main, build/friend-portable-20261102]
     paths:
       - "main.py"
       - "app/**"
