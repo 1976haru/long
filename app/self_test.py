@@ -99,7 +99,84 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
             ok("japanese_assistant", jp.winfo_exists(), jp.title())
         except Exception as e:  # 한 화면 오류로 결과 JSON이 안 남는 일이 없게
             ok("live_steps", False, repr(e)[:300])
+        app.after(step_ms, s_bg)
+
+    bg_state: dict[str, object] = {}
+
+    def s_bg():
+        """④ 배경 만들기: 임시 폴더에 FFmpeg 시험 클립 2개 → 분석 → 3분 제작 → 검증 → 임시 폴더 삭제 (원본/설정 무관)."""
+        import shutil
+        import subprocess
+        import tempfile
+        try:
+            w = app._open_bg()
+            ok("bg_window", w.winfo_exists() and hasattr(w, "btn_start"), w.title())
+            if not (app.ffmpeg and app.ffprobe):
+                ok("bg_build", True, "SKIP: FFmpeg 없음")
+                app.after(step_ms, s6)
+                return
+            tmp = Path(tempfile.mkdtemp(prefix="plvm_selftest_bg_"))
+            bg_state["tmp"] = tmp
+            clips = []
+            for name, src in (("a.mp4", "testsrc2=s=320x180:r=30"), ("b.mp4", "mandelbrot=s=320x180:r=25")):
+                p = tmp / name
+                subprocess.run([str(app.ffmpeg), "-v", "error", "-y", "-f", "lavfi", "-i", src, "-t", "8",
+                                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(p)],
+                               check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=60)
+                clips.append(p)
+            w.quiet_errors = True
+            w.outdir.set(str(tmp / "out"))
+            w.add_paths(clips)
+            bg_state["t"] = time.monotonic()
+            bg_state["w"] = w
+            bg_state["shutil"] = shutil
+            app.after(500, bg_wait_analysis)
+        except Exception as e:
+            ok("bg_build", False, repr(e)[:300])
+            bg_cleanup()
+            app.after(step_ms, s6)
+
+    def bg_wait_analysis():
+        w = bg_state["w"]
+        if (w.loading or len(w.analyses) < 2) and time.monotonic() - bg_state["t"] < 120:
+            app.after(500, bg_wait_analysis)
+            return
+        ok("bg_analysis", len(w.analyses) == 2 and all(p in w.advice for p in w.analyses),
+           ", ".join(a.verdict for a in w.advice.values()))
+        w.minutes.set(3)
+        w._options_changed()
+        started = w.start(confirm=False)
+        bg_state["t"] = time.monotonic()
+        if not started:
+            ok("bg_build", False, "start() 실패: " + w.plan_text.get())
+            bg_cleanup()
+            app.after(step_ms, s6)
+            return
+        app.after(1000, bg_wait_build)
+
+    def bg_wait_build():
+        w = bg_state["w"]
+        if w.running and time.monotonic() - bg_state["t"] < 300:
+            app.after(1000, bg_wait_build)
+            return
+        r = getattr(w, "result", None)
+        good = r is not None and abs(r.duration - 180) < 1.0 and r.size > 0
+        ok("bg_build", good, f"{r.width}x{r.height} {r.duration:.2f}s {r.size} bytes" if r else getattr(w, "error", "timeout"))
+        bg_cleanup()
         app.after(step_ms, s6)
+
+    def bg_cleanup():
+        w = bg_state.get("w")
+        try:
+            if w is not None and w.winfo_exists():
+                w.destroy()
+        except Exception:
+            pass
+        tmp = bg_state.get("tmp")
+        if tmp:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+            ok("bg_cleanup", not Path(tmp).exists(), tmp)
 
     def s6():
         for w in (getattr(app, "jp_helper_win", None), getattr(app, "live_schedule_win", None), app._live_window()):
