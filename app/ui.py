@@ -153,7 +153,27 @@ class MainWindow(tk.Tk):
                         continue
                     w.bind("<Button-1>", lambda e, c=cmd: c())
             self.mode_cards[key] = card
+        self._bg_card(bar)
         ttk.Frame(root, height=6).pack(fill="x")
+
+    def _bg_card(self, bar):
+        """④ 내 영상으로 배경 만들기 — 기존 3개 카드 크기를 그대로 두고 아래 한 줄 카드로 연다."""
+        bg, border, fg = "#f6f6f6", "#c4c4c4", "#202020"
+        card = tk.Frame(bar, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border, cursor="hand2")
+        card.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        title = tk.Label(card, text="④ 내 영상으로 배경 만들기", bg=bg, fg=fg, font="PLS.Section")
+        title.pack(side="left", padx=(10, 8), pady=5)
+        desc = tk.Label(card, text="MP4 여러 개를 자연스러운 디졸브로 이어 3~60분 배경 영상", bg=bg, fg="#333333")
+        desc.pack(side="left", pady=5)
+        why = tk.Label(card, text="ⓘ 언제 쓰나요?", bg=bg, fg="#1d4fa8", cursor="hand2")
+        why.pack(side="left", padx=10)
+        why.bind("<Button-1>", lambda e: (self._card_help("bg", "④ 내 영상으로 배경 만들기"), "break")[1])
+        self.card_help_links["bg"] = why
+        foot = tk.Label(card, text="배경 만들기 열기 ▶", bg=bg, fg="#1d4fa8", font="PLS.Strong")
+        foot.pack(side="right", padx=10)
+        for w in (card, title, desc, foot):
+            w.bind("<Button-1>", lambda e: self._open_bg())
+        self.mode_cards["bg"] = card
 
     # ---------- 글자 크기 ----------
     def _set_font_size(self, size):
@@ -456,6 +476,11 @@ class MainWindow(tk.Tk):
     def _add_video(self):
         if not self._need_tools(): return
         paths=filedialog.askopenfilenames(title="완성 SET MP4 선택",filetypes=[("MP4","*.mp4"),("영상","*.mov *.mkv *.m4v"),("모든 파일","*.*")])
+        self.add_set_paths(paths)
+
+    def add_set_paths(self,paths):
+        """① SET 목록에 파일 추가 (영상 추가 버튼 / ④ 배경 만들기에서 보내기 공용)."""
+        if not paths or not self._need_tools(): return
         for raw in paths:
             p=Path(raw).resolve()
             if any(x.path==p for x in self.infos): continue
@@ -684,6 +709,22 @@ class MainWindow(tk.Tk):
                                                     tools=self._live_tools)
         return self.live_schedule_win
 
+    def _open_bg(self):
+        w = self._alive(getattr(self, "bg_win", None))
+        if w is not None:
+            w.deiconify(); w.lift(); w.focus_set(); return w
+        from .bg_ui import BackgroundMakerWindow
+        self.bg_win = BackgroundMakerWindow(self, tools=self._live_tools, send_to_long=self._receive_from_bg)
+        return self.bg_win
+
+    def _receive_from_bg(self, path):
+        """④에서 만든 배경 영상을 ① SET 목록에 넣는다 (① 무손실 반복 경로 그대로)."""
+        if self.running:
+            messagebox.showwarning("① 영상 늘리기", "장시간 제작이 진행 중입니다. 끝난 뒤 다시 보내세요.", parent=self); return
+        self.add_set_paths([str(path)])
+        self.deiconify(); self.lift(); self.focus_set()
+        self.status.set(f"④ 배경 영상을 SET에 추가했습니다: {Path(path).name}")
+
     def _live_playlist_snapshot(self):
         """예약 LIVE 창: 열려 있는 LIVE 창의 Playlist (없으면 빈 목록)."""
         w = self._live_window()
@@ -774,6 +815,8 @@ class MainWindow(tk.Tk):
 
     def _close_after_live(self):
         if self.running and not messagebox.askyesno("작업 중","현재 작업을 중지하고 종료할까요?"):return
+        bgw=self._alive(getattr(self,"bg_win",None))
+        if bgw is not None and bgw.running and not messagebox.askyesno("배경 영상 제작 중","④ 배경 영상 제작을 중단하고 종료할까요?"):return
         uploading=self.upload_queue is not None and self.upload_queue.running
         work=self._running_work_lines()
         if work and not ask_exit(self,work):return  # 종료하면 업로드/댓글 확인이 멈춘다고 정확히 안내
@@ -784,7 +827,7 @@ class MainWindow(tk.Tk):
     def _finish_close(self):
         w=self._live_window()
         if w:w.destroy()
-        for w in (self._alive(self.upload_win),self._alive(self.live_schedule_win),self._alive(self.comment_win)):
+        for w in (self._alive(self.upload_win),self._alive(self.live_schedule_win),self._alive(self.comment_win),self._alive(getattr(self,"bg_win",None))):
             if w:w.destroy()
         if self.comment_service is not None:self.comment_service.stop(timeout=3.0)
         self._save();self.destroy();release_tk_variables(self)

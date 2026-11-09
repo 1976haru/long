@@ -239,7 +239,7 @@ def app(tmp_path, monkeypatch):
 
 
 def test_main_mode_cards_and_summary(app):
-    assert set(app.mode_cards) == {"long", "live", "upload"}
+    assert set(app.mode_cards) == {"long", "live", "upload", "bg"}
     def labels(w):
         out = [w.cget("text")] if "text" in w.keys() else []
         for c in w.winfo_children():
