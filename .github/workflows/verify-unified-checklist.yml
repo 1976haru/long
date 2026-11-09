@@ -1,0 +1,39 @@
+name: Verify unified Codex checklist workbook
+on:
+  push:
+    branches: ["feature/unified-studio-checklist-20261109"]
+    paths:
+      - "docs/UNIFIED_STUDIO_CODEX_9_TASKS_ONE_SHEET.xlsx"
+      - "docs/UNIFIED_STUDIO_CODEX_9_TASKS_ONE_SHEET.csv"
+      - ".github/workflows/verify-unified-checklist.yml"
+  workflow_dispatch:
+jobs:
+  verify-single-sheet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify workbook with openpyxl and CSV source
+        shell: bash
+        run: |
+          python -m pip install --quiet openpyxl==3.1.5
+          python - <<'PY'
+          from pathlib import Path
+          from openpyxl import load_workbook
+          p=Path("docs/UNIFIED_STUDIO_CODEX_9_TASKS_ONE_SHEET.xlsx")
+          wb=load_workbook(p)
+          assert wb.sheetnames==["Codex_완성체크리스트"],wb.sheetnames
+          ws=wb.active
+          assert ws.max_column==14,ws.max_column
+          ids=[ws.cell(r,1).value for r in range(8,17)]
+          assert ids==[f"C{i:02}" for i in range(1,10)],ids
+          assert all(ws.cell(r,3).value and "Codex" in ws.cell(r,3).value for r in range(8,17))
+          assert all(ws.cell(r,9).value=="미시작" for r in range(8,17))
+          assert ws["H3"].value=="=IFERROR(E3/B3,0)",ws["H3"].value
+          assert p.stat().st_size>10_000
+          csv=Path("docs/UNIFIED_STUDIO_CODEX_9_TASKS_ONE_SHEET.csv")
+          assert csv.read_text(encoding="utf-8-sig").count("Codex")>9
+          print("ONE_SHEET_XLSX_PASS; 9 CODEX ROWS; 14 COLUMNS; CSV_FALLBACK_PASS")
+          PY
