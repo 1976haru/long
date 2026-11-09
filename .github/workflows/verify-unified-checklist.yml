@@ -34,6 +34,8 @@ jobs:
           assert ws["H3"].value=="=IFERROR(E3/B3,0)",ws["H3"].value
           assert p.stat().st_size>10_000
           csv=Path("docs/UNIFIED_STUDIO_CODEX_9_TASKS_ONE_SHEET.csv")
-          assert csv.read_text(encoding="utf-8-sig").count("Codex")>9
+          import csv as csvlib
+          with open(csv, newline="", encoding="utf-8-sig") as stream:
+              assert len(list(csvlib.reader(stream))) == 10
           print("ONE_SHEET_XLSX_PASS; 9 CODEX ROWS; 14 COLUMNS; CSV_FALLBACK_PASS")
           PY
