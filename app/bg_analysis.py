@@ -61,6 +61,7 @@ class ClipAnalysis:
     tail_luma: float = 0.0
     quality_warnings: list[str] = field(default_factory=list)
     stats: list = field(default_factory=list, repr=False)  # 격자별 GridStat (반복 지점 구조 비교용, 없으면 계산)
+    dhash_seq: tuple[int, ...] = ()        # 약 1초 간격 64bit 해시 (잘라내기·재인코딩된 유사 영상 찾기)
 
     def get_stats(self) -> list:
         if len(self.stats) != len(self.grids):
@@ -311,6 +312,9 @@ def analyze_clip(ffmpeg: Path, path: Path, duration: float, cancel: Event | None
     mean_rgb = tuple(v / n for v in rgb)
     marks = [min(n - 1, int(n * p)) for p in (0.1, 0.3, 0.5, 0.7, 0.9)]
     hashes = tuple(dhash(lumas[i]) for i in marks)
+    seq_step = max(1, round(sf))
+    # 거의 단색(검은 화면·페이드)인 프레임은 해시가 무의미해 다른 영상의 검은 화면과 '같다'고 오판하므로 뺀다
+    seq = tuple(dhash(lumas[i]) for i in range(0, n, seq_step) if stds[i] >= 6)[:240]
     stats = [grid_stats(gr) for gr in grids]
     motion = _lag_diff(grids, max(1, round(0.5 * sf)), stats)
     drift = _lag_diff(grids, max(1, round(4 * sf)), stats) if duration >= 6 else motion
@@ -320,7 +324,7 @@ def analyze_clip(ffmpeg: Path, path: Path, duration: float, cancel: Event | None
         brightness=sum(means) / n, contrast=sum(stds) / n, motion=motion, drift=drift,
         camera=classify_camera(motion, drift),
         black_seconds=sum(1 for m, s in zip(means, stds) if m < 14 and s < 6) / sf,
-        head_luma=sum(means[:head]) / head, tail_luma=sum(means[-head:]) / head, stats=stats,
+        head_luma=sum(means[:head]) / head, tail_luma=sum(means[-head:]) / head, stats=stats, dhash_seq=seq,
     )
     try:
         sharp = [laplacian_var(g) for g in sharp_frames(ffmpeg, path, duration)]
@@ -491,40 +495,201 @@ class DuplicateFinding:
     b: Path
     kind: str      # "동일 파일" | "매우 유사" | "유사 장면"
     distance: float
+    note: str = ""  # 판단 근거 (예: 재인코딩·해상도 변경 의심, 일부 구간 겹침)
+
+
+SEQ_MATCH = 6      # 1초 간격 해시 사이 거리가 이 이하면 '같은 화면'으로 본다 (64bit 중)
+
+
+def _seq_overlap(a: "ClipAnalysis", b: "ClipAnalysis") -> float:
+    """a의 화면(최대 12곳)이 b 어딘가에 거의 그대로 있는 비율 (0~1). 잘라낸·재인코딩·해상도만 바꾼 사본이면 커진다."""
+    sa, sb = a.dhash_seq, b.dhash_seq
+    if len(sa) < 3 or len(sb) < 3:
+        return 0.0
+    picks = [sa[int(i * (len(sa) - 1) / 11)] for i in range(12)] if len(sa) > 12 else list(sa)
+    hit = sum(1 for x in picks if min(_hamming(x, y) for y in sb) <= SEQ_MATCH)
+    return hit / len(picks)
+
+
+def similarity(a: "ClipAnalysis", b: "ClipAnalysis") -> DuplicateFinding | None:
+    """두 영상이 같은/매우 비슷한/비슷한 장면인지. 아니면 None. (원본은 절대 삭제하지 않는다 — 판단은 사용자)"""
+    if a.sha256 and a.sha256 == b.sha256:
+        return DuplicateFinding(a.path, b.path, "동일 파일", 0.0, "파일 내용(SHA256)이 똑같습니다")
+    color = sum(abs(x - y) for x, y in zip(a.mean_rgb, b.mean_rgb)) / 3
+    overlap = max(_seq_overlap(a, b), _seq_overlap(b, a))
+    dist = 64.0
+    if a.dhash and b.dhash:
+        dist = sum(_hamming(x, y) for x, y in zip(a.dhash, b.dhash)) / len(a.dhash)
+    ratio = min(a.duration, b.duration) / max(a.duration, b.duration, 0.001)
+    if dist <= 6 and color < 12 and ratio > 0.7:
+        return DuplicateFinding(a.path, b.path, "매우 유사", round(dist, 1),
+                                "같은 영상을 다시 인코딩했거나 해상도만 바꾼 사본으로 보입니다")
+    if overlap >= 0.6 and color < 16:
+        return DuplicateFinding(a.path, b.path, "매우 유사", round(dist, 1),
+                                f"화면의 {overlap * 100:.0f}%가 다른 영상에 그대로 있습니다 (잘라낸 사본·재인코딩 의심)")
+    if dist <= 12 and color < 20:
+        return DuplicateFinding(a.path, b.path, "유사 장면", round(dist, 1), "구도와 색이 비슷한 장면입니다")
+    if overlap >= 0.3 and color < 20:
+        return DuplicateFinding(a.path, b.path, "유사 장면", round(dist, 1), f"일부 구간({overlap * 100:.0f}%)이 겹칩니다")
+    return None
 
 
 def find_duplicates(analyses: Sequence[ClipAnalysis]) -> list[DuplicateFinding]:
     found: list[DuplicateFinding] = []
     for i in range(len(analyses)):
         for j in range(i + 1, len(analyses)):
-            a, b = analyses[i], analyses[j]
-            if a.sha256 and a.sha256 == b.sha256:
-                found.append(DuplicateFinding(a.path, b.path, "동일 파일", 0.0))
-                continue
-            if not a.dhash or not b.dhash:
-                continue
-            dist = sum(_hamming(x, y) for x, y in zip(a.dhash, b.dhash)) / len(a.dhash)
-            color = sum(abs(x - y) for x, y in zip(a.mean_rgb, b.mean_rgb)) / 3
-            ratio = min(a.duration, b.duration) / max(a.duration, b.duration, 0.001)
-            if dist <= 6 and color < 12 and ratio > 0.7:
-                found.append(DuplicateFinding(a.path, b.path, "매우 유사", round(dist, 1)))
-            elif dist <= 12 and color < 20:
-                found.append(DuplicateFinding(a.path, b.path, "유사 장면", round(dist, 1)))
+            f = similarity(analyses[i], analyses[j])
+            if f is not None:
+                found.append(f)
     return found
 
 
-def transition_warnings(ordered: Sequence[ClipAnalysis]) -> list[str]:
-    """이어지는 장면 사이 밝기 차이가 크거나, 비슷한 장면이 연달아 오면 알려준다 (마지막→처음 포함)."""
-    out: list[str] = []
+# ---------------- 장면 전환 (사용 구간 기준) ----------------
+
+TRANS_OK = "자연스러움"
+TRANS_CHECK = "확인 필요"
+TRANS_BAD = "어색함"
+
+
+@dataclass(frozen=True)
+class TransitionAdvice:
+    a: Path
+    b: Path
+    verdict: str
+    luma_jump: float      # A 끝 / B 시작 평균 밝기 차이 (0~255)
+    color_jump: float     # 평균 색 차이 (0~255)
+    motion_end: float     # A 끝 / B 시작 움직임 속도
+    motion_start: float
+    similar: str          # "" | 유사 판정 종류
+    reasons: tuple[str, ...]
+
+
+Range = tuple[float, "float | None"]
+
+
+def _window(an: ClipAnalysis, start: float, end: float | None) -> tuple[int, int]:
+    sf, n = an.sample_fps, len(an.grids)
+    si = max(0, min(n - 1, int(round(start * sf))))
+    ei = n if end is None or end >= an.duration - 0.01 else max(si + 1, min(n, int(round(end * sf))))
+    return si, ei
+
+
+def _mean_luma(an: ClipAnalysis, i0: int, i1: int) -> float:
+    st = an.get_stats()[max(0, i0):max(i0 + 1, i1)]
+    return sum(s.mean for s in st) / len(st) if st else 0.0
+
+
+def transition_advice(a: ClipAnalysis, b: ClipAnalysis, dissolve: float = 1.0,
+                      a_range: Range = (0.0, None), b_range: Range = (0.0, None)) -> TransitionAdvice:
+    """A 사용 구간의 끝 → B 사용 구간의 시작 디졸브가 자연스러운지 (장면이 바뀌는 것 자체는 정상).
+
+    어색함: 밝기가 크게 튐(어두운 밤 → 밝은 낮 등) 또는 사실상 같은 영상이 연달아 나옴.
+    확인 필요: 밝기·색 차이가 꽤 크거나, 움직임 속도가 크게 다르거나(잔잔함 → 거셈), 비슷한 장면이 연달아 나옴.
+    """
+    a0, a1 = _window(a, *a_range)
+    b0, b1 = _window(b, *b_range)
+    wa = max(2, round((dissolve + 1.0) * a.sample_fps))
+    wb = max(2, round((dissolve + 1.0) * b.sample_fps))
+    lj = abs(_mean_luma(a, max(a0, a1 - wa), a1) - _mean_luma(b, b0, min(b1, b0 + wb)))
+    cj = sum(abs(x - y) for x, y in zip(a.mean_rgb, b.mean_rgb)) / 3
+    me, ms = _motion(a, max(a0, a1 - wa), a1), _motion(b, b0, min(b1, b0 + wb))
+    sim = similarity(a, b) if a.path != b.path else None
+    reasons: list[str] = []
+    verdict = TRANS_OK
+    if lj > 70:
+        verdict = TRANS_BAD
+        reasons.append(f"밝기 차이가 매우 큽니다 ({lj:.0f}) — 화면이 번쩍이듯 바뀝니다.")
+    elif lj > 40:
+        verdict = TRANS_CHECK
+        reasons.append(f"밝기 차이가 큽니다 ({lj:.0f}).")
+    if cj > 45:
+        verdict = TRANS_CHECK if verdict == TRANS_OK else verdict
+        reasons.append(f"색감 차이가 큽니다 ({cj:.0f}).")
+    gap = abs(me - ms)
+    if gap > max(3.0, 0.6 * max(me, ms)):
+        verdict = TRANS_CHECK if verdict == TRANS_OK else verdict
+        reasons.append(f"움직임 속도가 다릅니다 (앞 {me:.1f} / 뒤 {ms:.1f}).")
+    if sim is not None:
+        if sim.kind in ("동일 파일", "매우 유사"):
+            verdict = TRANS_BAD
+            reasons.append(f"거의 같은 영상이 연달아 나옵니다 ({sim.kind}). 순서를 바꾸거나 하나를 제외하세요.")
+        else:
+            verdict = TRANS_CHECK if verdict == TRANS_OK else verdict
+            reasons.append("비슷한 장면이 연달아 나옵니다. [자동 순서 추천]으로 떨어뜨려 보세요.")
+    if not reasons:
+        reasons.append("밝기·색·움직임 차이가 크지 않아 디졸브 전환이 자연스럽습니다.")
+    return TransitionAdvice(a.path, b.path, verdict, round(lj, 1), round(cj, 1), round(me, 2), round(ms, 2),
+                            sim.kind if sim else "", tuple(reasons))
+
+
+def transition_advices(ordered: Sequence[ClipAnalysis], dissolve: float = 1.0,
+                       ranges: Sequence[Range] | None = None) -> list[TransitionAdvice]:
+    """순서대로 k → k+1 전환 평가 (마지막 → 처음 = 반복 경계 포함). 영상 1개면 비어 있다 (반복 지점 평가를 쓴다)."""
     n = len(ordered)
     if n < 2:
-        return out
-    for k in range(n):
-        a, b = ordered[k], ordered[(k + 1) % n]
-        if abs(a.tail_luma - b.head_luma) > 70:
-            out.append(f"{a.path.name} → {b.path.name}: 밝기 차이가 커서 전환이 눈에 띌 수 있습니다.")
-        if a.dhash and b.dhash and a.path != b.path:
-            dist = sum(_hamming(x, y) for x, y in zip(a.dhash, b.dhash)) / len(a.dhash)
-            if dist <= 8:
-                out.append(f"{a.path.name} → {b.path.name}: 비슷한 장면이 연달아 나옵니다. 순서를 바꿔 보세요.")
+        return []
+    rg = list(ranges) if ranges is not None else [(0.0, None)] * n
+    return [transition_advice(ordered[k], ordered[(k + 1) % n], dissolve, rg[k], rg[(k + 1) % n]) for k in range(n)]
+
+
+def transition_warnings(ordered: Sequence[ClipAnalysis], dissolve: float = 1.0,
+                        ranges: Sequence[Range] | None = None) -> list[str]:
+    """이어지는 장면 사이 전환이 어색하거나 비슷한 장면이 연달아 오면 알려준다 (마지막→처음 포함)."""
+    out: list[str] = []
+    for t in transition_advices(ordered, dissolve, ranges):
+        if t.verdict != TRANS_OK:
+            out.append(f"{t.a.name} → {t.b.name}: [{t.verdict}] {' '.join(t.reasons)}")
     return out
+
+
+def _pair_cost(t: TransitionAdvice) -> float:
+    cost = t.luma_jump / 10 + t.color_jump / 20 + abs(t.motion_end - t.motion_start) / 3
+    if t.similar in ("동일 파일", "매우 유사"):
+        cost += 100
+    elif t.similar:
+        cost += 30
+    return cost
+
+
+def suggest_order(analyses: Sequence[ClipAnalysis], dissolve: float = 1.0,
+                  ranges: Sequence[Range] | None = None) -> list[int]:
+    """비슷한 장면이 연달아 나오지 않고 밝기·움직임이 부드럽게 이어지는 순서 (첫 영상은 그대로 둔다).
+
+    반복(마지막 → 처음)까지 포함한 한 바퀴 비용이 가장 작은 순서. 8개 이하는 모든 순서를 비교하고,
+    그보다 많으면 가까운 것부터 잇고 2-opt로 다듬는다. 비용이 같으면 지금 순서를 유지한다.
+    """
+    n = len(analyses)
+    if n <= 2:
+        return list(range(n))
+    rg = list(ranges) if ranges is not None else [(0.0, None)] * n
+    cost = [[0.0 if i == j else _pair_cost(transition_advice(analyses[i], analyses[j], dissolve, rg[i], rg[j]))
+             for j in range(n)] for i in range(n)]
+
+    def total(order: Sequence[int]) -> float:
+        return sum(cost[order[k]][order[(k + 1) % n]] for k in range(n))
+
+    best = list(range(n))
+    best_cost = total(best)
+    if n <= 8:
+        import itertools
+        for rest in itertools.permutations(range(1, n)):
+            order = [0, *rest]
+            c = total(order)
+            if c < best_cost - 1e-6:
+                best, best_cost = order, c
+        return best
+    order = [0]
+    left = set(range(1, n))
+    while left:
+        nxt = min(left, key=lambda j: (cost[order[-1]][j], j))
+        order.append(nxt)
+        left.remove(nxt)
+    improved = True
+    while improved:
+        improved = False
+        for i in range(1, n - 1):
+            for j in range(i + 1, n):
+                cand = order[:i] + order[i:j + 1][::-1] + order[j + 1:]
+                if total(cand) < total(order) - 1e-6:
+                    order, improved = cand, True
+    return order if total(order) < best_cost - 1e-6 else best

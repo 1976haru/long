@@ -32,5 +32,5 @@ git diff --check
 - app/live_*.py: v0.4 LIVE 송출 경로 (제작 경로와 분리, docs/LIVE_ARCHITECTURE.md). 로직은 live_controller.py, Tk 위젯은 live_ui.py
 - app/youtube_*.py: YouTube API 자동 Broadcast 교체 (표준 라이브러리 REST, OAuth loopback+PKCE, token은 DPAPI만, docs/YOUTUBE_ROLLOVER.md)
 - app/cloud_*.py, cloud/, deploy/linux/: 무료 Cloud(OCI Always Free) LIVE (docs/FREE_CLOUD.md). 유료 Cloud 자원 생성/결제 API 호출 금지, shell=True 금지
-- app/bg_core.py, app/bg_analysis.py, app/bg_ui.py: ④ 내 영상으로 배경 만들기. 디졸브(xfade)를 위해 **이 경로에서만** 사용자가 [▶ 제작 시작]을 누를 때 한 바퀴 분량을 재인코딩하고, 목표 길이 반복은 core.run_concat_copy(-c copy)를 그대로 호출한다. 분석은 FFmpeg 48×27 샘플만 사용
+- app/bg_core.py, app/bg_analysis.py, app/bg_ui.py: ④ 내 영상으로 배경 만들기. 디졸브(xfade)를 위해 **이 경로에서만** 사용자가 [▶ 제작 시작]을 누를 때 한 바퀴 분량을 재인코딩하고, 목표 길이 반복은 core.run_concat_copy(-c copy)를 그대로 호출한다. 분석은 FFmpeg 48×27 샘플만 사용. 기본 출력은 H.264 yuv420p(LIVE 호환), H.265는 사용자가 고를 때만. 화질 비교 도구: tools/bg_codec_bench.py
 - tests/: 회차/무손실 연결 회귀 테스트

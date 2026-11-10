@@ -35,10 +35,12 @@ def test_output_spec_never_upscales_needlessly():
     assert (s.width, s.height) == (1280, 720)
 
 
-def test_output_spec_4k_uses_hevc_when_available():
+def test_output_spec_4k_uses_hevc_only_when_chosen():
     s = B.choose_output_spec([vi(w=3840, h=2160)], B.QUALITY_4K, hevc_available=True)
+    assert (s.height, s.codec, s.encoder) == (2160, "h264", "libx264")  # 기본은 LIVE 호환 H.264
+    s = B.choose_output_spec([vi(w=3840, h=2160)], B.QUALITY_4K, hevc_available=True, codec=B.CODEC_HEVC)
     assert (s.height, s.codec, s.encoder) == (2160, "hevc", "libx265")
-    s = B.choose_output_spec([vi(w=3840, h=2160)], B.QUALITY_4K, hevc_available=False)
+    s = B.choose_output_spec([vi(w=3840, h=2160)], B.QUALITY_4K, hevc_available=False, codec=B.CODEC_HEVC)
     assert s.codec == "h264"
 
 
@@ -398,10 +400,14 @@ def test_profiles_set_crf_preset_and_size():
     assert (best.crf, best.preset, best.profile) == (18, "fast", B.PROFILE_BEST)  # 기본은 기존과 같음
     small = B.choose_output_spec(infos, profile="small")
     assert (small.crf, small.preset) == (24, "medium") and "CRF 24" in small.label
-    assert small.bytes_per_second < B.choose_output_spec(infos, profile="balanced").bytes_per_second < best.bytes_per_second
-    assert B.choose_output_spec(infos, profile="slow").bytes_per_second == best.bytes_per_second  # 느림은 용량 감소 보장 안 함
+    assert small.bytes_per_second < best.bytes_per_second
+    assert B.choose_output_spec(infos, profile="balanced").bytes_per_second < best.bytes_per_second
+    assert B.get_profile("slow").key == B.PROFILE_BEST  # 예전 '느림' 설정값은 고화질로 (C07에서 선택지 정리)
     k4 = B.choose_output_spec([vi(w=3840, h=2160)], B.QUALITY_4K, hevc_available=True, profile="balanced")
-    assert (k4.codec, k4.crf) == ("hevc", 25)
+    assert (k4.codec, k4.crf) == ("h264", 20)  # 4K도 기본은 H.264 (H.265는 직접 고를 때만)
+    k4h = B.choose_output_spec([vi(w=3840, h=2160)], B.QUALITY_4K, hevc_available=True, profile="balanced",
+                               codec=B.CODEC_HEVC)
+    assert (k4h.codec, k4h.crf) == ("hevc", B.HEVC_BASE_CRF + 1)
     assert B.get_profile("없는값").key == B.PROFILE_BEST
     for p in B.ENCODE_PROFILES:  # 화질 저하 설명이 있어야 함
         assert p.note
@@ -450,6 +456,7 @@ def test_real_disk_watch_stops_safely_mid_build(clips_dir, tmp_path, monkeypatch
     keep.write_bytes(b"user file")
     t0 = time.monotonic()
     monkeypatch.setattr(B, "DISK_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(B, "enough_disk_space", lambda folder, size: (True, 10 * 1024**4, size))  # PC 실제 잔량과 무관하게
     monkeypatch.setattr(B, "free_bytes", lambda p: 10 * 1024**4 if time.monotonic() - t0 < 1.0 else 100 * 1024**2)
     with pytest.raises(BuildError, match="안전하게 멈췄습니다|저장 공간 부족 예상"):
         B.run_background_build(ffmpeg=Path(FFMPEG), ffprobe=Path(FFPROBE), plan=plan, output=out_dir / "x.mp4",
@@ -467,6 +474,7 @@ def test_real_projection_from_measured_bitrate_stops_early(clips_dir, tmp_path, 
     keep = out_dir / "keep.mp4"
     keep.write_bytes(b"user file")
     monkeypatch.setattr(B, "DISK_POLL_SECONDS", 1e9)  # 감시 스레드 대신 조각별 재계산이 먼저 잡는지 확인
+    monkeypatch.setattr(B, "enough_disk_space", lambda folder, size: (True, 10 * 1024**4, size))  # 시작 전 검사는 통과
     monkeypatch.setattr(B, "free_bytes", lambda p: 300 * 1024**2)
     seen = []
     with pytest.raises(BuildError, match="저장 공간 부족 예상"):
@@ -610,7 +618,7 @@ def test_window_profile_preview_range_eval(tkroot, clips_dir, tmp_path, quiet, m
         w._options_changed()
         assert w.plan.spec.crf == 24 and "화질 저하" in w.profile_note.get()
         assert load_settings()["bg_maker"]["profile"] == "small"
-        assert "작업 중 최대" in w.plan_text.get()
+        assert "작업 중 최대" in w.size_text.get()
         w.tree.selection_set("0")
         w._refresh_buttons()
         assert str(w.btn_preview_loop.cget("state")) == "normal"

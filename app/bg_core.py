@@ -27,7 +27,7 @@ from threading import Event
 from typing import Callable, Sequence
 
 from .core import (
-    BuildCancelled, BuildError, BuildPlan, VideoInfo, creationflags_no_window, enough_disk_space,
+    BuildCancelled, BuildError, BuildPlan, VideoInfo, creationflags_no_window, enough_disk_space, escape_concat_path,
     format_duration, free_bytes, probe_video, run_concat_copy, write_concat_file,
 )
 
@@ -37,31 +37,63 @@ DEFAULT_DISSOLVE = 1.0
 DISK_FLOOR = 512 * 1024**2      # 작업 중 이 이하로 남으면(또는 남은 작업량+이 값보다 적으면) 안전하게 중단
 DISK_POLL_SECONDS = 2.0
 PROJECTION_HEADROOM = 1.15      # 실측 비트레이트로 다시 계산할 때 15% 여유
+MEASURE_HEADROOM = 1.25         # 제작 전 시험 인코딩(짧은 구간 몇 곳)으로 잰 값에 두는 여유
+MEASURE_SECONDS = 2.0           # 시험 인코딩 구간 길이
+MEASURE_SAMPLES = 4
+# 화면 표시용 예상 범위 (실측 × 비율). 2초 시험 조각은 각각 키프레임으로 시작해 실제보다 크게 나온다 — 실환경 검증
+# (FHD 6개 영상 3·10분, H.264 3종·H.265): 실제 최종 크기 = 실측 × 0.75~0.82. 공간 검사는 여전히 실측 × 1.25(안전 쪽).
+MEASURE_SHOW_LOW = 0.70
+MEASURE_SHOW_HIGH = 1.05
+OWNER_FILE = "owner.txt"        # 임시 폴더 안: 이 작업이 만드는 .part.mp4 경로 (강제 종료 후 정리용)
+
+
+CODEC_H264 = "h264"
+CODEC_HEVC = "hevc"
+HEVC_BASE_CRF = 20          # FHD/4K H.265 기본 CRF. 실측(눈 내리는 숲): x265 CRF20 medium 676 MB·VMAF 92.4 (10분)
+HEVC_SIZE_RATIO = 0.75      # 예상 용량용 H.265 / H.264(CRF18) 크기 비율 — 실측 0.72 (세밀한 결이 많으면 이득이 작음)
+HEVC_CAP_RATIO = 0.8        # 프로필 비트레이트 상한을 H.265에 적용할 때 비율 (같은 화질에서 이득이 작아 과하게 줄이지 않음)
 
 
 @dataclass(frozen=True)
 class EncodeProfile:
-    """화질·용량 선택지. crf_offset은 해상도별 기본 CRF(FHD 18 / 4K H.264 19 / 4K H.265 22)에 더한다."""
+    """화질·용량 선택지. crf_offset은 해상도·코덱별 기본 CRF(FHD H.264 18 / 4K H.264 19 / H.265 22)에 더한다."""
     key: str
     label: str
     crf_offset: int
     preset: str
     size_factor: float  # 기본(고화질) 대비 예상 용량 비율 (CRF는 내용에 따라 달라지므로 보수적인 값)
     note: str
+    maxrate_kbps: int = 0       # FHD 30fps H.264 기준 VBV 상한 (0 = 상한 없음). 해상도·FPS·코덱에 맞게 비례 조정
+    hevc_preset: str = "medium"
+    short: str = ""             # 화면의 간단 선택 버튼 이름
 
 
 PROFILE_BEST = "best"
+# 실측 근거 (C07, 실제 눈 내리는 가로수길 FHD 29.97fps 60초 구간, 같은 구간·같은 제작 명령, 10분 환산):
+#   고화질 CRF18 fast 901 MB · VMAF 93.4 / 균형 CRF19 slow + 상한 8M 551 MB · VMAF 91.5 /
+#   저용량 CRF24 medium 424 MB · VMAF 90.7. 세 경우 모두 CAMBI(그라데이션 띠) 0.
+#   (내용에 따라 달라짐: 물결·나뭇잎·눈송이처럼 세밀하게 움직이면 크고, 잔잔한 화면은 훨씬 작다)
 ENCODE_PROFILES: tuple[EncodeProfile, ...] = (
-    EncodeProfile(PROFILE_BEST, "최고 화질 (기본)", 0, "fast", 1.0,
-                  "원본에 가장 가까운 화질. 용량이 가장 큽니다 (FHD 10분 약 1~2 GB, 물결·나뭇잎이 많으면 더 큼)."),
-    EncodeProfile("slow", "최고 화질 · 용량 절약 (느림)", 0, "slow", 1.0,
-                  "화질은 기본과 같습니다. 영상에 따라 용량이 0~15% 줄어들지만 줄지 않을 수도 있고, 제작 시간이 약 2배 걸립니다."),
-    EncodeProfile("balanced", "균형", 3, "medium", 0.8,
-                  "용량 약 50~75%. 일반 화면에서는 차이가 거의 없지만, 크게 확대하면 물결·잎 같은 세밀한 결이 조금 부드러워집니다."),
-    EncodeProfile("small", "용량 우선", 6, "medium", 0.55,
-                  "용량 약 20~50%. 화질 저하가 보일 수 있습니다: 물결·나뭇잎·잔디가 뭉개지고, "
-                  "하늘·노을 그라데이션에 계단(띠)이 생길 수 있습니다. 업로드용 최종본에는 권장하지 않습니다."),
+    EncodeProfile(PROFILE_BEST, "고화질 (기본)", 0, "fast", 1.0,
+                  "원본에 가장 가까운 화질 (H.264 CRF 18). 용량이 가장 큽니다 — 실측 FHD 10분 약 0.9 GB "
+                  "(눈 내리는 숲 기준, 물결·나뭇잎이 많으면 더 큼).",
+                  short="고화질 (기본)"),
+    EncodeProfile("balanced", "균형 (권장 · 용량 약 40% 절약)", 1, "slow", 0.7,
+                  "CRF 19 + 비트레이트 상한 8 Mbps(FHD). 실측: 고화질 대비 용량 약 61% (866 MB급 → 약 550 MB), "
+                  "보통 화면에서는 차이가 거의 없고 크게 확대하면 나뭇가지·눈송이 같은 결이 조금 부드러워집니다. "
+                  "상한은 평균 크기를 제한할 뿐 정확한 최종 크기를 보장하지 않습니다. 제작 시간은 약 2~3배.",
+                  maxrate_kbps=8000, short="균형 (권장)"),
+    EncodeProfile("small", "저용량 (용량 약 50% 절약)", 6, "medium", 0.55,
+                  "CRF 24 + 상한 8 Mbps(FHD, 균형과 같은 상한이라 균형보다 커지지 않음). 실측: 고화질 대비 용량 약 44% "
+                  "(866 MB급 → 약 390 MB). "
+                  "화질 저하가 보일 수 있습니다: 물결·나뭇잎·잔디·나무껍질 결이 뭉개지고, 어두운 야경·하늘 그라데이션에 "
+                  "계단(띠)이 생길 수 있습니다. CRF·상한 모두 정확한 크기를 보장하지 않으니 [⑥ 실제 용량 측정]으로 "
+                  "확인하세요. 업로드용 최종본에는 권장하지 않습니다.",
+                  maxrate_kbps=8000, short="저용량"),
 )
+# 참고 (C07 실측): 저용량 CRF24 상한 없음 424 MB·VMAF 90.7 / 상한 8M 392 MB·VMAF 90.2 / 상한 6M 329 MB·VMAF 89.3.
+# 상한 없이 두면 세밀한 화면(실환경 검증의 합성 패턴 10분)에서 저용량 499 MB > 균형 435 MB로 역전되어, 균형과 같은
+# 8M 상한을 둔다 (6M은 화질 손상이 커서 쓰지 않음).
 
 
 def get_profile(key: str | None) -> EncodeProfile:
@@ -113,10 +145,17 @@ class OutputSpec:
     notes: tuple[str, ...] = ()
     size_factor: float = 1.0
     profile: str = PROFILE_BEST
+    maxrate_kbps: int = 0   # >0 이면 CRF + VBV 상한 (-maxrate/-bufsize). 평균 크기를 '제한'할 뿐 정확한 크기를 보장하지 않는다
+    bufsize_kbps: int = 0
 
     @property
     def encoder(self) -> str:
         return "libx265" if self.codec == "hevc" else "libx264"
+
+    @property
+    def live_compatible(self) -> bool:
+        """② LIVE DIRECT COPY 조건(H.264 + yuv420p)을 만족하는 출력인가. H.265는 저장·업로드용."""
+        return self.codec == "h264"
 
     @property
     def bytes_per_second(self) -> float:
@@ -129,8 +168,11 @@ class OutputSpec:
         base = next((v for h, v in sorted(mbps_h264.items()) if self.height <= h), 70.0)
         base *= max(1.0, self.fps / 30.0) ** 0.6
         if self.codec == "hevc":
-            base *= 0.55
-        return base * self.size_factor * 1_000_000 / 8
+            base *= HEVC_SIZE_RATIO
+        bps = base * self.size_factor * 1_000_000 / 8
+        if self.maxrate_kbps > 0:  # VBV 상한: 평균이 상한을 크게 넘지 않으므로 상한 +8%(컨테이너·버퍼 여유)를 넘게 잡지 않는다
+            bps = min(bps, self.maxrate_kbps * 1000 * 1.08 / 8)
+        return bps
 
 
 @dataclass(frozen=True)
@@ -161,10 +203,22 @@ class BgPlan:
     work_size: int  # 한 바퀴(cycle) 분량 — 임시 조각 합계 ≈ cycle.mp4 ≈ 이 값
     clip_count: int
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    measured_bps: float = 0.0  # >0: 실제 시험 인코딩(measure_bitrate)으로 잰 평균 바이트/초
 
     @property
     def required_bytes(self) -> int:
+        if self.measured_bps > 0:  # 실측값 + 25% 여유 (짧은 시험 구간이 전체를 대표하지 못할 수 있음)
+            rate = self.measured_bps * MEASURE_HEADROOM
+            return peak_bytes(rate * self.cycle_duration, rate * self.target)
         return peak_bytes(self.work_size, self.expected_size)
+
+    @property
+    def size_range(self) -> tuple[int, int]:
+        """화면 표시용 예상 최종 크기 범위 (바이트). 실측 전에는 보수적인 상한만 의미가 있다."""
+        if self.measured_bps > 0:
+            mid = self.measured_bps * self.target
+            return int(mid * MEASURE_SHOW_LOW), int(mid * MEASURE_SHOW_HIGH)
+        return 0, self.expected_size
 
 
 def peak_bytes(cycle: int | float, final: int | float) -> int:
@@ -206,18 +260,36 @@ def _std_fps(fps: float) -> float:
 
 
 def choose_output_spec(infos: Sequence[VideoInfo], quality: str = QUALITY_FHD, *, hevc_available: bool = True,
-                       profile: str = PROFILE_BEST) -> OutputSpec:
-    """FHD H.264 고화질이 기본. 원본보다 큰 해상도로 무의미하게 키우지 않는다(16:9 기준)."""
-    base = _base_spec(infos, quality, hevc_available=hevc_available)
+                       profile: str = PROFILE_BEST, codec: str = CODEC_H264) -> OutputSpec:
+    """FHD H.264 고화질이 기본 (② LIVE 호환). 원본보다 큰 해상도로 무의미하게 키우지 않는다(16:9 기준).
+
+    codec="hevc"는 사용자가 고를 때만 쓰는 저장·업로드용 선택지다 (LIVE READY 조건을 바꾸지 않음).
+    """
+    use_hevc = codec == CODEC_HEVC and hevc_available
+    base = _base_spec(infos, quality, hevc=use_hevc)
+    if codec == CODEC_HEVC and not hevc_available:
+        base = replace(base, notes=base.notes + ("이 FFmpeg에는 H.265(libx265) 인코더가 없어 H.264로 만듭니다.",))
     prof = get_profile(profile)
-    if prof.key == PROFILE_BEST:
-        return base
     crf = base.crf + prof.crf_offset
-    return replace(base, crf=crf, preset=prof.preset, size_factor=prof.size_factor, profile=prof.key,
-                   label=f"{base.label} · {prof.label} (CRF {crf}, {prof.preset})")
+    spec = replace(base, crf=crf, preset=prof.hevc_preset if use_hevc else prof.preset, size_factor=prof.size_factor,
+                   profile=prof.key, maxrate_kbps=_scaled_rate(prof.maxrate_kbps, base, use_hevc),
+                   bufsize_kbps=_scaled_rate(prof.maxrate_kbps * 2, base, use_hevc))
+    cap = f", 상한 {spec.maxrate_kbps / 1000:g} Mbps" if spec.maxrate_kbps else ""
+    return replace(spec, label=f"{base.label} · {prof.label} (CRF {crf}, {spec.preset}{cap})")
 
 
-def _base_spec(infos: Sequence[VideoInfo], quality: str, *, hevc_available: bool) -> OutputSpec:
+def _scaled_rate(kbps_fhd: int, base: OutputSpec, hevc: bool) -> int:
+    """프로필 상한(FHD 30fps H.264 기준)을 해상도·FPS·코덱에 맞게 비례 조정."""
+    if kbps_fhd <= 0:
+        return 0
+    k = (base.width * base.height) / (1920 * 1080)
+    k *= max(1.0, base.fps / 30.0) ** 0.6
+    if hevc:
+        k *= HEVC_CAP_RATIO
+    return int(round(kbps_fhd * k / 100.0)) * 100
+
+
+def _base_spec(infos: Sequence[VideoInfo], quality: str, *, hevc: bool) -> OutputSpec:
     if not infos:
         raise ValueError("영상이 없습니다.")
     notes: list[str] = []
@@ -240,11 +312,14 @@ def _base_spec(infos: Sequence[VideoInfo], quality: str, *, hevc_available: bool
     fps = min(fps, 60.0)
     if len(weight) > 1:
         notes.append(f"FPS가 서로 달라 {fps:g} FPS로 통일합니다.")
-    if height >= 2160 and quality == QUALITY_4K and hevc_available:
-        return OutputSpec(width, height, fps, "hevc", 22, "fast", f"4K {width}×{height} H.265 고효율", tuple(notes))
+    name = f"4K {width}×{height}" if height >= 2160 else f"{width}×{height}"
+    if hevc:
+        notes.append("H.265는 저장·업로드용입니다. ② LIVE DIRECT COPY에는 H.264 출력을 쓰세요.")
+        return OutputSpec(width, height, fps, CODEC_HEVC, HEVC_BASE_CRF, "medium", f"{name} H.265 (저장·업로드용)",
+                          tuple(notes))
     if height >= 2160:
-        return OutputSpec(width, height, fps, "h264", 19, "fast", f"4K {width}×{height} H.264", tuple(notes))
-    return OutputSpec(width, height, fps, "h264", 18, "fast", f"{width}×{height} H.264 고화질", tuple(notes))
+        return OutputSpec(width, height, fps, CODEC_H264, 19, "fast", f"{name} H.264", tuple(notes))
+    return OutputSpec(width, height, fps, CODEC_H264, 18, "fast", f"{name} H.264 고화질", tuple(notes))
 
 
 def _h264_level(spec: OutputSpec) -> str:
@@ -350,6 +425,8 @@ def piece_command(ffmpeg: Path, piece: Piece, spec: OutputSpec, out: Path) -> li
             "-frames:v", str(n_frames), "-r", fps_expr(spec.fps), "-c:v", spec.encoder,
             "-preset", spec.preset, "-crf", str(spec.crf), "-pix_fmt", "yuv420p",
             "-g", str(max(1, int(round(spec.fps * 2))))]
+    if spec.maxrate_kbps > 0:
+        cmd += ["-maxrate", f"{spec.maxrate_kbps}k", "-bufsize", f"{spec.bufsize_kbps or spec.maxrate_kbps * 2}k"]
     if spec.codec == "hevc":
         cmd += ["-tag:v", "hvc1", "-x265-params", "log-level=error"]
     else:
@@ -457,6 +534,59 @@ def hevc_available(ffmpeg: Path) -> bool:
         return False
 
 
+def measurement_pieces(plan: BgPlan, count: int = MEASURE_SAMPLES, seconds: float = MEASURE_SECONDS) -> list[Piece]:
+    """예상 용량 실측용 짧은 구간: 장면(본문)들에 고르게 나눠 각 본문의 가운데에서 seconds초씩."""
+    bodies = [p for p in plan.pieces if p.kind == "body" and p.length >= 0.5]
+    if not bodies:
+        return []
+    picks = [bodies[int(i * len(bodies) / min(count, len(bodies)))] for i in range(min(count, len(bodies)))]
+    out = []
+    for p in picks:
+        ln = min(seconds, p.length)
+        start = p.a.start + max(0.0, (p.length - ln) / 2)
+        out.append(Piece("body", Segment(p.a.path, start, ln), None, ln, f"용량 측정 · {p.label}"))
+    return out
+
+
+def measure_bitrate(ffmpeg: Path, plan: BgPlan, cancel_event: Event, work_dir: Path,
+                    progress_cb: Callable[[float, str], None] | None = None) -> float:
+    """실제 제작과 같은 설정으로 짧은 구간 몇 곳을 시험 인코딩해 평균 바이트/초를 잰다 (원본은 읽기만).
+
+    시험 파일은 work_dir 안 이 함수가 만든 임시 폴더에만 쓰고 끝나면 지운다.
+    각 구간이 키프레임으로 시작하므로 실제보다 약간 크게 나오는 편(=안전한 쪽)이다.
+    """
+    pieces = measurement_pieces(plan)
+    if not pieces:
+        raise BuildError("용량을 잴 장면이 없습니다.")
+    tmp = Path(work_dir) / f"{TEMP_PREFIX}measure_{uuid.uuid4().hex[:8]}"
+    tmp.mkdir(parents=True, exist_ok=False)
+    try:
+        size = 0
+        secs = 0.0
+        for k, p in enumerate(pieces):
+            if cancel_event.is_set():
+                raise BuildCancelled("사용자가 작업을 중지했습니다.")
+            if progress_cb:
+                progress_cb(k / len(pieces), f"예상 용량 실측 중 ({k + 1}/{len(pieces)})")
+            out = tmp / f"m{k}.mp4"
+            run_ffmpeg_progress(piece_command(ffmpeg, p, plan.spec, out), cancel_event)
+            size += _file_size(out)
+            secs += p.length
+        if size <= 0 or secs <= 0:
+            raise BuildError("시험 인코딩 결과가 비어 있습니다.")
+        if progress_cb:
+            progress_cb(1.0, "예상 용량 실측 완료")
+        return size / secs
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def with_measured_rate(plan: BgPlan, bytes_per_second: float) -> BgPlan:
+    """실측 비트레이트를 반영한 계획 (예상 크기 = 실측 × 길이, 공간 검사 = 실측 × 1.25)."""
+    return replace(plan, measured_bps=float(bytes_per_second), expected_size=int(bytes_per_second * plan.target),
+                   work_size=int(bytes_per_second * plan.cycle_duration))
+
+
 def run_background_build(
     *,
     ffmpeg: Path,
@@ -492,6 +622,10 @@ def run_background_build(
     temp_dir = Path(temp_root or output.parent) / f"{TEMP_PREFIX}{uuid.uuid4().hex[:10]}"
     temp_dir.mkdir(parents=True, exist_ok=False)
     part = output.with_name(output.name + ".part.mp4")  # core.run_concat_copy가 만드는 임시 최종 파일
+    try:  # 강제 종료(전원·작업 관리자)로 finally가 못 돌면 다음 제작 때 cleanup_stale_temp가 이 이름만 지운다
+        (temp_dir / OWNER_FILE).write_text(part.name, encoding="utf-8")
+    except OSError:
+        pass
     encode_total = sum(p.length for p in plan.pieces)
     encode_weight = 0.8
     stop = Event()  # 사용자 중지 또는 디스크 위험 → 실행 중인 FFmpeg 종료
@@ -747,11 +881,49 @@ def cleanup_stale_temp(folder: Path, max_age_hours: float = 12.0) -> int:
         now = time.time()
         for p in Path(folder).glob(f"{TEMP_PREFIX}*"):
             if p.is_dir() and now - p.stat().st_mtime > max_age_hours * 3600:
+                _remove_owned_part(Path(folder), p, now, max_age_hours)
+                shutil.rmtree(p, ignore_errors=True)
+                removed += 1
+        for p in Path(folder).glob(".PLVM_TEMP_*"):
+            if p.is_dir() and now - p.stat().st_mtime > max_age_hours * 3600 and _owned_concat_dir(p):
                 shutil.rmtree(p, ignore_errors=True)
                 removed += 1
     except OSError:
         pass
     return removed
+
+
+def _owned_concat_dir(d: Path) -> bool:
+    """① 무손실 연결(core.run_concat_copy)이 ④ 반복 연결 때 만든 임시 폴더인가.
+
+    강제 종료되면 ①의 finally가 못 돌아 concat.txt만 남는다. concat.txt 하나만 있고 모든 줄이 같은 폴더의
+    ④ 임시 폴더(.PLVM_BG_TEMP_*) 안 파일을 가리킬 때만 '이 기능 소유'로 본다 — ① 영상 늘리기의 임시 폴더는 건드리지 않음.
+    """
+    try:
+        items = list(d.iterdir())
+        if len(items) != 1 or items[0].name != "concat.txt" or items[0].stat().st_size > 1024 * 1024:
+            return False
+        lines = [ln.strip() for ln in items[0].read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except (OSError, UnicodeDecodeError):
+        return False
+    prefix = f"file '{escape_concat_path(d.parent)}/{TEMP_PREFIX}"
+    return bool(lines) and all(ln.startswith(prefix) and "/.." not in ln for ln in lines)
+
+
+def _remove_owned_part(folder: Path, temp_dir: Path, now: float, max_age_hours: float) -> None:
+    """임시 폴더의 owner.txt에 적힌 '.part.mp4' 1개만 지운다 (같은 폴더, 이름 형식·오래됨 확인). 완성 MP4는 절대 아님."""
+    try:
+        name = (temp_dir / OWNER_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if not name or Path(name).name != name or not name.endswith(".mp4.part.mp4"):
+        return
+    part = folder / name
+    try:
+        if part.is_file() and now - part.stat().st_mtime > max_age_hours * 3600:
+            part.unlink()
+    except OSError:
+        pass
 
 
 def clip_from_info(info: VideoInfo) -> Clip:
@@ -768,4 +940,6 @@ __all__ = [
     "default_bg_output_name", "piece_command", "run_background_build", "run_ffmpeg_progress", "hevc_available",
     "cleanup_stale_temp", "decode_check", "probe_video", "fps_expr", "EncodeProfile", "ENCODE_PROFILES",
     "PROFILE_BEST", "get_profile", "peak_bytes", "seam_segments", "seam_preview_command", "make_seam_preview",
+    "CODEC_H264", "CODEC_HEVC", "HEVC_BASE_CRF", "measure_bitrate", "measurement_pieces", "with_measured_rate",
+    "MEASURE_HEADROOM", "OWNER_FILE",
 ]
