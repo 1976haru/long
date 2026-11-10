@@ -14,8 +14,10 @@
 from __future__ import annotations
 
 import math
+import os
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from collections import Counter
@@ -26,12 +28,46 @@ from typing import Callable, Sequence
 
 from .core import (
     BuildCancelled, BuildError, BuildPlan, VideoInfo, creationflags_no_window, enough_disk_space,
-    format_duration, probe_video, run_concat_copy, write_concat_file,
+    format_duration, free_bytes, probe_video, run_concat_copy, write_concat_file,
 )
 
 TARGET_MINUTES = (3, 10, 20, 30, 60)
 DISSOLVE_CHOICES = (0.5, 1.0, 1.5, 2.0)
 DEFAULT_DISSOLVE = 1.0
+DISK_FLOOR = 512 * 1024**2      # 작업 중 이 이하로 남으면(또는 남은 작업량+이 값보다 적으면) 안전하게 중단
+DISK_POLL_SECONDS = 2.0
+PROJECTION_HEADROOM = 1.15      # 실측 비트레이트로 다시 계산할 때 15% 여유
+
+
+@dataclass(frozen=True)
+class EncodeProfile:
+    """화질·용량 선택지. crf_offset은 해상도별 기본 CRF(FHD 18 / 4K H.264 19 / 4K H.265 22)에 더한다."""
+    key: str
+    label: str
+    crf_offset: int
+    preset: str
+    size_factor: float  # 기본(고화질) 대비 예상 용량 비율 (CRF는 내용에 따라 달라지므로 보수적인 값)
+    note: str
+
+
+PROFILE_BEST = "best"
+ENCODE_PROFILES: tuple[EncodeProfile, ...] = (
+    EncodeProfile(PROFILE_BEST, "최고 화질 (기본)", 0, "fast", 1.0,
+                  "원본에 가장 가까운 화질. 용량이 가장 큽니다 (FHD 10분 약 1~2 GB, 물결·나뭇잎이 많으면 더 큼)."),
+    EncodeProfile("slow", "최고 화질 · 용량 절약 (느림)", 0, "slow", 1.0,
+                  "화질은 기본과 같습니다. 영상에 따라 용량이 0~15% 줄어들지만 줄지 않을 수도 있고, 제작 시간이 약 2배 걸립니다."),
+    EncodeProfile("balanced", "균형", 3, "medium", 0.8,
+                  "용량 약 50~75%. 일반 화면에서는 차이가 거의 없지만, 크게 확대하면 물결·잎 같은 세밀한 결이 조금 부드러워집니다."),
+    EncodeProfile("small", "용량 우선", 6, "medium", 0.55,
+                  "용량 약 20~50%. 화질 저하가 보일 수 있습니다: 물결·나뭇잎·잔디가 뭉개지고, "
+                  "하늘·노을 그라데이션에 계단(띠)이 생길 수 있습니다. 업로드용 최종본에는 권장하지 않습니다."),
+)
+
+
+def get_profile(key: str | None) -> EncodeProfile:
+    return next((p for p in ENCODE_PROFILES if p.key == key), ENCODE_PROFILES[0])
+
+
 QUALITY_FHD = "FHD"
 QUALITY_4K = "4K"
 STANDARD_HEIGHTS = (2160, 1440, 1080, 720, 540, 480, 360)
@@ -75,6 +111,8 @@ class OutputSpec:
     preset: str
     label: str
     notes: tuple[str, ...] = ()
+    size_factor: float = 1.0
+    profile: str = PROFILE_BEST
 
     @property
     def encoder(self) -> str:
@@ -82,13 +120,17 @@ class OutputSpec:
 
     @property
     def bytes_per_second(self) -> float:
-        """예상 용량 계산용 평균 비트레이트(CRF라 실제와 다를 수 있음, 넉넉하게 잡는다)."""
-        mbps_h264 = {2160: 45.0, 1440: 20.0, 1080: 12.0, 720: 6.0}
-        base = next((v for h, v in sorted(mbps_h264.items()) if self.height <= h), 45.0)
+        """제작 전 예상 용량용 평균 비트레이트 — CRF는 크기가 고정되지 않으므로 '넉넉한' 값이다.
+
+        기준(기본 CRF, H.264): 실측에서 FHD 세밀한 화면이 약 21~23 Mbps까지 나와 FHD 24 Mbps로 잡는다.
+        제작 중에는 실제로 인코딩된 조각의 크기로 다시 계산하고, 한 바퀴 완성 후에는 실제 파일 크기로 재검사한다.
+        """
+        mbps_h264 = {2160: 70.0, 1440: 36.0, 1080: 24.0, 720: 12.0, 540: 8.0}
+        base = next((v for h, v in sorted(mbps_h264.items()) if self.height <= h), 70.0)
         base *= max(1.0, self.fps / 30.0) ** 0.6
         if self.codec == "hevc":
             base *= 0.55
-        return base * 1_000_000 / 8
+        return base * self.size_factor * 1_000_000 / 8
 
 
 @dataclass(frozen=True)
@@ -116,13 +158,22 @@ class BgPlan:
     repeats: int
     spec: OutputSpec
     expected_size: int
-    work_size: int  # 임시 조각 + cycle 파일
+    work_size: int  # 한 바퀴(cycle) 분량 — 임시 조각 합계 ≈ cycle.mp4 ≈ 이 값
     clip_count: int
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def required_bytes(self) -> int:
-        return self.expected_size + self.work_size
+        return peak_bytes(self.work_size, self.expected_size)
+
+
+def peak_bytes(cycle: int | float, final: int | float) -> int:
+    """작업 중 동시에 차지하는 최대 공간.
+
+    1) 조각 인코딩: 조각 합계(≈cycle)  2) 조각 → cycle.mp4 연결: 조각 + cycle = 2×cycle
+    3) 조각 삭제 후 cycle.mp4 → 최종 .part.mp4 반복 연결: cycle + final  (교체는 같은 폴더 이름 변경이라 추가 공간 없음)
+    """
+    return int(cycle + max(cycle, final))
 
 
 @dataclass(frozen=True)
@@ -154,8 +205,19 @@ def _std_fps(fps: float) -> float:
     return min(60.0, round(fps, 3))
 
 
-def choose_output_spec(infos: Sequence[VideoInfo], quality: str = QUALITY_FHD, *, hevc_available: bool = True) -> OutputSpec:
+def choose_output_spec(infos: Sequence[VideoInfo], quality: str = QUALITY_FHD, *, hevc_available: bool = True,
+                       profile: str = PROFILE_BEST) -> OutputSpec:
     """FHD H.264 고화질이 기본. 원본보다 큰 해상도로 무의미하게 키우지 않는다(16:9 기준)."""
+    base = _base_spec(infos, quality, hevc_available=hevc_available)
+    prof = get_profile(profile)
+    if prof.key == PROFILE_BEST:
+        return base
+    crf = base.crf + prof.crf_offset
+    return replace(base, crf=crf, preset=prof.preset, size_factor=prof.size_factor, profile=prof.key,
+                   label=f"{base.label} · {prof.label} (CRF {crf}, {prof.preset})")
+
+
+def _base_spec(infos: Sequence[VideoInfo], quality: str, *, hevc_available: bool) -> OutputSpec:
     if not infos:
         raise ValueError("영상이 없습니다.")
     notes: list[str] = []
@@ -233,7 +295,7 @@ def build_bg_plan(clips: Sequence[Clip], target: float, dissolve: float, spec: O
     repeats = max(1, math.ceil(target / cycle - 1e-9))
     bps = spec.bytes_per_second
     expected_size = int(bps * target)
-    work_size = int(bps * cycle * 2)
+    work_size = int(bps * cycle)
     warnings: list[str] = list(spec.notes)
     if count == 1:
         warnings.append("영상 1개를 반복합니다. 반복 지점 분석 결과(적합/확인 필요/부적합)를 꼭 확인하세요.")
@@ -405,7 +467,14 @@ def run_background_build(
     progress_cb: Callable[[float, str], None] | None = None,
     temp_root: Path | None = None,
 ) -> BgResult:
-    """plan대로 디졸브 편집 → 목표 길이 반복. 원본은 읽기만 하고, 임시파일은 출력 폴더(또는 temp_root)에만 만든다."""
+    """plan대로 디졸브 편집 → 목표 길이 반복. 원본은 읽기만 하고, 임시파일은 출력 폴더(또는 temp_root)에만 만든다.
+
+    저장 공간 보호 (CRF는 크기가 고정되지 않으므로 3단계로 확인):
+    1) 시작 전: 보수적 비트레이트로 계산한 최대 동시 점유량(peak_bytes) + 여유 1 GB 이상 필요 (기존 검사).
+    2) 조각마다: 실제로 인코딩된 크기로 비트레이트를 다시 계산해, 남은 작업량이 남은 공간보다 크면 미리 중단.
+    3) 한 바퀴 완성 후: cycle.mp4 실제 크기 × 반복 = 최종 크기로 다시 검사.
+    그리고 작업 내내 2초마다 디스크 잔량을 확인한다. 중단 시 이 작업이 만든 임시 폴더와 .part.mp4만 지운다.
+    """
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     sources = {p.a.path.resolve() for p in plan.pieces} | {p.b.path.resolve() for p in plan.pieces if p.b}
@@ -415,24 +484,35 @@ def run_background_build(
         raise BuildError(f"출력 파일이 이미 존재합니다: {output.name}")
     ok, free, need = enough_disk_space(output.parent, plan.required_bytes)
     if not ok:
-        raise BuildError(f"저장 공간 부족: 남음 {free / 1024**3:.1f} GB / 필요 약 {need / 1024**3:.1f} GB")
+        raise BuildError(f"저장 공간 부족: 남음 {free / 1024**3:.1f} GB / 필요 약 {need / 1024**3:.1f} GB "
+                         f"(최종 약 {plan.expected_size / 1024**3:.1f} GB + 작업용 임시 약 "
+                         f"{(plan.required_bytes - plan.expected_size) / 1024**3:.1f} GB)")
 
     started = time.monotonic()
     temp_dir = Path(temp_root or output.parent) / f"{TEMP_PREFIX}{uuid.uuid4().hex[:10]}"
     temp_dir.mkdir(parents=True, exist_ok=False)
+    part = output.with_name(output.name + ".part.mp4")  # core.run_concat_copy가 만드는 임시 최종 파일
     encode_total = sum(p.length for p in plan.pieces)
     encode_weight = 0.8
+    stop = Event()  # 사용자 중지 또는 디스크 위험 → 실행 중인 FFmpeg 종료
+    watch = _DiskWatch(output.parent, temp_dir, cancel_event, stop)
+    watch.remaining = lambda: max(0, plan.required_bytes - _dir_bytes(temp_dir))
+    watch.start()
 
     def report(frac: float, text: str) -> None:
         if progress_cb:
             progress_cb(min(0.999, max(0.0, frac)), text)
 
+    def check_stop() -> None:
+        if stop.is_set() or cancel_event.is_set():
+            watch.raise_reason()
+
     try:
         files: list[Path] = []
         done = 0.0
+        written = 0
         for idx, piece in enumerate(plan.pieces):
-            if cancel_event.is_set():
-                raise BuildCancelled("사용자가 작업을 중지했습니다.")
+            check_stop()
             out = temp_dir / f"p{idx:04d}.mp4"
             base = done
 
@@ -441,22 +521,40 @@ def run_background_build(
                 report(frac, f"디졸브 편집 중 · {piece.label} ({idx + 1}/{len(plan.pieces)})")
 
             on_sec(0.0)
-            run_ffmpeg_progress(piece_command(ffmpeg, piece, plan.spec, out), cancel_event, on_sec)
+            try:
+                run_ffmpeg_progress(piece_command(ffmpeg, piece, plan.spec, out), stop, on_sec)
+            except BuildCancelled:
+                watch.raise_reason()
             if not out.exists() or out.stat().st_size == 0:
                 raise BuildError(f"편집 조각이 만들어지지 않았습니다: {piece.label}")
             files.append(out)
             done += piece.length
+            written += out.stat().st_size
+            # 2) 실측 비트레이트로 남은 작업량 재계산 (충분히 인코딩된 뒤부터: 3초 이상 또는 본문 조각 1개 이상)
+            if done >= min(3.0, encode_total):
+                rate = written / done * PROJECTION_HEADROOM
+                cyc = rate * plan.cycle_duration
+                peak = peak_bytes(cyc, rate * plan.target)
+                watch.remaining = lambda peak=peak: max(0, peak - _dir_bytes(temp_dir))
+                _check_projection(output.parent, temp_dir, peak - _dir_bytes(temp_dir), rate * plan.target,
+                                  "실제 인코딩 크기로 다시 계산해 보니")
 
         report(encode_weight, "한 바퀴 영상 합치는 중 (무손실)")
         cycle = temp_dir / "cycle.mp4"
-        _concat_copy_simple(ffmpeg, files, cycle, cancel_event)
+        try:
+            _concat_copy_simple(ffmpeg, files, cycle, stop)
+        except BuildCancelled:
+            watch.raise_reason()
         for f in files:
             try:
                 f.unlink()
             except OSError:
                 pass
         report(encode_weight + 0.02, "한 바퀴 영상 검사 중 (디코드 확인)")
-        decode_check(ffmpeg, cycle, cancel_event)
+        try:
+            decode_check(ffmpeg, cycle, stop)
+        except BuildCancelled:
+            watch.raise_reason()
         cinfo = probe_video(cycle, ffprobe)
         if (cinfo.width, cinfo.height) != (plan.spec.width, plan.spec.height):
             raise BuildError("편집본 해상도가 예상과 다릅니다.")
@@ -464,23 +562,182 @@ def run_background_build(
             raise BuildError(f"편집본 길이 검증 실패: 예상 {plan.cycle_duration:.2f}초, 실제 {cinfo.duration:.2f}초")
 
         repeats = max(1, math.ceil(plan.target / cinfo.duration - 1e-9))
+        final_size = int(cinfo.size * min(plan.target, cinfo.duration * repeats) / cinfo.duration)
+        # 3) 한 바퀴 실제 크기로 최종 MP4 공간 재검사 (cycle.mp4는 이미 디스크에 있으므로 최종 크기만 필요)
+        ok, free, need = enough_disk_space(output.parent, final_size)
+        if not ok:
+            raise BuildError(f"저장 공간 부족 (한 바퀴 실제 크기로 다시 계산): 최종 영상 약 {final_size / 1024**3:.2f} GB, "
+                             f"남음 {free / 1024**3:.1f} GB / 필요 약 {need / 1024**3:.1f} GB. "
+                             "원본과 기존 파일은 그대로이며, 이 작업의 임시 파일만 지웠습니다. "
+                             "공간을 확보하거나 길이를 줄이거나 [화질·용량]에서 용량이 작은 설정을 고르세요.")
+        watch.remaining = lambda: max(0, int(final_size * 1.02) - _file_size(part))
         long_plan = BuildPlan(sequence=(cycle,) * repeats, expected_duration=plan.target,
-                              expected_size=int(cinfo.size * plan.target / cinfo.duration),
-                              cycles=repeats, trim_to=plan.target, mode="time")
+                              expected_size=final_size, cycles=repeats, trim_to=plan.target, mode="time")
         base = encode_weight + 0.04
 
         def on_long(frac: float, _text: str) -> None:
             report(base + frac * (1 - base), f"목표 길이로 무손실 반복 연결 중 · {repeats}바퀴")
 
-        r = run_concat_copy(ffmpeg=ffmpeg, ffprobe=ffprobe, infos=[cinfo], plan=long_plan, output=output,
-                            cancel_event=cancel_event, progress_cb=on_long)
+        try:
+            r = run_concat_copy(ffmpeg=ffmpeg, ffprobe=ffprobe, infos=[cinfo], plan=long_plan, output=output,
+                                cancel_event=stop, progress_cb=on_long)
+        except BuildCancelled:
+            watch.raise_reason()
+        except BuildError as e:
+            if "No space left" in str(e) or "not enough space" in str(e):
+                raise BuildError("디스크 공간이 부족해 제작을 멈췄습니다. 원본과 기존 파일은 그대로이며, "
+                                 "이 작업의 임시 파일만 지웠습니다.\n" + str(e)) from e
+            raise
         final = probe_video(r.output, ffprobe)
         if progress_cb:
             progress_cb(1.0, "완료")
         return BgResult(r.output, final.duration, final.size, final.width, final.height, final.fps,
                         cinfo.duration, repeats, time.monotonic() - started)
     finally:
+        watch.close()
         shutil.rmtree(temp_dir, ignore_errors=True)
+        try:  # run_concat_copy도 지우지만, 예외 경로에서 남지 않게 한 번 더 (이 작업이 만든 이름만)
+            if part.exists():
+                part.unlink()
+        except OSError:
+            pass
+
+
+def _file_size(p: Path) -> int:
+    try:
+        return p.stat().st_size
+    except OSError:
+        return 0
+
+
+def _dir_bytes(folder: Path) -> int:
+    total = 0
+    try:
+        for p in Path(folder).iterdir():
+            total += _file_size(p)
+    except OSError:
+        pass
+    return total
+
+
+def _same_drive(a: Path, b: Path) -> bool:
+    try:
+        return os.stat(a).st_dev == os.stat(b).st_dev
+    except OSError:
+        return True
+
+
+def _check_projection(out_dir: Path, temp_dir: Path, remaining: float, final: float, why: str) -> None:
+    free = free_bytes(out_dir)
+    need = max(0.0, remaining)
+    if not _same_drive(out_dir, temp_dir):  # 임시 폴더가 다른 드라이브면 출력 드라이브에는 최종 파일만
+        need = final
+    if free < need + DISK_FLOOR:
+        raise BuildError(f"저장 공간 부족 예상: {why} 남은 작업에 약 {need / 1024**3:.2f} GB가 더 필요하지만 "
+                         f"남은 공간은 {free / 1024**3:.2f} GB입니다. 디스크가 가득 차기 전에 미리 멈췄습니다. "
+                         "원본과 기존 파일은 그대로이며, 이 작업의 임시 파일만 지웠습니다. "
+                         "공간을 확보하거나 길이를 줄이거나 [화질·용량]에서 용량이 작은 설정을 고르세요.")
+
+
+class _DiskWatch:
+    """작업 중 디스크 잔량 감시 스레드. 위험하면 stop을 켜서 실행 중인 FFmpeg를 끝내게 한다.
+
+    사용자 중지(cancel_event)도 여기서 stop으로 전달한다 (FFmpeg 실행기는 stop만 본다).
+    """
+
+    def __init__(self, out_dir: Path, temp_dir: Path, cancel_event: Event, stop: Event):
+        self.out_dir, self.temp_dir = Path(out_dir), Path(temp_dir)
+        self.cancel_event, self.stop = cancel_event, stop
+        self.remaining: Callable[[], int] = lambda: 0
+        self.reason: str | None = None
+        self._done = Event()
+        self._thread = threading.Thread(target=self._run, name="bg-disk-watch", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def close(self) -> None:
+        self._done.set()
+        self._thread.join(timeout=5)
+
+    def check_now(self) -> None:
+        try:
+            free = free_bytes(self.out_dir)
+            remaining = self.remaining() if _same_drive(self.out_dir, self.temp_dir) else 0
+        except Exception:
+            return
+        if free < DISK_FLOOR or free < remaining + DISK_FLOOR // 2:
+            self.reason = (f"작업 중 디스크 남은 공간이 위험할 만큼 줄어 안전하게 멈췄습니다 (남음 {free / 1024**3:.2f} GB, "
+                           f"남은 작업 약 {remaining / 1024**3:.2f} GB). 원본과 기존 파일은 그대로이며, "
+                           "이 작업의 임시 파일만 지웠습니다. 다른 프로그램이 디스크를 쓰고 있지 않은지 확인하세요.")
+            self.stop.set()
+
+    def _run(self) -> None:
+        last = 0.0
+        while not self._done.wait(0.2):
+            if self.cancel_event.is_set():
+                self.stop.set()
+            now = time.monotonic()
+            if now - last >= DISK_POLL_SECONDS and self.reason is None:
+                last = now
+                self.check_now()
+
+    def raise_reason(self) -> None:
+        if self.reason:
+            raise BuildError(self.reason)
+        raise BuildCancelled("사용자가 작업을 중지했습니다.")
+
+
+# ---------------- 반복 경계 미리보기 ----------------
+
+PREVIEW_CONTEXT = 2.5  # 경계 앞뒤로 보여 줄 초
+PREVIEW_SPEC = OutputSpec(640, 360, 30.0, "h264", 26, "veryfast", "미리보기 640×360")
+
+
+def seam_segments(clip_a: Clip, clip_b: Clip, dissolve: float, context: float = PREVIEW_CONTEXT) -> tuple[Segment, Segment]:
+    """clip_a 사용 구간의 마지막 (context+디졸브)초, clip_b 사용 구간의 처음 (디졸브+context)초.
+
+    같은 클립을 두 번 주면 '이 영상만 반복할 때의 이음새(끝 → 처음)'가 된다.
+    """
+    la = min(clip_a.used_length, context + dissolve)
+    lb = min(clip_b.used_length, context + dissolve)
+    if la < dissolve + 0.2 or lb < dissolve + 0.2:
+        raise ValueError("사용 구간이 너무 짧아 미리보기를 만들 수 없습니다.")
+    return Segment(clip_a.path, clip_a.used_end - la, la), Segment(clip_b.path, clip_b.used_start, lb)
+
+
+def seam_preview_command(ffmpeg: Path, a: Segment, b: Segment, dissolve: float, out: Path,
+                         spec: OutputSpec = PREVIEW_SPEC) -> list[str]:
+    """제작과 같은 정규화·디졸브(xfade)로 경계 부분만 저해상도로 빠르게 만든다 (소리 없음, 원본은 읽기만)."""
+    cmd = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-nostdin"]
+    for seg in (a, b):
+        cmd += ["-ss", f"{seg.start:.6f}", "-t", f"{seg.length + 0.5:.6f}", "-i", str(seg.path)]
+    total = a.length + b.length - dissolve
+    graph = (f"[0:v]{_norm_chain(spec, a.length)}[a];[1:v]{_norm_chain(spec, b.length)}[b];"
+             f"[a][b]xfade=transition=fade:duration={dissolve:.6f}:offset={a.length - dissolve:.6f},"
+             f"trim=duration={total:.6f},setpts=PTS-STARTPTS[v]")
+    cmd += ["-filter_complex", graph, "-map", "[v]", "-an", "-sn", "-dn", "-map_metadata", "-1",
+            "-c:v", spec.encoder, "-preset", spec.preset, "-crf", str(spec.crf), "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(out)]
+    return cmd
+
+
+def make_seam_preview(ffmpeg: Path, clip_a: Clip, clip_b: Clip, dissolve: float, out: Path,
+                      cancel_event: Event) -> Path:
+    a, b = seam_segments(clip_a, clip_b, dissolve)
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        run_ffmpeg_progress(seam_preview_command(ffmpeg, a, b, dissolve, out), cancel_event)
+    except BaseException:
+        try:
+            out.unlink()
+        except OSError:
+            pass
+        raise
+    if not out.exists() or out.stat().st_size == 0:
+        raise BuildError("미리보기를 만들지 못했습니다.")
+    return out
 
 
 def cleanup_stale_temp(folder: Path, max_age_hours: float = 12.0) -> int:
@@ -509,5 +766,6 @@ __all__ = [
     "Clip", "OutputSpec", "Segment", "Piece", "BgPlan", "BgResult", "TARGET_MINUTES", "DISSOLVE_CHOICES",
     "DEFAULT_DISSOLVE", "QUALITY_FHD", "QUALITY_4K", "GUARD_OWNER", "choose_output_spec", "build_bg_plan",
     "default_bg_output_name", "piece_command", "run_background_build", "run_ffmpeg_progress", "hevc_available",
-    "cleanup_stale_temp", "decode_check", "probe_video", "fps_expr",
+    "cleanup_stale_temp", "decode_check", "probe_video", "fps_expr", "EncodeProfile", "ENCODE_PROFILES",
+    "PROFILE_BEST", "get_profile", "peak_bytes", "seam_segments", "seam_preview_command", "make_seam_preview",
 ]

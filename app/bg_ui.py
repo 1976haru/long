@@ -9,18 +9,20 @@ from __future__ import annotations
 import os
 import queue
 import subprocess
+import tempfile
 import threading
 import tkinter as tk
+import uuid
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import bg_analysis as A
 from .bg_core import (
-    DEFAULT_DISSOLVE, DISSOLVE_CHOICES, GUARD_OWNER, QUALITY_4K, QUALITY_FHD, TARGET_MINUTES, BgPlan, Clip,
-    build_bg_plan, choose_output_spec, cleanup_stale_temp, default_bg_output_name, hevc_available,
-    run_background_build,
+    DEFAULT_DISSOLVE, DISSOLVE_CHOICES, ENCODE_PROFILES, GUARD_OWNER, PREVIEW_CONTEXT, QUALITY_4K, QUALITY_FHD,
+    TARGET_MINUTES, BgPlan, Clip, build_bg_plan, choose_output_spec, cleanup_stale_temp, default_bg_output_name,
+    get_profile, hevc_available, make_seam_preview, run_background_build,
 )
-from .core import BuildCancelled, ensure_unique_output, format_duration, free_bytes, probe_video
+from .core import BuildCancelled, enough_disk_space, ensure_unique_output, format_duration, free_bytes, probe_video
 from .settings import load_settings, update_settings
 from .tooling import FFMPEG_GUARD, prevent_windows_sleep, release_tk_variables
 from .ui_scroll import ScrollFrame
@@ -62,6 +64,12 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.plan: BgPlan | None = None
         self._hevc: bool | None = None
         self._threads: list[threading.Thread] = []
+        self.range_eval: dict[Path, A.LoopAdvice] = {}   # 사용자가 구간을 바꾼 클립: 그 구간 그대로의 평가
+        self._advice_cache: dict[tuple, A.LoopAdvice] = {}
+        self.previewing = False
+        self.preview_cancel = threading.Event()
+        self.preview_files: list[Path] = []
+        self.last_preview: Path | None = None
 
         saved = load_settings().get(SETTINGS_KEY)
         saved = saved if isinstance(saved, dict) else {}
@@ -73,6 +81,8 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.dissolve = tk.StringVar(value=_dissolve_label(d0 if d0 in DISSOLVE_CHOICES else DEFAULT_DISSOLVE))
         self.minutes = tk.IntVar(value=m0 if m0 in TARGET_MINUTES else 10)
         self.quality = tk.StringVar(value=saved.get("quality") if saved.get("quality") in (QUALITY_FHD, QUALITY_4K) else QUALITY_FHD)
+        self.profile = tk.StringVar(value=get_profile(saved.get("profile")).label)
+        self.profile_note = tk.StringVar()
         self.outdir = tk.StringVar(value=str(saved.get("outdir", "")))
         self.outname = tk.StringVar()
         self.summary = tk.StringVar(value="MP4 영상을 불러오세요 (30초~2분 길이 권장).")
@@ -131,7 +141,7 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.tree.configure(yscrollcommand=vs.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vs.pack(side="right", fill="y")
-        self.tree.bind("<<TreeviewSelect>>", lambda e: self._show_detail())
+        self.tree.bind("<<TreeviewSelect>>", lambda e: (self._show_detail(), self._refresh_buttons()))
         ttk.Label(f1, textvariable=self.summary).pack(anchor="w", pady=(4, 0))
 
         f2 = ttk.LabelFrame(root, text="2. 자동 분석 결과 (선택한 영상) — 휴리스틱 참고 지표이며 AI 인물·로고 인식은 하지 않습니다",
@@ -146,6 +156,15 @@ class BackgroundMakerWindow(tk.Toplevel):
         ttk.Button(rr, text="구간 적용", command=self._apply_range).pack(side="left")
         ttk.Button(rr, text="추천 구간 적용", command=self._apply_advice).pack(side="left", padx=4)
         ttk.Button(rr, text="전체 사용", command=self._full_range).pack(side="left")
+        pr = ttk.Frame(f2); pr.pack(fill="x", pady=(4, 0))
+        self.btn_preview_loop = ttk.Button(pr, text="▶ 반복 경계 미리보기 (끝 → 처음)",
+                                           command=lambda: self.preview_seam("self"))
+        self.btn_preview_loop.pack(side="left")
+        self.btn_preview_next = ttk.Button(pr, text="▶ 다음 장면 전환 미리보기",
+                                           command=lambda: self.preview_seam("next"))
+        self.btn_preview_next.pack(side="left", padx=4)
+        ttk.Label(pr, text=f"경계 앞뒤 약 {PREVIEW_CONTEXT:g}초를 저화질로 빠르게 만들어 재생합니다 (현재 사용 구간·디졸브 기준).",
+                  style="Hint.TLabel").pack(side="left", padx=(8, 0))
 
         f3 = ttk.LabelFrame(root, text="3. 만들기 설정", padding=6)
         f3.pack(fill="x", pady=(6, 0))
@@ -164,6 +183,15 @@ class BackgroundMakerWindow(tk.Toplevel):
                         command=self._options_changed).pack(side="left", padx=2)
         ttk.Radiobutton(o1, text="4K (원본이 4K일 때)", value=QUALITY_4K, variable=self.quality,
                         command=self._options_changed).pack(side="left", padx=2)
+        o3 = ttk.Frame(f3); o3.pack(fill="x", pady=(4, 0))
+        ttk.Label(o3, text="화질·용량").pack(side="left")
+        pc = ttk.Combobox(o3, textvariable=self.profile, state="readonly", width=26,
+                          values=[p.label for p in ENCODE_PROFILES])
+        pc.pack(side="left", padx=(4, 8))
+        pc.bind("<<ComboboxSelected>>", lambda e: self._options_changed())
+        self.cmb_profile = pc
+        ttk.Label(o3, textvariable=self.profile_note, style="Hint.TLabel", wraplength=820,
+                  justify="left").pack(side="left", fill="x", expand=True)
         o2 = ttk.Frame(f3); o2.pack(fill="x", pady=(4, 0))
         ttk.Label(o2, text="저장 폴더", width=9).pack(side="left")
         ttk.Entry(o2, textvariable=self.outdir).pack(side="left", fill="x", expand=True)
@@ -328,6 +356,14 @@ class BackgroundMakerWindow(tk.Toplevel):
                     self._finished(ev[1])
                 elif kind == "failed":
                     self._failed(ev[1], ev[2])
+                elif kind == "preview":
+                    self._preview_ready(ev[1], ev[2])
+                elif kind == "preview_error":
+                    self.previewing = False
+                    self.status.set("미리보기를 만들지 못했습니다" if ev[1] else "미리보기 취소됨")
+                    self._refresh_buttons()
+                    if ev[1] and not getattr(self, "quiet_errors", False):
+                        messagebox.showwarning("미리보기", ev[1], parent=self)
         except queue.Empty:
             pass
         except tk.TclError:
@@ -434,12 +470,32 @@ class BackgroundMakerWindow(tk.Toplevel):
         except ValueError:
             return DEFAULT_DISSOLVE
 
+    @staticmethod
+    def _custom_range(c: Clip) -> bool:
+        return c.start > 0.05 or c.end is not None
+
+    def verdict_advice(self, c: Clip) -> A.LoopAdvice | None:
+        """사용자가 구간을 바꿨으면 그 구간 그대로의 평가, 아니면 자동 추천 결과."""
+        if self._custom_range(c) and c.path in self.range_eval:
+            return self.range_eval[c.path]
+        return self.advice.get(c.path)
+
+    def _advice_for(self, an: A.ClipAnalysis, d: float, rng=None) -> A.LoopAdvice:
+        key = (id(an), d, rng)
+        adv = self._advice_cache.get(key)
+        if adv is None:
+            adv = A.recommend_loop(an, d) if rng is None else A.evaluate_range(an, rng[0], rng[1], d)
+            if len(self._advice_cache) > 400:
+                self._advice_cache.clear()
+            self._advice_cache[key] = adv
+        return adv
+
     def effective_dissolve(self) -> tuple[float, str]:
         """영상 1개 반복인데 반복 지점이 애매하면 디졸브를 2초로 늘려 이음새를 부드럽게 (대안 자동 적용)."""
         d = self.dissolve_seconds()
         active = [c for c in self.clips if c.enabled]
         if len(active) == 1 and d < 2.0:
-            adv = self.advice.get(active[0].path)
+            adv = self.verdict_advice(active[0])
             if adv is not None and adv.verdict != A.VERDICT_GOOD:
                 return 2.0, "영상 1개의 반복 경계가 어색할 수 있어 디졸브를 2초로 늘려 부드럽게 만듭니다."
         return d, ""
@@ -451,9 +507,14 @@ class BackgroundMakerWindow(tk.Toplevel):
     def _save_settings(self):
         try:
             update_settings(**{SETTINGS_KEY: {"dissolve": self.dissolve_seconds(), "minutes": int(self.minutes.get()),
-                                              "quality": self.quality.get(), "outdir": self.outdir.get().strip()}})
+                                              "quality": self.quality.get(), "outdir": self.outdir.get().strip(),
+                                              "profile": self.profile_key()}})
         except Exception:
             pass
+
+    def profile_key(self) -> str:
+        label = self.profile.get()
+        return next((p.key for p in ENCODE_PROFILES if p.label == label), ENCODE_PROFILES[0].key)
 
     def _hevc_ok(self) -> bool:
         if self._hevc is None:
@@ -467,10 +528,10 @@ class BackgroundMakerWindow(tk.Toplevel):
     def _loop_cell(self, c):
         if c.path in self.analysis_errors:
             return "분석 실패"
-        adv = self.advice.get(c.path)
+        adv = self.verdict_advice(c)
         if adv is None:
             return "분석 중…" if self.loading else "-"
-        return adv.verdict
+        return adv.verdict + (" (내 구간)" if self._custom_range(c) else "")
 
     def _quality_cell(self, c, dup_map):
         if c.path in self.analysis_errors:
@@ -495,7 +556,9 @@ class BackgroundMakerWindow(tk.Toplevel):
         if select is None:
             select = self._selected_index()
         d = self.dissolve_seconds()
-        self.advice = {p: A.recommend_loop(an, d) for p, an in self.analyses.items()}
+        self.advice = {p: self._advice_for(an, d) for p, an in self.analyses.items()}
+        self.range_eval = {c.path: self._advice_for(self.analyses[c.path], d, (c.used_start, c.end))
+                           for c in self.clips if self._custom_range(c) and c.path in self.analyses}
         dups = self.duplicate_findings()
         dup_map: dict[Path, str] = {}
         for f in dups:
@@ -523,6 +586,7 @@ class BackgroundMakerWindow(tk.Toplevel):
 
     def _recalc(self, dups=None):
         self.plan = None
+        self.profile_note.set(get_profile(self.profile_key()).note)
         active = [c for c in self.clips if c.enabled]
         if not active:
             self.plan_text.set("")
@@ -536,9 +600,12 @@ class BackgroundMakerWindow(tk.Toplevel):
         d, note = self.effective_dissolve()
         if note:
             warns.append(note)
+        prof = get_profile(self.profile_key())
+        self.profile_note.set(prof.note)
         try:
             spec = choose_output_spec([c.info for c in active], self.quality.get(),
-                                      hevc_available=self._hevc_ok() if self.quality.get() == QUALITY_4K else False)
+                                      hevc_available=self._hevc_ok() if self.quality.get() == QUALITY_4K else False,
+                                      profile=prof.key)
             plan = build_bg_plan(active, int(self.minutes.get()) * 60, d, spec)
         except ValueError as e:
             self.plan_text.set(f"⚠ {e}")
@@ -546,21 +613,30 @@ class BackgroundMakerWindow(tk.Toplevel):
             return
         self.plan = plan
         free_txt = ""
+        short = False
         try:
             folder = Path(self.outdir.get().strip()) if self.outdir.get().strip() else active[0].path.parent
             probe_dir = folder if folder.exists() else next((p for p in folder.parents if p.exists()), folder)
             free = free_bytes(probe_dir)
-            need = plan.required_bytes + 1024 ** 3
-            free_txt = f" · 여유 공간 {free / 1024**3:.1f} GB" + (" ⚠ 부족" if free < need else "")
+            _, _, need = enough_disk_space(probe_dir, plan.required_bytes)  # 제작 시작 때와 같은 기준 (여유 1 GB 포함)
+            short = free < need
+            free_txt = f" · 여유 공간 {free / 1024**3:.1f} GB" + (f" ⚠ 부족 (필요 약 {need / 1024**3:.1f} GB)" if short else "")
         except Exception:
             pass
         self.plan_text.set(
             f"{plan.spec.label} · {plan.spec.fps:g} FPS · 디졸브 {plan.dissolve:.2f}초 · 한 바퀴 {format_duration(plan.cycle_duration)}"
             f" × 약 {plan.target / plan.cycle_duration:.1f}바퀴 → {format_duration(plan.target)} · "
-            f"예상 용량 약 {plan.expected_size / 1024**3:.2f} GB (작업 중 임시 {plan.work_size / 1024**3:.2f} GB 추가){free_txt}")
+            f"예상 용량 약 {plan.expected_size / 1024**3:.2f} GB · 작업 중 최대 약 {plan.required_bytes / 1024**3:.2f} GB 사용"
+            f"{free_txt}")
+        warns.append("예상 용량은 넉넉하게 잡은 값입니다. 화면이 세밀할수록(물결·나뭇잎) 커지며, 제작 중 실제 크기로 다시 "
+                     "확인해 공간이 모자라면 디스크가 가득 차기 전에 자동으로 멈춥니다 (원본·기존 파일은 그대로).")
+        if short:
+            warns.append("저장 공간이 부족합니다. 다른 저장 폴더를 고르거나, 길이를 줄이거나, [화질·용량]에서 용량이 작은 설정을 고르세요.")
+        if prof.key in ("balanced", "small"):
+            warns.append(f"[{prof.label}] {prof.note}")
         warns += list(plan.warnings)
         if len(active) == 1:
-            adv = self.advice.get(active[0].path)
+            adv = self.verdict_advice(active[0])
             if adv is not None and adv.verdict != A.VERDICT_GOOD:
                 warns.append(f"[{adv.verdict}] {' '.join(adv.reasons)}")
             elif adv is None:
@@ -598,13 +674,22 @@ class BackgroundMakerWindow(tk.Toplevel):
             lines.append(f"촬영 형태: {an.camera} · 밝기 {an.brightness:.0f}/255 · 움직임 {an.motion:.1f} · "
                          f"장면 변화(4초) {an.drift:.1f}" + (f" · 선명도 {an.sharpness:.0f}" if an.sharpness is not None else ""))
             if adv:
-                lines.append(f"반복 평가: {adv.verdict} (경계 차이 {adv.score:.1f}, 낮을수록 자연스러움) — " + " ".join(adv.reasons))
+                lines.append(f"자동 추천: {adv.verdict} (경계 차이 {adv.score:.1f} = 밝기 {adv.luma_score:.1f} / 구도 "
+                             f"{adv.struct_score:.1f} 중 큰 값, 낮을수록 자연스러움) — " + " ".join(adv.reasons))
+            mine = self.range_eval.get(c.path) if self._custom_range(c) else None
+            if mine:
+                lines.append(f"지금 사용 구간 {c.used_start:.1f}~{c.used_end:.1f}초 그대로 반복: {mine.verdict} "
+                             f"(경계 차이 {mine.score:.1f} = 밝기 {mine.luma_score:.1f} / 구도 {mine.struct_score:.1f}) — "
+                             + " ".join(mine.reasons))
             lines.append("품질 참고: " + (" / ".join(an.quality_warnings) if an.quality_warnings else "특이사항 없음"))
         self.detail.set("\n".join(lines))
 
     def _refresh_buttons(self):
-        busy = self.running or bool(self.loading)
+        busy = self.running or bool(self.loading) or self.previewing
         try:
+            sel = self._selected_index() is not None
+            for b in (self.btn_preview_loop, self.btn_preview_next):
+                b.configure(state="disabled" if busy or not sel else "normal")
             self.btn_start.configure(state="disabled" if busy or not any(c.enabled for c in self.clips) else "normal")
             self.btn_stop.configure(state="normal" if self.running else "disabled")
             done = self.last_output is not None and self.last_output.exists()
@@ -616,7 +701,7 @@ class BackgroundMakerWindow(tk.Toplevel):
 
     # ---------------- 제작 ----------------
     def start(self, *, confirm=True):
-        if self.running or self.loading:
+        if self.running or self.loading or self.previewing:
             return False
         tools = self._tools()
         if not tools:
@@ -628,7 +713,7 @@ class BackgroundMakerWindow(tk.Toplevel):
             return False
         active = [c for c in self.clips if c.enabled]
         if confirm and len(active) == 1:
-            adv = self.advice.get(active[0].path)
+            adv = self.verdict_advice(active[0])
             verdict = adv.verdict if adv else A.VERDICT_CHECK
             if verdict != A.VERDICT_GOOD and not messagebox.askyesno(
                     verdict, f"이 영상은 '{verdict}'입니다.\n{' '.join(adv.reasons) if adv else '반복 지점 분석 결과가 없습니다.'}\n\n"
@@ -705,6 +790,66 @@ class BackgroundMakerWindow(tk.Toplevel):
         if not cancelled and not getattr(self, "quiet_errors", False):
             messagebox.showerror("제작 실패", msg, parent=self)
 
+    # ---------------- 반복 경계 미리보기 ----------------
+    def preview_seam(self, which: str = "self") -> bool:
+        """선택한 영상의 반복 경계(끝 → 처음) 또는 다음 장면으로의 전환을 앞뒤 약 2.5초씩 저화질로 만들어 연다."""
+        i = self._selected_index()
+        if i is None or self.running or self.loading or self.previewing:
+            return False
+        a = self.clips[i]
+        b = a
+        if which == "next":
+            active = [c for c in self.clips if c.enabled]
+            if a not in active or len(active) < 2:
+                messagebox.showinfo("미리보기", "사용 중인 영상이 2개 이상이어야 다음 장면 전환을 볼 수 있습니다.\n"
+                                            "(영상 1개면 [반복 경계 미리보기]를 쓰세요.)", parent=self)
+                return False
+            b = active[(active.index(a) + 1) % len(active)]
+        tools = self._tools()
+        if not tools:
+            return False
+        if not FFMPEG_GUARD.try_acquire(GUARD_OWNER):
+            messagebox.showwarning("FFmpeg 사용 중", _busy_text(FFMPEG_GUARD.owner) + "\n끝난 뒤 다시 시도하세요.", parent=self)
+            return False
+        d = self.effective_dissolve()[0]
+        folder = Path(tempfile.gettempdir()) / "PLVM_BG_PREVIEW"
+        out = folder / f"seam_{uuid.uuid4().hex[:8]}.mp4"
+        self.previewing = True
+        self.preview_cancel.clear()
+        label = (f"{a.path.name} 끝 → 처음" if b is a else f"{a.path.name} → {b.path.name}")
+        self.status.set(f"미리보기 만드는 중… ({label})")
+        self._refresh_buttons()
+        t = threading.Thread(target=self._preview_worker, args=(tools[0], a, b, d, out, label), daemon=True)
+        self._threads.append(t)
+        t.start()
+        return True
+
+    def _preview_worker(self, ff, a, b, d, out, label):
+        try:
+            p = make_seam_preview(Path(ff), a, b, d, out, self.preview_cancel)
+            self.events.put(("preview", p, label))
+        except BuildCancelled:
+            self.events.put(("preview_error", ""))
+        except Exception as e:
+            self.events.put(("preview_error", str(e)))
+        finally:
+            FFMPEG_GUARD.release(GUARD_OWNER)
+
+    def _preview_ready(self, path: Path, label: str):
+        self.previewing = False
+        old = [p for p in self.preview_files if p != path]
+        for p in old:  # 이전 미리보기는 지운다 (재생 중이라 잠겨 있으면 창을 닫을 때 다시 시도)
+            try:
+                p.unlink()
+                self.preview_files.remove(p)
+            except OSError:
+                pass
+        self.preview_files.append(path)
+        self.last_preview = path
+        self.status.set(f"미리보기: {label} · 앞 {PREVIEW_CONTEXT:g}초 → 디졸브 → 뒤 {PREVIEW_CONTEXT:g}초 (저화질, 소리 없음)")
+        self._refresh_buttons()
+        _open_path(path)
+
     # ---------------- 결과 ----------------
     def _open_output(self):
         if self.last_output and self.last_output.exists():
@@ -730,8 +875,14 @@ class BackgroundMakerWindow(tk.Toplevel):
     def destroy(self):
         self.cancel.set()
         self.stop_loading.set()
+        self.preview_cancel.set()
         for t in self._threads:  # FFmpeg를 남기지 않도록 잠깐 기다린다 (작업 스레드가 FFmpeg를 종료)
             t.join(timeout=8)
+        for p in self.preview_files:  # 이 창이 만든 미리보기 파일만 지운다
+            try:
+                p.unlink()
+            except OSError:
+                pass
         try:
             super().destroy()
         finally:

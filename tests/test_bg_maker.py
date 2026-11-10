@@ -390,6 +390,276 @@ def test_window_respects_ffmpeg_guard_and_rejects_broken(tkroot, clips_dir, quie
         w.destroy()
 
 
+# ---------------- P0: 용량 예측 · 저장 공간 보호 ----------------
+
+def test_profiles_set_crf_preset_and_size():
+    infos = [vi()]
+    best = B.choose_output_spec(infos)
+    assert (best.crf, best.preset, best.profile) == (18, "fast", B.PROFILE_BEST)  # 기본은 기존과 같음
+    small = B.choose_output_spec(infos, profile="small")
+    assert (small.crf, small.preset) == (24, "medium") and "CRF 24" in small.label
+    assert small.bytes_per_second < B.choose_output_spec(infos, profile="balanced").bytes_per_second < best.bytes_per_second
+    assert B.choose_output_spec(infos, profile="slow").bytes_per_second == best.bytes_per_second  # 느림은 용량 감소 보장 안 함
+    k4 = B.choose_output_spec([vi(w=3840, h=2160)], B.QUALITY_4K, hevc_available=True, profile="balanced")
+    assert (k4.codec, k4.crf) == ("hevc", 25)
+    assert B.get_profile("없는값").key == B.PROFILE_BEST
+    for p in B.ENCODE_PROFILES:  # 화질 저하 설명이 있어야 함
+        assert p.note
+    assert "화질 저하" in B.get_profile("small").note
+    cmd = B.piece_command(Path("ffmpeg"), B.build_bg_plan([B.Clip(vi())], 60, 1.0, small).pieces[0], small, Path("o.mp4"))
+    assert cmd[cmd.index("-crf") + 1] == "24" and cmd[cmd.index("-preset") + 1] == "medium"
+
+
+def test_size_estimate_is_conservative_for_fhd():
+    spec = B.choose_output_spec([vi()])
+    assert spec.bytes_per_second * 8 / 1e6 >= 21  # 실측 FHD 약 21~23 Mbps보다 작게 잡지 않는다
+
+
+def test_required_bytes_is_peak_of_cycle_plus_final():
+    spec = B.choose_output_spec([vi()])
+    clips = [B.Clip(vi("a.mp4", 30)), B.Clip(vi("b.mp4", 30))]
+    p = B.build_bg_plan(clips, 600, 1.0, spec)
+    cyc = spec.bytes_per_second * p.cycle_duration
+    assert p.work_size == pytest.approx(cyc, rel=1e-6)
+    assert p.required_bytes == pytest.approx(cyc + p.expected_size, rel=1e-6)
+    short = B.build_bg_plan(clips, 20, 1.0, spec)  # 최종이 한 바퀴보다 짧으면 2×cycle(조각+cycle.mp4)이 최대
+    assert short.required_bytes == pytest.approx(2 * short.work_size, rel=1e-6)
+    assert B.peak_bytes(10, 100) == 110 and B.peak_bytes(10, 5) == 20
+
+
+def _two_clips(clips_dir):
+    a = make_clip(clips_dir / "a.mp4", "testsrc2=s=640x360:r=30", 8, audio=False)
+    b = make_clip(clips_dir / "b.mp4", "mandelbrot=s=640x360:r=30", 8, audio=False)
+    return a, b, [probe_video(p, Path(FFPROBE)) for p in (a, b)]
+
+
+def _assert_clean(out_dir: Path, srcs, before, keep: Path):
+    assert leftovers(out_dir) == [] and [p.name for p in out_dir.iterdir()] == [keep.name]
+    assert keep.read_bytes() == b"user file"  # 기존 파일 보존
+    assert {p: sha(p) for p in srcs} == before  # 원본 보존
+
+
+@needs_ffmpeg
+def test_real_disk_watch_stops_safely_mid_build(clips_dir, tmp_path, monkeypatch):
+    a, b, infos = _two_clips(clips_dir)
+    before = {p: sha(p) for p in (a, b)}
+    plan = B.build_bg_plan([B.Clip(i) for i in infos], 600, 1.0, B.choose_output_spec(infos))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    keep = out_dir / "keep.mp4"
+    keep.write_bytes(b"user file")
+    t0 = time.monotonic()
+    monkeypatch.setattr(B, "DISK_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(B, "free_bytes", lambda p: 10 * 1024**4 if time.monotonic() - t0 < 1.0 else 100 * 1024**2)
+    with pytest.raises(BuildError, match="안전하게 멈췄습니다|저장 공간 부족 예상"):
+        B.run_background_build(ffmpeg=Path(FFMPEG), ffprobe=Path(FFPROBE), plan=plan, output=out_dir / "x.mp4",
+                               cancel_event=Event())
+    _assert_clean(out_dir, (a, b), before, keep)
+
+
+@needs_ffmpeg
+def test_real_projection_from_measured_bitrate_stops_early(clips_dir, tmp_path, monkeypatch):
+    a, b, infos = _two_clips(clips_dir)
+    before = {p: sha(p) for p in (a, b)}
+    plan = B.build_bg_plan([B.Clip(i) for i in infos], 600, 1.0, B.choose_output_spec(infos))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    keep = out_dir / "keep.mp4"
+    keep.write_bytes(b"user file")
+    monkeypatch.setattr(B, "DISK_POLL_SECONDS", 1e9)  # 감시 스레드 대신 조각별 재계산이 먼저 잡는지 확인
+    monkeypatch.setattr(B, "free_bytes", lambda p: 300 * 1024**2)
+    seen = []
+    with pytest.raises(BuildError, match="저장 공간 부족 예상"):
+        B.run_background_build(ffmpeg=Path(FFMPEG), ffprobe=Path(FFPROBE), plan=plan, output=out_dir / "x.mp4",
+                               cancel_event=Event(), progress_cb=lambda f, t: seen.append(t))
+    assert not any("반복 연결" in t for t in seen)  # 최종 연결 전에 멈춤
+    _assert_clean(out_dir, (a, b), before, keep)
+
+
+@needs_ffmpeg
+def test_real_recheck_with_actual_cycle_size(clips_dir, tmp_path, monkeypatch):
+    a, b, infos = _two_clips(clips_dir)
+    before = {p: sha(p) for p in (a, b)}
+    plan = B.build_bg_plan([B.Clip(i) for i in infos], 600, 1.0, B.choose_output_spec(infos))
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    keep = out_dir / "keep.mp4"
+    keep.write_bytes(b"user file")
+    calls = []
+
+    def fake(folder, size):
+        calls.append(size)
+        return (len(calls) == 1, 5 * 1024**3, size + 1024**3)  # 시작 전 검사는 통과, 한 바퀴 후 재검사는 부족
+    monkeypatch.setattr(B, "enough_disk_space", fake)
+    with pytest.raises(BuildError, match="한 바퀴 실제 크기"):
+        B.run_background_build(ffmpeg=Path(FFMPEG), ffprobe=Path(FFPROBE), plan=plan, output=out_dir / "x.mp4",
+                               cancel_event=Event())
+    assert len(calls) == 2 and calls[0] == plan.required_bytes and 0 < calls[1] < plan.expected_size
+    _assert_clean(out_dir, (a, b), before, keep)
+
+
+@needs_ffmpeg
+def test_real_profiles_shrink_output(clips_dir, tmp_path):
+    src = make_clip(clips_dir / "세밀.mp4", "mandelbrot=s=640x360:r=30", 6, audio=False)
+    info = probe_video(src, Path(FFPROBE))
+    sizes = {}
+    for key in ("best", "small"):
+        spec = B.choose_output_spec([info], profile=key)
+        r = B.run_background_build(ffmpeg=Path(FFMPEG), ffprobe=Path(FFPROBE),
+                                   plan=B.build_bg_plan([B.Clip(info)], 20, 1.0, spec),
+                                   output=tmp_path / f"{key}.mp4", cancel_event=Event())
+        assert abs(r.duration - 20) < 0.3
+        sizes[key] = r.size
+    assert sizes["small"] < sizes["best"] * 0.8
+
+
+# ---------------- P1: 반복 경계 · 페이드 · 미리보기 ----------------
+
+PAT = bytes(range(0, 144))
+
+
+def test_matched_diff_ignores_fade_but_not_structure():
+    faded = bytes(v // 2 for v in PAT)
+    assert A.grid_diff(PAT, faded) > 30 and A.matched_diff(PAT, faded) < 1.0
+    shifted = PAT[8:] + PAT[:8]
+    assert A.matched_diff(PAT, shifted) > 10
+    blank = bytes([5] * 144)
+    assert A.matched_diff(blank, blank) == 0
+
+
+def test_fade_grids_not_classified_as_moving():
+    fade = [bytes(v * k // 40 for v in PAT) for k in range(1, 41)] + [PAT] * 40  # 10초 페이드 인 + 10초 고정
+    st = [A.grid_stats(g) for g in fade]
+    drift = A._lag_diff(fade, 16, st)
+    motion = A._lag_diff(fade, 2, st)
+    assert A.classify_camera(motion, drift) == A.CAMERA_STATIC
+
+
+def test_loop_motion_mismatch_is_marked_uncertain():
+    q = bytes(min(255, max(0, v + (8 if i % 2 else -8))) for i, v in enumerate(PAT))
+    grids = [PAT] * 60 + [PAT, q] * 10  # 끝 5초만 화면이 떨림 (움직임 속도 차이), 경계 차이 자체는 작음
+    adv = A.recommend_loop(_an(grids), 1.0)
+    assert adv.score <= A.GOOD_SCORE and adv.verdict == A.VERDICT_CHECK and adv.uncertain
+    assert any("움직임 속도" in r for r in adv.reasons) and any("확인 필요" in r for r in adv.reasons)
+
+
+def test_loop_structure_difference_detected_when_brightness_equal():
+    other = PAT[::-1]  # 평균 밝기는 같고 구도만 다름
+    full = A.evaluate_range(_an([PAT] * 40 + [other] * 40), 0, None, 1.0)
+    assert full.verdict == A.VERDICT_BAD and full.struct_score > A.CHECK_SCORE
+    assert abs(A.grid_stats(PAT).mean - A.grid_stats(other).mean) < 0.01
+
+
+def test_evaluate_user_range():
+    g = [bytes([100] * 144)] * 70 + [bytes([200] * 144)] * 10
+    an = _an(g)
+    assert A.evaluate_range(an, 0, None, 1.0).verdict == A.VERDICT_BAD
+    mine = A.evaluate_range(an, 0, 17.0, 1.0)
+    assert mine.verdict == A.VERDICT_GOOD and mine.end == pytest.approx(17.0) and not any("추천 구간" in r for r in mine.reasons)
+
+
+def test_seam_segments_use_current_range():
+    c = B.Clip(vi("a.mp4", 30), start=2, end=20)
+    a, b = B.seam_segments(c, c, 1.0)
+    assert a.start == pytest.approx(20 - 3.5) and a.length == pytest.approx(3.5)
+    assert b.start == pytest.approx(2) and b.length == pytest.approx(3.5)
+    cmd = " ".join(B.seam_preview_command(Path("ffmpeg"), a, b, 1.0, Path("p.mp4")))
+    assert "xfade=transition=fade:duration=1.000000:offset=2.500000" in cmd and "-an" in cmd
+    with pytest.raises(ValueError):
+        B.seam_segments(B.Clip(vi("s.mp4", 1.0)), c, 1.0)
+
+
+@needs_ffmpeg
+def test_real_fade_in_static_scene_not_moving(clips_dir):
+    p = make_clip(clips_dir / "페이드.mp4", "smptehdbars=s=640x360:r=30,fade=in:st=0:d=6", 12, audio=False)
+    an = A.analyze_clip(Path(FFMPEG), p, probe_video(p, Path(FFPROBE)).duration)
+    assert an.camera != A.CAMERA_MOVING  # 페이드 인 고정 화면은 이동 촬영이 아님 (이전에는 오판)
+    assert A.recommend_loop(an, 1.0).verdict != A.VERDICT_GOOD  # 검은 화면 → 밝은 화면 경계는 여전히 '적합' 아님
+
+
+@needs_ffmpeg
+def test_real_seam_preview(clips_dir, tmp_path):
+    red = make_clip(clips_dir / "빨강.mp4", "color=c=red:s=1280x720:r=30", 6, audio=False)
+    blue = make_clip(clips_dir / "파랑.mp4", "color=c=blue:s=1280x720:r=25", 6, audio=False)
+    ca, cb = (B.Clip(probe_video(p, Path(FFPROBE))) for p in (red, blue))
+    out = B.make_seam_preview(Path(FFMPEG), ca, cb, 1.0, tmp_path / "p" / "seam.mp4", Event())
+    info = probe_video(out, Path(FFPROBE))
+    assert (info.width, info.height) == (640, 360) and abs(info.duration - 6.0) < 0.2
+    assert pixel(out, 0.5)[0] > 200 and pixel(out, 5.5)[2] > 200
+    m = pixel(out, 3.0)
+    assert 60 < m[0] < 200 and 60 < m[2] < 200
+    own = B.make_seam_preview(Path(FFMPEG), ca, ca, 1.0, tmp_path / "p" / "own.mp4", Event())
+    assert own.exists() and {p: sha(p) for p in (red,)} == {red: sha(red)}
+
+
+@needs_ffmpeg
+def test_window_profile_preview_range_eval(tkroot, clips_dir, tmp_path, quiet, monkeypatch):
+    import app.bg_ui as U
+    from app.settings import load_settings
+    from app.tooling import FFMPEG_GUARD
+    opened = []
+    monkeypatch.setattr(U, "_open_path", opened.append)
+    a = make_clip(clips_dir / "숲.mp4", "testsrc2=s=320x180:r=30", 8)
+    b = make_clip(clips_dir / "바다.mp4", "mandelbrot=s=320x180:r=25", 8)
+    w = U.BackgroundMakerWindow(tkroot, tools=lambda: (FFMPEG, FFPROBE))
+    try:
+        w.withdraw()
+        w.add_paths([a, b])
+        assert pump(w, lambda: not w.loading and len(w.analyses) == 2)
+        w.profile.set(B.get_profile("small").label)
+        w._options_changed()
+        assert w.plan.spec.crf == 24 and "화질 저하" in w.profile_note.get()
+        assert load_settings()["bg_maker"]["profile"] == "small"
+        assert "작업 중 최대" in w.plan_text.get()
+        w.tree.selection_set("0")
+        w._refresh_buttons()
+        assert str(w.btn_preview_loop.cget("state")) == "normal"
+        assert w.preview_seam("self")
+        assert str(w.btn_start.cget("state")) == "disabled"  # 미리보기 중에는 제작 시작 불가 (FFmpeg 1개)
+        assert pump(w, lambda: not w.previewing, timeout=60)
+        assert opened and opened[-1].exists() and opened[-1].suffix == ".mp4"
+        first = opened[-1]
+        assert w.preview_seam("next") and pump(w, lambda: not w.previewing, timeout=60)
+        assert len(opened) == 2 and not first.exists()  # 이전 미리보기는 정리
+        assert FFMPEG_GUARD.try_acquire("live")
+        try:
+            assert not w.preview_seam("self")
+        finally:
+            FFMPEG_GUARD.release("live")
+        w.range_start.set("1")
+        w.range_end.set("6")
+        w._apply_range()
+        assert w.tree.set("0", "loop").endswith("(내 구간)") and w.clips[0].path in w.range_eval
+        assert "지금 사용 구간" in w.detail.get()
+        last = opened[-1]
+    finally:
+        w.destroy()
+    assert not last.exists()  # 창을 닫으면 이 창이 만든 미리보기만 삭제
+
+
+NATURE_ENV = "PLVM_NATURE_SAMPLES"
+
+
+def test_real_nature_samples_build(tmp_path):
+    """실제 자연풍경 MP4 검증 (라이선스 확인된 샘플 폴더를 환경변수로 줄 때만). 없으면 SKIP — 합성 영상 테스트와 구분."""
+    import os
+    folder = os.environ.get(NATURE_ENV)
+    if not folder or not FFMPEG:
+        pytest.skip(f"실제 자연풍경 샘플 없음: {NATURE_ENV} 미설정 (합성 영상 테스트는 위에서 별도로 실행)")
+    files = sorted(Path(folder).glob("*.mp4"))[:4]
+    if len(files) < 2:
+        pytest.skip(f"{NATURE_ENV} 폴더에 MP4가 2개 미만")
+    before = {p: sha(p) for p in files}
+    infos = [probe_video(p, Path(FFPROBE)) for p in files]
+    for p, i in zip(files, infos):
+        adv = A.recommend_loop(A.analyze_clip(Path(FFMPEG), p, i.duration), 1.0)
+        assert adv.verdict in (A.VERDICT_GOOD, A.VERDICT_CHECK, A.VERDICT_BAD)
+    r = B.run_background_build(ffmpeg=Path(FFMPEG), ffprobe=Path(FFPROBE),
+                               plan=B.build_bg_plan([B.Clip(i) for i in infos], 180, 1.0, B.choose_output_spec(infos)),
+                               output=tmp_path / "nature_3M.mp4", cancel_event=Event())
+    assert abs(r.duration - 180) < 1.0 and {p: sha(p) for p in files} == before
+
+
 def test_main_window_opens_bg_and_receives_output(tmp_path, monkeypatch, quiet):
     import app.ui as ui
     monkeypatch.setattr(ui, "discover_ffmpeg", lambda root: None)
