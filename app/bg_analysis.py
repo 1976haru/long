@@ -643,7 +643,13 @@ def transition_warnings(ordered: Sequence[ClipAnalysis], dissolve: float = 1.0,
 
 
 def _pair_cost(t: TransitionAdvice) -> float:
+    """화면에 보이는 판정(어색함 > 확인 필요)을 먼저 줄이고, 연속값(밝기·색·움직임 차이)은 그 안에서만 비교한다.
+
+    연속값만 쓰면 '확인 필요' 여러 개로 늘어나는 순서가 더 싸게 나올 수 있었다 (실환경 6개 영상: 원래 순서보다
+    추천 순서의 경고가 많았음).
+    """
     cost = t.luma_jump / 10 + t.color_jump / 20 + abs(t.motion_end - t.motion_start) / 3
+    cost += {TRANS_BAD: 400.0, TRANS_CHECK: 60.0}.get(t.verdict, 0.0)
     if t.similar in ("동일 파일", "매우 유사"):
         cost += 100
     elif t.similar:

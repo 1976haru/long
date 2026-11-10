@@ -222,6 +222,23 @@ def test_suggest_order_separates_similar_scenes_including_wraparound():
     assert sorted(o) == list(range(10)) and o[0] == 0
 
 
+def _warn_score(seq):
+    w = {A.TRANS_BAD: 100, A.TRANS_CHECK: 1}
+    return sum(w.get(t.verdict, 0) for t in A.transition_advices(seq))
+
+
+def test_suggest_order_never_adds_visible_warnings():
+    """실환경 6개 영상에서 연속값만 줄이는 순서가 '확인 필요'를 늘린 회귀 — 화면 판정 기준으로 원래 순서보다 나빠지면 안 됨.
+    밝기가 조금씩 다른 장면 + 밝기 단계가 큰 장면을 섞어 여러 배치를 확인한다."""
+    import itertools
+    lumas = [40, 95, 150, 205, 120, 70]
+    for perm in itertools.islice(itertools.permutations(range(6)), 0, 720, 37):
+        ans = [_an(f"s{k}.mp4", [_grid(lumas[k], k % 3)] * 40, rgb=(lumas[k], lumas[k], 90 + 20 * k)) for k in perm]
+        order = A.suggest_order(ans)
+        assert order[0] == 0 and sorted(order) == list(range(6))
+        assert _warn_score([ans[k] for k in order]) <= _warn_score(ans), perm
+
+
 # ---------------- 실제 FFmpeg (합성 MP4) ----------------
 
 SCENES = [  # (이름, lavfi 원본, 길이, FPS) — 길이·FPS·해상도가 모두 다르게
