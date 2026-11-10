@@ -37,13 +37,13 @@ DEFAULT_DISSOLVE = 1.0
 DISK_FLOOR = 512 * 1024**2      # 작업 중 이 이하로 남으면(또는 남은 작업량+이 값보다 적으면) 안전하게 중단
 DISK_POLL_SECONDS = 2.0
 PROJECTION_HEADROOM = 1.15      # 실측 비트레이트로 다시 계산할 때 15% 여유
-MEASURE_HEADROOM = 1.25         # 제작 전 시험 인코딩(짧은 구간 몇 곳)으로 잰 값에 두는 여유
+MEASURE_HEADROOM = 1.40         # 공간 검사용: 실측(장면 본문 가운데 2초씩)에 두는 여유 — 실환경 최대 1.17배보다 넉넉히
 MEASURE_SECONDS = 2.0           # 시험 인코딩 구간 길이
-MEASURE_SAMPLES = 4
-# 화면 표시용 예상 범위 (실측 × 비율). 2초 시험 조각은 각각 키프레임으로 시작해 실제보다 크게 나온다 — 실환경 검증
-# (FHD 6개 영상 3·10분, H.264 3종·H.265): 실제 최종 크기 = 실측 × 0.75~0.82. 공간 검사는 여전히 실측 × 1.25(안전 쪽).
-MEASURE_SHOW_LOW = 0.70
-MEASURE_SHOW_HIGH = 1.05
+MEASURE_SAMPLES = 12            # 장면마다 1곳 (장면이 더 많으면 고르게 12곳), 장면 길이로 가중 평균
+# 화면 표시용 예상 범위 (실측 × 비율). 실환경 검증 (서로 다른 FHD 6개 영상, 3·10분, 고화질·균형·저용량·H.265,
+# 순서 2가지): 실제 최종 크기 = 실측 × 1.05~1.17 (디졸브 구간이 본문보다 조금 무거움, 순서와 무관하게 일정).
+MEASURE_SHOW_LOW = 0.95
+MEASURE_SHOW_HIGH = 1.30
 OWNER_FILE = "owner.txt"        # 임시 폴더 안: 이 작업이 만드는 .part.mp4 경로 (강제 종료 후 정리용)
 
 
@@ -534,18 +534,29 @@ def hevc_available(ffmpeg: Path) -> bool:
         return False
 
 
-def measurement_pieces(plan: BgPlan, count: int = MEASURE_SAMPLES, seconds: float = MEASURE_SECONDS) -> list[Piece]:
-    """예상 용량 실측용 짧은 구간: 장면(본문)들에 고르게 나눠 각 본문의 가운데에서 seconds초씩."""
+def _measurement_plan(plan: BgPlan, count: int, seconds: float) -> list[tuple[Piece, float]]:
+    """(시험 구간, 가중치=그 구간이 대표하는 본문 길이). 장면마다 1곳씩 — 장면이 count개보다 많으면 고르게 count곳.
+
+    예전에는 6개 장면 중 4곳만 재고 단순 평균해, 세밀한 장면이 빠지면 실제보다 22% 작게 나왔다 (실환경 GUI 검증).
+    """
     bodies = [p for p in plan.pieces if p.kind == "body" and p.length >= 0.5]
     if not bodies:
         return []
-    picks = [bodies[int(i * len(bodies) / min(count, len(bodies)))] for i in range(min(count, len(bodies)))]
+    k = min(count, len(bodies))
+    groups = [bodies[int(i * len(bodies) / k):int((i + 1) * len(bodies) / k)] for i in range(k)]
     out = []
-    for p in picks:
+    for g in groups:
+        p = max(g, key=lambda x: x.length)
         ln = min(seconds, p.length)
         start = p.a.start + max(0.0, (p.length - ln) / 2)
-        out.append(Piece("body", Segment(p.a.path, start, ln), None, ln, f"용량 측정 · {p.label}"))
+        out.append((Piece("body", Segment(p.a.path, start, ln), None, ln, f"용량 측정 · {p.label}"),
+                    sum(x.length for x in g)))
     return out
+
+
+def measurement_pieces(plan: BgPlan, count: int = MEASURE_SAMPLES, seconds: float = MEASURE_SECONDS) -> list[Piece]:
+    """예상 용량 실측용 짧은 구간: 각 장면(본문) 가운데에서 seconds초씩 (최대 count곳)."""
+    return [p for p, _ in _measurement_plan(plan, count, seconds)]
 
 
 def measure_bitrate(ffmpeg: Path, plan: BgPlan, cancel_event: Event, work_dir: Path,
@@ -555,34 +566,36 @@ def measure_bitrate(ffmpeg: Path, plan: BgPlan, cancel_event: Event, work_dir: P
     시험 파일은 work_dir 안 이 함수가 만든 임시 폴더에만 쓰고 끝나면 지운다.
     각 구간이 키프레임으로 시작하므로 실제보다 약간 크게 나오는 편(=안전한 쪽)이다.
     """
-    pieces = measurement_pieces(plan)
-    if not pieces:
+    picks = _measurement_plan(plan, MEASURE_SAMPLES, MEASURE_SECONDS)
+    if not picks:
         raise BuildError("용량을 잴 장면이 없습니다.")
     tmp = Path(work_dir) / f"{TEMP_PREFIX}measure_{uuid.uuid4().hex[:8]}"
     tmp.mkdir(parents=True, exist_ok=False)
     try:
-        size = 0
-        secs = 0.0
-        for k, p in enumerate(pieces):
+        weighted = 0.0  # Σ (구간 바이트/초 × 그 구간이 대표하는 본문 길이)
+        weight = 0.0
+        for k, (p, w) in enumerate(picks):
             if cancel_event.is_set():
                 raise BuildCancelled("사용자가 작업을 중지했습니다.")
             if progress_cb:
-                progress_cb(k / len(pieces), f"예상 용량 실측 중 ({k + 1}/{len(pieces)})")
+                progress_cb(k / len(picks), f"예상 용량 실측 중 ({k + 1}/{len(picks)})")
             out = tmp / f"m{k}.mp4"
             run_ffmpeg_progress(piece_command(ffmpeg, p, plan.spec, out), cancel_event)
-            size += _file_size(out)
-            secs += p.length
-        if size <= 0 or secs <= 0:
+            size = _file_size(out)
+            if size > 0 and p.length > 0:
+                weighted += size / p.length * w
+                weight += w
+        if weighted <= 0 or weight <= 0:
             raise BuildError("시험 인코딩 결과가 비어 있습니다.")
         if progress_cb:
             progress_cb(1.0, "예상 용량 실측 완료")
-        return size / secs
+        return weighted / weight
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def with_measured_rate(plan: BgPlan, bytes_per_second: float) -> BgPlan:
-    """실측 비트레이트를 반영한 계획 (예상 크기 = 실측 × 길이, 공간 검사 = 실측 × 1.25)."""
+    """실측 비트레이트를 반영한 계획 (예상 크기 = 실측 × 길이, 공간 검사 = 실측 × MEASURE_HEADROOM)."""
     return replace(plan, measured_bps=float(bytes_per_second), expected_size=int(bytes_per_second * plan.target),
                    work_size=int(bytes_per_second * plan.cycle_duration))
 

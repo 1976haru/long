@@ -93,13 +93,29 @@ def test_measured_rate_changes_estimate_and_keeps_headroom():
     assert m.expected_size == 600_000_000
     lo, hi = m.size_range
     assert lo < m.expected_size < hi == int(600_000_000 * B.MEASURE_SHOW_HIGH)
-    # 실환경: 실제 = 실측 × 0.75~0.82 → 표시 범위 안에 들어가야 하고, 공간 검사(1.25배)는 범위 상한보다 넉넉해야 함
-    assert all(lo <= int(600_000_000 * r) <= hi for r in (0.75, 0.82, 1.0))
-    assert m.required_bytes >= hi
-    assert m.required_bytes == B.peak_bytes(1_250_000 * m.cycle_duration, 1_250_000 * 600)
+    # 실환경: 실제 = 실측 × 1.05~1.17 → 표시 범위 안에 들어가야 하고, 공간 검사 여유는 그보다 넉넉해야 함
+    assert all(lo <= int(600_000_000 * r) <= hi for r in (1.0, 1.05, 1.17))
+    assert m.required_bytes >= hi and B.MEASURE_HEADROOM >= 1.17 * 1.15
+    rate = 1_000_000 * B.MEASURE_HEADROOM
+    assert m.required_bytes == B.peak_bytes(rate * m.cycle_duration, rate * 600)
     pieces = B.measurement_pieces(plan)
     assert len(pieces) == 2 and {p.a.path.name for p in pieces} == {"a.mp4", "b.mp4"}
     assert all(p.length == B.MEASURE_SECONDS for p in pieces)
+
+
+def test_measurement_samples_every_scene_weighted_by_length():
+    """예전엔 6개 장면 중 4곳만 재서 세밀한 장면이 빠지면 실제보다 22% 작게 나왔다 → 장면마다 1곳, 길이 가중."""
+    spec = B.choose_output_spec([vi()])
+    clips = [B.Clip(vi(f"s{k}.mp4", 10 + 5 * k)) for k in range(6)]
+    plan = B.build_bg_plan(clips, 600, 1.0, spec)
+    picks = B._measurement_plan(plan, B.MEASURE_SAMPLES, B.MEASURE_SECONDS)
+    assert {p.a.path.name for p, _ in picks} == {f"s{k}.mp4" for k in range(6)}
+    bodies = {p.a.path.name: p.length for p in plan.pieces if p.kind == "body"}
+    assert all(abs(w - bodies[p.a.path.name]) < 1e-6 for p, w in picks)
+    many = B.build_bg_plan([B.Clip(vi(f"m{k}.mp4", 8)) for k in range(30)], 600, 1.0, spec)
+    mp = B._measurement_plan(many, B.MEASURE_SAMPLES, B.MEASURE_SECONDS)
+    assert len(mp) == B.MEASURE_SAMPLES  # 장면이 많으면 고르게 12곳, 가중치 합 = 전체 본문 길이
+    assert abs(sum(w for _, w in mp) - sum(p.length for p in many.pieces if p.kind == "body")) < 1e-6
 
 
 def test_stale_cleanup_removes_only_owned_part(tmp_path):
@@ -326,7 +342,7 @@ def test_real_measure_bitrate_close_to_actual_and_clean(six_scenes, tmp_path):
     r = B.run_background_build(ffmpeg=Path(FFMPEG), ffprobe=Path(FFPROBE), plan=B.with_measured_rate(plan, bps),
                                output=tmp_path / "o.mp4", cancel_event=Event())
     actual = r.size / r.duration
-    assert 0.4 < bps / actual < 2.5  # 짧은 시험 구간 기준 — 같은 자릿수 (공간 검사는 ×1.25 + 제작 중 재검사)
+    assert 0.4 < bps / actual < 2.5  # 짧은 시험 구간 기준 — 같은 자릿수 (공간 검사는 ×MEASURE_HEADROOM + 제작 중 재검사)
 
 
 @needs_ffmpeg
