@@ -17,10 +17,11 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import stock_rights as R
-from .core import creationflags_no_window
+from .core import BuildCancelled, creationflags_no_window
 from . import settings as _settings
 from .settings import load_settings, update_settings
 from .stock_download import DownloadError, Library, default_library_dir, download
+from . import media_audio as MA
 from .stock_keys import KEY_PROVIDERS, SIGNUP, KeyStore, read_legacy_key
 from .stock_net import PEXELS, PROVIDERS, NetError, ProviderClient, fetch_bytes, url_allowed
 from .stock_player import ERROR, PLAYING, PreviewPlayer, find_ffplay, fmt, probe_media
@@ -95,6 +96,14 @@ class StockSearchWindow(tk.Toplevel):
         self.player_text = tk.StringVar(value="미리보기: 결과를 선택하고 [▶ 미리보기 재생]")
         self.time_text = tk.StringVar(value="00:00 / 00:00")
         self.loop = tk.BooleanVar(value=False)
+        aopt = load_settings().get(MA.SETTINGS_KEY)
+        aopt = aopt if isinstance(aopt, dict) else {}
+        self.audio_exclude = tk.BooleanVar(value=True)   # 항상 적용 (④⑥은 영상 스트림만 사용)
+        self.save_silent = tk.BooleanVar(value=bool(aopt.get("save_silent_copy", False)))
+        self.silent_running = False
+        self.silent_cancel = threading.Event()
+        self.silent_results: list = []
+        self._auto_silent = False
         self.thumbs: dict[str, tk.PhotoImage] = {}
         self.thumb_queue: queue.Queue = queue.Queue()
         self.last_downloaded: list[str] = []
@@ -231,16 +240,28 @@ class StockSearchWindow(tk.Toplevel):
         ttk.Button(lr, text="변경", command=self._pick_libdir).pack(side="left")
         ttk.Button(lr, text="폴더 열기", command=lambda: _open_path(Path(self.libdir.get()))).pack(side="left", padx=4)
         lf = ttk.Frame(f5); lf.pack(fill="both", expand=True, pady=(4, 0))
-        lcols = ("file", "prov", "probe", "rights", "sha", "warn")
-        self.lib = ttk.Treeview(lf, columns=lcols, show="headings", height=5, selectmode="extended")
-        for c, h, w in zip(lcols, ("파일", "제공처", "실측 (해상도·FPS·코덱·길이)", "권리 상태", "SHA256", "확인 사항"),
-                           (260, 110, 240, 110, 100, 330)):
+        lcols = ("file", "prov", "probe", "rights", "sha", "warn", "audio")
+        self.lib = ttk.Treeview(lf, columns=lcols, show="headings", height=5, selectmode="extended",
+                                displaycolumns=("file", "prov", "probe", "audio", "rights", "sha", "warn"))
+        for c, h, w in zip(lcols, ("파일", "제공처", "실측 (해상도·FPS·코덱·길이)", "권리 상태", "SHA256", "확인 사항",
+                                   "원본 오디오"),
+                           (250, 110, 230, 110, 100, 280, 120)):
             self.lib.heading(c, text=h)
             self.lib.column(c, width=w, anchor="w")
         lvs = ttk.Scrollbar(lf, orient="vertical", command=self.lib.yview)
         self.lib.configure(yscrollcommand=lvs.set)
         self.lib.pack(side="left", fill="both", expand=True)
         lvs.pack(side="right", fill="y")
+        ao = ttk.Frame(f5); ao.pack(fill="x", pady=(4, 0))
+        ttk.Checkbutton(ao, text=MA.EXCLUDE_OPTION, variable=self.audio_exclude, state="disabled").pack(side="left")
+        ttk.Checkbutton(ao, text=MA.SILENT_OPTION + " (받을 때 자동 · 저장 공간 늘어남)", variable=self.save_silent,
+                        command=self._save_audio_opts).pack(side="left", padx=(12, 0))
+        self.btn_silent = ttk.Button(ao, text="무음 MP4 따로 저장", command=self.save_silent_selected)
+        self.btn_silent.pack(side="right")
+        self.btn_recheck = ttk.Button(ao, text="오디오 다시 검사", command=self.recheck_audio_selected)
+        self.btn_recheck.pack(side="right", padx=4)
+        ttk.Label(f5, text="받은 원본 파일은 그대로 둡니다. ④·⑥으로 만든 결과에는 원본 오디오가 들어가지 않습니다 "
+                           "(무음 사본은 필요할 때만 — 영상만 복사, 재인코딩 없음).", style="Hint.TLabel").pack(anchor="w")
 
         dr = ttk.Frame(bottom); dr.pack(fill="x")
         self.btn_dl = ttk.Button(dr, text="선택 다운로드", command=self.download_selected, style="Primary.TButton")
@@ -322,6 +343,7 @@ class StockSearchWindow(tk.Toplevel):
             self.btn_cancel_search.configure(state="normal" if busy else "disabled")
             n = len(self.selected[self.mode.get()])
             self.btn_dl.configure(text=f"선택 다운로드 ({n}개)", state="disabled" if self.downloading or not n else "normal")
+            self.btn_silent.configure(state="disabled" if self.silent_running or self.downloading else "normal")
             self.btn_dl_cancel.configure(state="normal" if self.downloading else "disabled")
             self.btn_send.configure(state="normal" if self.send_to_bg_cb and self.lib.get_children() else "disabled")
         except tk.TclError:
@@ -598,6 +620,7 @@ class StockSearchWindow(tk.Toplevel):
         self.downloading = True
         self.cancel_dl.clear()
         self._refresh_buttons()
+        self._auto_silent = bool(self.save_silent.get())
         t = threading.Thread(target=self._dl_worker, args=(picks, mode, self.mode_res[mode], lib, ff, fp), daemon=True)
         self._threads.append(t)
         t.start()
@@ -624,6 +647,8 @@ class StockSearchWindow(tk.Toplevel):
                 self.events.put(("dl_item", c.key, "실패", str(ex)))
             except Exception as ex:  # pragma: no cover
                 self.events.put(("dl_item", c.key, "실패", f"{type(ex).__name__}"))
+        if done and self._auto_silent and not self.cancel_dl.is_set() and ff and fp:  # Tk 변수는 읽지 않음 (작업 스레드)
+            self._silent_worker([Path(x) for x in done], ff, fp, Path(lib), auto=True)
         self.events.put(("dl_done", done))
 
     def _refresh_library(self):
@@ -636,12 +661,104 @@ class StockSearchWindow(tk.Toplevel):
             pr = e.get("probe") or {}
             probe = (f"{pr.get('width')}×{pr.get('height')} · {pr.get('fps')}fps · {pr.get('codec')} · "
                      f"{fmt(float(pr.get('duration') or 0))}" + ("" if pr.get("playable") else " ⚠ 재생 검사 실패"))
+            ac = MA.AudioCheck.from_json(e.get("audio"))
+            atext = ac.short if ac else "미검사 — [오디오 다시 검사]"
+            if e.get("silent_copy"):
+                atext += " · 무음 사본 있음"
+            if e.get("derived_from"):
+                atext = "🔇 무음 사본"
             self.lib.insert("", "end", iid=str(i), values=(p.name, e.get("provider"), probe,
                                                          (e.get("rights") or {}).get("state", "?"),
-                                                         str(e.get("sha256", ""))[:12], "; ".join(e.get("warnings") or [])))
+                                                         str(e.get("sha256", ""))[:12], "; ".join(e.get("warnings") or []),
+                                                         atext))
             if str(p) in self.last_downloaded:
                 self.lib.selection_add(str(i))
         self._refresh_buttons()
+
+    # ---------------- 원본 오디오 ----------------
+    def _save_audio_opts(self):
+        try:
+            update_settings(**{MA.SETTINGS_KEY: {"exclude": True, "save_silent_copy": bool(self.save_silent.get())}})
+        except Exception:
+            pass
+
+    def _library(self) -> Library:
+        return Library(Path(self.libdir.get().strip() or default_library_dir()))
+
+    def recheck_audio_selected(self) -> bool:
+        """선택한 받은 영상(없으면 미검사·확인 불가 전부)의 원본 오디오를 다시 검사해 라이브러리에 기록."""
+        lib = self._library()
+        paths = self.library_paths() if self.lib.selection() else [
+            Path(e["path"]) for e in lib.entries() if Path(e.get("path", "")).is_file()
+            and (MA.AudioCheck.from_json(e.get("audio")) or MA.AudioCheck(MA.UNKNOWN)).status == MA.UNKNOWN]
+        if not paths:
+            return False
+        try:
+            fp = (self.tools() or (None, None))[1]
+        except Exception:
+            fp = None
+        for pth in paths:
+            lib.update(str(pth), {"audio": MA.check_audio(Path(fp) if fp else None, pth).to_json()})
+        self._refresh_library()
+        self.dl_text.set(f"원본 오디오를 다시 검사했습니다 ({len(paths)}개).")
+        return True
+
+    def save_silent_selected(self) -> bool:
+        """선택한 받은 영상의 무음 사본 (영상 스트림 복사). 원본·권리 기록은 그대로 두고 관계를 기록."""
+        paths = self.library_paths() if self.lib.selection() else []
+        if not paths:
+            if not getattr(self, "quiet_errors", False):
+                messagebox.showinfo("무음 MP4", "받은 영상 목록에서 영상을 선택하세요.", parent=self)
+            return False
+        if self.silent_running or self.downloading:
+            return False
+        ff, fp = self._ask_tools()
+        if not ff or not fp:
+            return False
+        self.silent_running = True
+        self.silent_cancel = threading.Event()
+        self._refresh_buttons()
+        t = threading.Thread(target=self._silent_worker, args=(paths, ff, fp, self._library().root), daemon=True)
+        self._threads.append(t)
+        t.start()
+        return True
+
+    def _silent_worker(self, paths, ff, fp, libroot: Path, auto: bool = False):
+        """작업 스레드: Tk 객체·변수에 손대지 않는다 (결과는 이벤트로만)."""
+        from .tooling import FFMPEG_GUARD
+        lib = Library(Path(libroot))
+        made, notes = [], []
+        if not FFMPEG_GUARD.try_acquire("stock"):
+            self.events.put(("silent_done", [], ["FFmpeg가 다른 작업에 쓰이는 중이라 무음 사본은 나중에 [무음 MP4 따로 저장]으로 "
+                                                 "만드세요."]))
+            return
+        try:
+            for pth in paths:
+                if self.silent_cancel.is_set():
+                    notes.append("중지했습니다 (임시 파일만 정리, 원본은 그대로).")
+                    break
+                e = next((x for x in lib.entries() if x.get("path") == str(pth)), None)
+                ac = MA.AudioCheck.from_json((e or {}).get("audio"))
+                if e is None or e.get("derived_from"):
+                    continue
+                if auto and (ac is None or ac.status != MA.PRESENT):
+                    continue  # 자동 저장은 오디오가 있는 영상만
+                if e.get("silent_copy") and Path(e["silent_copy"].get("path", "")).is_file():
+                    notes.append(f"{pth.name}: 무음 사본이 이미 있습니다.")
+                    continue
+                self.events.put(("silent_status", f"무음 사본 만드는 중… {pth.name} (영상만 복사)"))
+                try:
+                    r = MA.make_silent_copy(ffmpeg=Path(ff), ffprobe=Path(fp), src=pth, cancel=self.silent_cancel)
+                    lib.add_derived(e, r)
+                    made.append(r)
+                except BuildCancelled:
+                    notes.append("중지했습니다 (임시 파일만 정리, 원본은 그대로).")
+                    break
+                except Exception as ex:
+                    notes.append(f"{pth.name}: {ex}")
+        finally:
+            FFMPEG_GUARD.release("stock")
+            self.events.put(("silent_done", made, notes))
 
     def _pick_libdir(self):
         d = filedialog.askdirectory(parent=self, title="⑤ 라이브러리 저장 폴더")
@@ -727,6 +844,16 @@ class StockSearchWindow(tk.Toplevel):
                     c_key, stt, note = ev[1], ev[2], ev[3]
                     self.dl_text.set(f"{stt}: {c_key.split(':', 1)[-1][:50]} {('— ' + note) if note else ''}")
                     self.dl_log.append((c_key, stt, note))
+                elif kind == "silent_status":
+                    self.dl_text.set(ev[1])
+                elif kind == "silent_done":
+                    self.silent_running = False
+                    self.silent_results = list(ev[1])
+                    msg = (f"무음 사본 {len(ev[1])}개 완성 (영상만 복사 · 원본·권리 기록은 그대로): "
+                           + ", ".join(r.output.name for r in ev[1])) if ev[1] else "무음 사본: 새로 만든 파일 없음"
+                    self.silent_message = msg + ("" if not ev[2] else " · " + " / ".join(ev[2]))
+                    self.dl_text.set(self.silent_message)
+                    self._refresh_library()
                 elif kind == "dl_done":
                     self.downloading = False
                     self.last_downloaded = [str(p) for p in ev[1]]
@@ -750,6 +877,7 @@ class StockSearchWindow(tk.Toplevel):
     def destroy(self):
         self.cancel_search.set()
         self.cancel_dl.set()
+        self.silent_cancel.set()
         self.stop_thumbs.set()
         self.player.stop()
         for t in self._threads:

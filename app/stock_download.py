@@ -152,6 +152,41 @@ class Library:
             es.append(entry)
             self._save(es)
 
+    def update(self, path: str, changes: dict) -> dict | None:
+        """경로가 같은 항목에 값만 더한다 (다른 항목·파일은 건드리지 않음)."""
+        with self._lock:
+            es = self.entries()
+            hit = None
+            for e in es:
+                if e.get("path") == path:
+                    e.update(changes)
+                    hit = e
+            if hit is not None:
+                self._save(es)
+            return hit
+
+    def add_derived(self, source: dict, result) -> dict:
+        """무음 사본을 별도 항목으로 등록 (원본 항목·파일은 그대로, 관계·SHA256 기록)."""
+        from .media_audio import NONE, RIGHTS_NOTE
+        entry = {k: v for k, v in source.items() if k not in ("status", "note")}
+        entry.update({
+            "key": f"{source.get('key', '')}#noaudio", "path": str(result.output), "size": result.size,
+            "sha256": result.output_sha256, "derived_from": {"path": source.get("path"), "sha256": result.source_sha256,
+                                                             "operation": "원본 오디오 제거 (영상 스트림 복사)"},
+            "audio": {"status": NONE, "error": "", "streams": []},
+            "probe": {**(source.get("probe") or {}), "width": result.width, "height": result.height, "fps": round(result.fps, 3),
+                      "codec": result.codec, "duration": round(result.duration, 3)},
+            "warnings": [RIGHTS_NOTE],
+        })
+        with self._lock:
+            es = self.entries()
+            es.append(entry)
+            for e in es:
+                if e.get("path") == source.get("path"):
+                    e["silent_copy"] = {"path": str(result.output), "sha256": result.output_sha256}
+            self._save(es)
+        return entry
+
     def find_key(self, key: str) -> dict | None:
         return next((e for e in self.entries() if e.get("key") == key and Path(e.get("path", "")).is_file()), None)
 
@@ -292,6 +327,8 @@ def download(c: Candidate, rend: Rendition, library: Library, *, mode: str, ffpr
         side.unlink(missing_ok=True)
         return {**dup, "status": "중복", "note": f"같은 파일이 이미 있습니다: {Path(dup['path']).name}"}
     pr = probe_file(ffprobe, ffmpeg, part) if ffprobe else Probe(error="ffprobe 없음")
+    from .media_audio import check_audio
+    audio = check_audio(ffprobe, part)  # 원본 오디오 유무 (④⑥ 결과에는 항상 제외 — 기록·표시용)
     os.replace(part, target)
     side.unlink(missing_ok=True)
     warns = []
@@ -317,6 +354,7 @@ def download(c: Candidate, rend: Rendition, library: Library, *, mode: str, ffpr
         "rendition": rend.text, "meta": {"width": rend.width, "height": rend.height, "duration": c.duration},
         "probe": {"width": pr.width, "height": pr.height, "fps": pr.fps, "codec": pr.codec,
                   "duration": round(pr.duration, 3), "playable": pr.playable, "error": pr.error},
+        "audio": audio.to_json(),
         "rights": record, "verified_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "mode": mode, "warnings": warns,
     }

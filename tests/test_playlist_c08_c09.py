@@ -154,8 +154,9 @@ def test_loop_plan_uses_bg_cycle_boundary():
     lp = P.plan_loop(_info(dur=610.0), 120.0, 3000)       # ④가 10분 10초로 잘라 만든 배경 (한 바퀴 2분)
     assert lp.unit == pytest.approx(600.0) and lp.outpoint == pytest.approx(600.0)
     assert lp.repeats == 5 and lp.natural and lp.seams[0] == pytest.approx(600.0)
-    nat = P.plan_loop(_info(dur=600.0), 120.0, 3000)      # 한 바퀴 배수면 outpoint 없이 파일 전체
-    assert nat.outpoint is None and nat.repeats == 5
+    nat = P.plan_loop(_info(dur=600.0), 120.0, 3000)      # 한 바퀴 배수여도 반복 시에는 경계에서 자름 (끝이 -t로 잘려 있음)
+    assert nat.outpoint == pytest.approx(600.0) and nat.repeats == 5
+    assert P.plan_loop(_info(dur=4000.0), 120.0, 3000).outpoint is None   # 반복 없음
     raw = P.plan_loop(_info(dur=610.0), None, 3000)
     assert not raw.natural and "갑자기" in raw.note and raw.repeats == 5
 
@@ -467,3 +468,47 @@ def test_main_window_playlist_card_and_live_handoff(tmp_path, monkeypatch):
 def test_subtitles_filter_detection(tmp_path):
     assert P.subtitles_available(Path(FFMPEG))
     assert not P.subtitles_available(tmp_path / "없는 ffmpeg.exe")
+
+
+@need_ff
+def test_whole_file_loop_with_ragged_end_is_cut_at_last_keyframe(tmp_path):
+    """④ 정보 파일이 없는 B-프레임 영상: 스트림 복사로 -t 자른 파일(끝이 고르지 않음)은 끝 → 처음을 그대로 이으면
+    시각이 겹친다 → 마지막 키프레임에서 잘라 반복. 끝이 깨끗한 파일은 그대로 파일 전체 반복."""
+    full = tmp_path / "full.mp4"
+    _ff("-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=10", "-c:v", "libx264", "-preset", "fast", "-bf", "2", "-g", "60",
+        "-pix_fmt", "yuv420p", full)
+    ragged = tmp_path / "배경 (복사로 자름).mp4"
+    _ff("-i", full, "-t", "5.9", "-c", "copy", ragged)
+    clean = probe_video(full, Path(FFPROBE))
+    info = probe_video(ragged, Path(FFPROBE))
+    lk = P.last_keyframe(Path(FFPROBE), ragged, info.duration)
+    assert lk == pytest.approx((4.0, 4.0 - 2 / 30), abs=1e-3)
+    assert not P.loop_join_clean(Path(FFMPEG), info, lk[0])
+    assert P.loop_join_clean(Path(FFMPEG), clean, P.last_keyframe(Path(FFPROBE), full, clean.duration)[0])
+    tracks = [P.analyze_track(Path(FFMPEG), Path(FFPROBE), make_tone(tmp_path / f"t{k}.wav", 11.0)) for k in (1, 2)]
+    for bg, natural in ((info, False), (clean, False)):
+        pp = P.build_playlist_plan(tracks, bg)
+        assert pp.loop.outpoint is None and not pp.loop.natural
+        out = P.run_playlist_build(ffmpeg=Path(FFMPEG), ffprobe=Path(FFPROBE), plan=pp,
+                                   output=tmp_path / "o" / f"{bg.path.stem}.mp4", cancel_event=threading.Event())
+        assert abs(out.video_duration - 22.0) < 0.15 and out.natural_loop is natural   # 이음 디코드 검사까지 통과
+    assert out.loop_repeats == 3                    # 깨끗한 10초 파일: 그대로 3번
+
+
+@need_ff
+def test_keyframe_cut_at_2997_fps_has_no_duplicate_frame(tmp_path):
+    """29.97 FPS(1001/30000): 경계 키프레임 DTS를 소수 6자리로 적으면 반올림으로 키프레임이 앞 구간에 섞여 프레임이 겹쳤다."""
+    full = tmp_path / "f.mp4"
+    _ff("-f", "lavfi", "-i", "testsrc2=s=640x360:r=30000/1001:d=12", "-c:v", "libx264", "-preset", "fast", "-bf", "2",
+        "-g", "60", "-pix_fmt", "yuv420p", full)
+    ragged = tmp_path / "r.mp4"
+    _ff("-i", full, "-t", "9.9", "-c", "copy", ragged)
+    info = probe_video(ragged, Path(FFPROBE))
+    tracks = [P.analyze_track(Path(FFMPEG), Path(FFPROBE), make_tone(tmp_path / f"t{k}.wav", 14.0)) for k in (1, 2)]
+    out = P.run_playlist_build(ffmpeg=Path(FFMPEG), ffprobe=Path(FFPROBE), plan=P.build_playlist_plan(tracks, info),
+                               output=tmp_path / "o" / "x.mp4", cancel_event=threading.Event())
+    fr = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v", "-show_entries", "frame=pts_time", "-of", "csv=p=0",
+                         str(out.output)], capture_output=True, text=True).stdout.split()
+    pts = [float(x.strip(",")) for x in fr]
+    steps = [b - a for a, b in zip(pts, pts[1:]) if b < 27.5]
+    assert out.loop_repeats >= 3 and min(steps) > 0.5 / 29.97 and max(steps) < 1.5 / 29.97

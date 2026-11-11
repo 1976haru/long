@@ -16,6 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from . import media_audio as MA
 from . import pl_core as P
 from .bg_core import CODEC_H264, CODEC_HEVC, ENCODE_PROFILES, QUALITY_4K, QUALITY_FHD, get_profile, hevc_available
 from .core import BuildCancelled, VideoInfo, ensure_unique_output, format_duration, free_bytes, probe_video
@@ -66,6 +67,8 @@ class PlaylistMakerWindow(tk.Toplevel):
         self.bg: VideoInfo | None = None
         self.bg_cycle: float | None = None
         self.bg_error: str | None = None
+        self.bg_audio: MA.AudioCheck | None = None
+        self.always_exclude = tk.BooleanVar(value=True)
         self.events: queue.Queue = queue.Queue()
         self.cancel = threading.Event()
         self.stop_loading = threading.Event()
@@ -139,6 +142,10 @@ class PlaylistMakerWindow(tk.Toplevel):
         ttk.Button(r0, text="① 배경 MP4 선택", command=self._pick_bg, style="Primary.TButton").pack(side="left")
         ttk.Button(r0, text="▶ 배경 미리보기", command=lambda: self.bg and _open_path(self.bg.path)).pack(side="left", padx=6)
         ttk.Label(f0, textvariable=self.bg_text, wraplength=1100, justify="left").pack(anchor="w", pady=(4, 0))
+        a0 = ttk.Frame(f0); a0.pack(fill="x", pady=(2, 0))
+        ttk.Checkbutton(a0, text=MA.EXCLUDE_OPTION, variable=self.always_exclude, state="disabled").pack(side="left")
+        ttk.Label(a0, text="완성 영상의 소리는 아래 음원만 사용합니다 (배경의 자연음·말소리·음악은 넣지 않음).",
+                  style="Hint.TLabel").pack(side="left", padx=(6, 0))
 
         f1 = ttk.LabelFrame(root, text=f"② 음원 (기본 {P.SET_SIZE}곡)   ③ 순서 · 제목 — 곡 시작 시각과 제목 표시 구간은 자동 계산",
                             padding=6)
@@ -281,6 +288,7 @@ class PlaylistMakerWindow(tk.Toplevel):
         self.bg = None
         self.bg_cycle = None
         self.bg_error = None
+        self.bg_audio = None
         self.bg_text.set(f"배경 영상 정보 읽는 중… {Path(path).name}")
         self._spawn(self._bg_worker, tools[1], Path(path))
         return True
@@ -288,7 +296,7 @@ class PlaylistMakerWindow(tk.Toplevel):
     def _bg_worker(self, fp, path):
         try:
             info = probe_video(path, fp)
-            self.events.put(("bg", info, P.read_bg_cycle(path, info)))
+            self.events.put(("bg", info, P.read_bg_cycle(path, info), MA.check_audio(fp, path)))
         except Exception as e:
             self.events.put(("bg_error", str(e)))
 
@@ -365,7 +373,7 @@ class PlaylistMakerWindow(tk.Toplevel):
                 if kind == "status":
                     self.status.set(ev[1])
                 elif kind == "bg":
-                    self.bg, self.bg_cycle = ev[1], ev[2]
+                    self.bg, self.bg_cycle, self.bg_audio = ev[1], ev[2], ev[3]
                     changed = True
                 elif kind == "bg_error":
                     self.bg_error = ev[1]
@@ -563,7 +571,8 @@ class PlaylistMakerWindow(tk.Toplevel):
                 cyc = (f" · ④ 한 바퀴 {format_duration(self.bg_cycle)} 경계에서 자연스럽게 반복" if self.bg_cycle
                        else " · ④ 정보 없음: 파일 전체를 반복 (끝 → 처음 이음 확인 권장)")
                 self.bg_text.set(f"{self.bg.path.name} · {self.bg.width}×{self.bg.height} · {self.bg.video_codec.upper()} "
-                                 f"{self.bg.pix_fmt} · {self.bg.fps:g} FPS · {format_duration(self.bg.duration)}{cyc}")
+                                 f"{self.bg.pix_fmt} · {self.bg.fps:g} FPS · {format_duration(self.bg.duration)}{cyc}"
+                                 + (f"\n{self.bg_audio.detail}" if self.bg_audio else ""))
             elif self.bg_error:
                 self.bg_text.set("⛔ " + self.bg_error.splitlines()[0])
             if self.plan:
@@ -744,7 +753,9 @@ class PlaylistMakerWindow(tk.Toplevel):
         self.status.set(f"완성: {r.output.name} · {format_duration(r.duration)} · {r.width}×{r.height} {r.codec.upper()} · "
                         f"{r.size / 1024**2:,.0f} MB (예상 {self.build_plan.expected_size / 1024**2:,.0f} MB) · "
                         f"오디오 {r.audio_duration:.2f}초 / 영상 {r.video_duration:.2f}초 · "
-                        f"{'영상 무손실 복사' if r.copied_video else '영상 인코딩'} · {live}"
+                        f"{'영상 무손실 복사' if r.copied_video else '영상 인코딩'} · {live} · "
+                        + (f"배경 {r.loop_repeats}회 반복" + ("" if r.natural_loop else " (④ 정보 없음 — 반복 이음 확인 권장)")
+                           if r.loop_repeats > 1 else "배경 반복 없음")
                         + (f" · SRT: {r.srt.name}" if r.srt else "") + f" · 걸린 시간 {format_duration(r.elapsed)}")
         self._refresh_buttons()
         self._update_steps()

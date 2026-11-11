@@ -738,6 +738,12 @@ def run_background_build(
                                  "이 작업의 임시 파일만 지웠습니다.\n" + str(e)) from e
             raise
         final = probe_video(r.output, ffprobe)
+        if final.audio_codec:  # 배경 전용: 원본 오디오가 결과에 들어가면 안 된다 (조각은 영상만 매핑)
+            try:
+                r.output.unlink()
+            except OSError:
+                pass
+            raise BuildError("완성 파일에 오디오 스트림이 있어 배경 전용 조건을 만족하지 않습니다 (결과를 지웠습니다).")
         from .pl_core import write_bg_sidecar  # ⑥이 한 바퀴 경계에서만 반복하도록 (실패해도 ④ 결과에는 영향 없음)
         write_bg_sidecar(r.output, cycle=cinfo.duration, duration=final.duration, size=final.size, width=final.width,
                          height=final.height, fps=final.fps, codec=final.video_codec, repeats=repeats)

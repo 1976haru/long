@@ -17,6 +17,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import bg_analysis as A
+from . import media_audio as MA
 from .bg_core import (
     CODEC_H264, CODEC_HEVC, DEFAULT_DISSOLVE, DISSOLVE_CHOICES, ENCODE_PROFILES, GUARD_OWNER, PREVIEW_CONTEXT,
     QUALITY_4K, QUALITY_FHD, TARGET_MINUTES, BgPlan, Clip, build_bg_plan, choose_output_spec, cleanup_stale_temp,
@@ -74,6 +75,11 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.previewing = False
         self.preview_cancel = threading.Event()
         self.preview_files: list[Path] = []
+        self.audio_checks: dict[Path, MA.AudioCheck] = {}   # 원본 오디오 검사 (④ 결과에는 항상 제외)
+        self.silent_running = False
+        self.silent_cancel = threading.Event()
+        self.last_silent = None
+        self.always_exclude = tk.BooleanVar(value=True)
         self.last_preview: Path | None = None
 
         saved = load_settings().get(SETTINGS_KEY)
@@ -159,14 +165,14 @@ class BackgroundMakerWindow(tk.Toplevel):
         ttk.Button(br, text="추천 구간 모두 적용", command=self._apply_all_advice).pack(side="right", padx=4)
 
         tf = ttk.Frame(f1); tf.pack(fill="both", expand=True)
-        cols = ("use", "name", "dur", "res", "fps", "range", "loop", "next", "quality")
+        cols = ("use", "name", "dur", "res", "fps", "range", "loop", "next", "quality", "audio")
         self.tree = ttk.Treeview(tf, columns=cols, show="tree headings", height=4, style="BG.Treeview",
                                  selectmode="browse")
         self.tree.heading("#0", text="미리보기")
         self.tree.column("#0", width=THUMB_W + 26, stretch=False)
         for c, h, w in zip(cols, ("사용", "파일명", "길이", "해상도", "FPS", "사용 구간", "반복 평가", "→ 다음 전환",
-                                  "품질·중복 (참고)"),
-                           (44, 200, 64, 92, 50, 110, 104, 96, 210)):
+                                  "품질·중복 (참고)", "원본 오디오"),
+                           (44, 170, 64, 92, 50, 100, 104, 96, 150, 110)):
             self.tree.heading(c, text=h)
             self.tree.column(c, width=w, anchor="w" if c in ("name", "quality", "loop", "next") else "center")
         vs = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
@@ -175,6 +181,10 @@ class BackgroundMakerWindow(tk.Toplevel):
         vs.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", lambda e: (self._show_detail(), self._refresh_buttons()))
         ttk.Label(f1, textvariable=self.summary).pack(anchor="w", pady=(4, 0))
+        ar0 = ttk.Frame(f1); ar0.pack(fill="x", pady=(2, 0))
+        ttk.Checkbutton(ar0, text=MA.EXCLUDE_OPTION, variable=self.always_exclude, state="disabled").pack(side="left")
+        ttk.Label(ar0, text="④ 배경 영상은 항상 영상만 사용합니다 (원본 자연음·말소리·음악은 결과에 들어가지 않음). "
+                            "원본 파일은 그대로입니다.", style="Hint.TLabel").pack(side="left", padx=(6, 0))
 
         f2 = ttk.LabelFrame(root, text="③ 사용 구간   ④ 반복 경계·전환 미리보기 (선택한 영상) — 분석은 휴리스틱 참고 지표이며 "
                                        "AI 인물·로고 인식은 하지 않습니다", padding=6)
@@ -195,6 +205,10 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.btn_preview_next = ttk.Button(pr, text="▶ 다음 장면 전환 미리보기",
                                            command=lambda: self.preview_seam("next"))
         self.btn_preview_next.pack(side="left", padx=4)
+        self.btn_silent = ttk.Button(pr, text="무음 MP4 따로 저장", command=self.save_silent_copy)
+        self.btn_silent.pack(side="right")
+        self.btn_recheck_audio = ttk.Button(pr, text="오디오 다시 검사", command=self.recheck_audio)
+        self.btn_recheck_audio.pack(side="right", padx=4)
         ttk.Label(pr, text=f"경계 앞뒤 약 {PREVIEW_CONTEXT:g}초를 저화질로 빠르게 만들어 재생합니다 (현재 사용 구간·디졸브 기준).",
                   style="Hint.TLabel").pack(side="left", padx=(8, 0))
 
@@ -370,6 +384,7 @@ class BackgroundMakerWindow(tk.Toplevel):
                 self.events.put(("load_error", p, str(e)))
                 continue
             self.events.put(("clip", info))
+            self.events.put(("audio", info.path, MA.check_audio(fp, info.path)))
             try:
                 self.events.put(("thumb", info.path, A.thumbnail_b64(ff, info.path, info.duration)))
             except Exception:
@@ -419,6 +434,19 @@ class BackgroundMakerWindow(tk.Toplevel):
                     self.analyses[ev[1]] = ev[2]
                     self.analysis_errors.pop(ev[1], None)
                     changed = True
+                elif kind == "audio":
+                    self.audio_checks[ev[1]] = ev[2]
+                    changed = True
+                elif kind == "silent_done":
+                    self._silent_finished(ev[1])
+                elif kind == "silent_error":
+                    self.silent_running = False
+                    self.status.set("무음 사본 만들기 중단 (임시 파일 정리, 원본은 그대로)" if ev[1]
+                                    else "무음 사본을 만들지 못했습니다 (원본은 그대로)")
+                    self.silent_error = ev[2]
+                    self._refresh_buttons()
+                    if ev[2] and not getattr(self, "quiet_errors", False):
+                        messagebox.showwarning("무음 MP4", ev[2], parent=self)
                 elif kind == "analysis_error":
                     self.analysis_errors[ev[1]] = ev[2]
                     changed = True
@@ -661,6 +689,88 @@ class BackgroundMakerWindow(tk.Toplevel):
             return "분석 중…" if self.loading else "-"
         return adv.verdict + (" (내 구간)" if self._custom_range(c) else "")
 
+    def _audio_cell(self, c):
+        ac = self.audio_checks.get(c.path)
+        return ac.short if ac else "검사 중…"
+
+    def recheck_audio(self) -> bool:
+        """선택한 영상(선택이 없으면 '확인 불가' 전부)의 원본 오디오를 다시 검사."""
+        tools = self._tools()
+        if not tools:
+            return False
+        i = self._selected_index()
+        if i is not None:
+            targets = [self.clips[i].path]
+        else:
+            targets = [c.path for c in self.clips
+                       if c.path not in self.audio_checks or self.audio_checks[c.path].status == MA.UNKNOWN]
+        if not targets:
+            return False
+        for p in targets:
+            self.audio_checks.pop(p, None)
+        fp = tools[1]
+
+        def work():
+            for p in targets:
+                self.events.put(("audio", p, MA.check_audio(fp, p)))
+        t = threading.Thread(target=work, daemon=True)
+        self._threads.append(t)
+        t.start()
+        self._refresh_all()
+        return True
+
+    def save_silent_copy(self, out=None) -> bool:
+        """선택한 영상의 '오디오 없는 사본' (영상 스트림 복사, 재인코딩 없음). 원본 옆 새 파일 — 덮어쓰지 않음."""
+        i = self._selected_index()
+        quiet = getattr(self, "quiet_errors", False)
+        if i is None:
+            if not quiet:
+                messagebox.showinfo("무음 MP4", "목록에서 영상을 선택하세요.", parent=self)
+            return False
+        if self.running or self.silent_running:
+            return False
+        c = self.clips[i]
+        ac = self.audio_checks.get(c.path)
+        if ac is not None and ac.status == MA.NONE and not quiet:
+            if not messagebox.askyesno("무음 MP4", "이 영상에는 원본 오디오가 없습니다. 그래도 사본을 만들까요?\n"
+                                                  "(같은 영상이 하나 더 생겨 저장 공간만 늘어납니다)", parent=self):
+                return False
+        tools = self._tools()
+        if not tools:
+            return False
+        if not FFMPEG_GUARD.try_acquire(GUARD_OWNER):
+            messagebox.showwarning("FFmpeg 사용 중", _busy_text(FFMPEG_GUARD.owner) + "\n끝난 뒤 다시 시도하세요.", parent=self)
+            return False
+        self.silent_running = True
+        self.silent_cancel = threading.Event()
+        self.status.set(f"무음 사본 만드는 중… {c.path.name} (영상만 복사, 재인코딩 없음)")
+        self._refresh_buttons()
+        cancel = self.silent_cancel
+
+        def work():
+            try:
+                r = MA.make_silent_copy(ffmpeg=Path(tools[0]), ffprobe=Path(tools[1]), src=c.path, out=out,
+                                        cancel=cancel,
+                                        progress=lambda f, t: self.events.put(("status", f"무음 사본: {t}")))
+                self.events.put(("silent_done", r))
+            except BuildCancelled:
+                self.events.put(("silent_error", True, ""))
+            except Exception as e:
+                self.events.put(("silent_error", False, str(e)))
+            finally:
+                FFMPEG_GUARD.release(GUARD_OWNER)
+        t = threading.Thread(target=work, daemon=True)
+        self._threads.append(t)
+        t.start()
+        return True
+
+    def _silent_finished(self, r):
+        self.silent_running = False
+        self.last_silent = r
+        self.status.set(f"무음 사본 완성: {r.output.name} · {r.codec.upper()} {r.width}×{r.height} · {r.fps:g} FPS · "
+                        f"{format_duration(r.duration)} · 오디오 {r.removed_streams}개 제외 · 원본은 그대로")
+        self._refresh_buttons()
+
     def _quality_cell(self, c, dup_map):
         if c.path in self.analysis_errors:
             return "⚠ 분석 실패"
@@ -707,13 +817,18 @@ class BackgroundMakerWindow(tk.Toplevel):
             self.tree.insert("", "end", iid=str(i), text="" if kw else f"#{i + 1}", **kw, values=(
                 "✓" if c.enabled else "제외", c.path.name, format_duration(c.info.duration),
                 f"{c.info.width}×{c.info.height}", f"{c.info.fps:.2f}", rng, self._loop_cell(c),
-                self._next_cell(c), self._quality_cell(c, dup_map)))
+                self._next_cell(c), self._quality_cell(c, dup_map), self._audio_cell(c)))
         if select is not None and 0 <= select < len(self.clips):
             self.tree.selection_set(str(select))
             self.tree.see(str(select))
         active = [c for c in self.clips if c.enabled]
+        checks = [self.audio_checks.get(c.path) for c in self.clips]
+        with_audio = sum(1 for a in checks if a is not None and a.status == MA.PRESENT)
+        unknown = sum(1 for a in checks if a is not None and a.status == MA.UNKNOWN)
+        audio_txt = (f" · 🔊 오디오 있는 영상 {with_audio}개 — 배경 제작 시 자동 제외" if with_audio else "") + (
+            f" · ⚠ 오디오 확인 불가 {unknown}개 — [오디오 다시 검사]" if unknown else "")
         self.summary.set(f"영상 {len(self.clips)}개 · 사용 {len(active)}개 · 사용 구간 합계 "
-                         f"{format_duration(sum(c.used_length for c in active))}" if self.clips
+                         f"{format_duration(sum(c.used_length for c in active))}{audio_txt}" if self.clips
                          else "MP4 영상을 불러오세요 (30초~2분 길이 권장).")
         self._recalc(dups)
         self._show_detail()
@@ -813,7 +928,9 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.range_end.set(f"{c.used_end:.2f}")
         info = c.info
         lines = [f"{c.path.name} · {format_duration(info.duration)} · {info.width}×{info.height} · {info.fps:.2f} FPS · "
-                 f"{info.video_codec.upper()}{' · 오디오 있음(제작 시 제거)' if info.audio_codec else ''}"]
+                 f"{info.video_codec.upper()}"]
+        ac = self.audio_checks.get(c.path)
+        lines.append(ac.detail if ac else "원본 오디오 검사 중…")
         if c.path in self.analysis_errors:
             lines.append("⚠ 분석 실패: " + self.analysis_errors[c.path].splitlines()[0])
         an = self.analyses.get(c.path)
@@ -844,6 +961,8 @@ class BackgroundMakerWindow(tk.Toplevel):
             sel = self._selected_index() is not None
             for b in (self.btn_preview_loop, self.btn_preview_next):
                 b.configure(state="disabled" if busy or not sel else "normal")
+            self.btn_silent.configure(state="disabled" if self.running or self.silent_running or not sel else "normal")
+            self.btn_recheck_audio.configure(state="disabled" if not self.clips else "normal")
             self.btn_start.configure(state="disabled" if busy or not any(c.enabled for c in self.clips) else "normal")
             self.btn_stop.configure(state="normal" if self.running else "disabled")
             self.btn_measure.configure(state="disabled" if busy or self.plan is None else "normal")
@@ -1071,6 +1190,7 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.stop_loading.set()
         self.preview_cancel.set()
         self.measure_cancel.set()
+        self.silent_cancel.set()
         for t in self._threads:  # FFmpeg를 남기지 않도록 잠깐 기다린다 (작업 스레드가 FFmpeg를 종료)
             t.join(timeout=8)
         for p in self.preview_files:  # 이 창이 만든 미리보기 파일만 지운다

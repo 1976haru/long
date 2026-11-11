@@ -356,9 +356,10 @@ def plan_loop(bg: VideoInfo, cycle: float | None, total: float) -> LoopPlan:
     if cycle:
         whole = max(1, int(math.floor(bg.duration / cycle + 1e-6)))
         unit = whole * cycle
-        partial = unit < bg.duration - 0.05
-        out = unit if partial else None
         reps = max(1, math.ceil(total / unit - 1e-9))
+        # 반복할 때는 항상 한 바퀴 경계(키프레임)에서 자른다 — 길이가 한 바퀴 배수여도 -t로 자른 파일 끝은
+        # B-프레임 때문에 몇 프레임이 더 붙어 있어 파일 전체를 이으면 시각이 겹친다
+        out = unit if reps > 1 else None
         seams = tuple(round(unit * k, 3) for k in range(1, reps) if unit * k < total)
         return LoopPlan(unit, out, reps, seams, True,
                         f"④에서 만든 배경의 한 바퀴({format_duration(cycle)}) 경계에서 이어 반복합니다 — 이음새도 ④의 디졸브 그대로입니다.")
@@ -495,6 +496,48 @@ def boundary_key_dts(ffprobe: Path, path: Path, at: float, fps: float) -> float 
     return None
 
 
+def last_keyframe(ffprobe: Path, path: Path, duration: float) -> tuple[float, float] | None:
+    """파일 끝 쪽 마지막 키프레임의 (표시 시각, DTS). 0초 키프레임만 있으면 None."""
+    cmd = [str(ffprobe), "-v", "error", "-select_streams", "v:0", "-read_intervals", f"{max(0.0, duration - 30):.3f}%",
+           "-show_entries", "packet=pts_time,dts_time,flags", "-of", "csv=p=0", str(path)]
+    rc, out, _ = _run_capture(cmd, None, 120)
+    if rc != 0:
+        return None
+    best = None
+    for line in out.split():
+        parts = line.split(",")
+        try:
+            if len(parts) >= 3 and "K" in parts[2] and float(parts[0]) > 0.5:
+                pts, dts = float(parts[0]), float(parts[1])
+                if best is None or pts > best[0]:
+                    best = (pts, dts)
+        except ValueError:
+            continue
+    return best
+
+
+def loop_join_clean(ffmpeg: Path, bg: VideoInfo, last_key: float, cancel: Event | None = None) -> bool:
+    """파일 끝(마지막 GOP) → 파일 처음 3초를 그대로 이어 디코드해 보고 오류가 없으면 True."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="plvm_join_") as td:
+        lst = Path(td) / "join.ffconcat"
+        lst.write_text("ffconcat version 1.0\n"
+                       f"file '{escape_concat_path(bg.path)}'\ninpoint {last_key:.6f}\n"
+                       f"file '{escape_concat_path(bg.path)}'\noutpoint {min(3.0, bg.duration):.6f}\n", encoding="utf-8")
+        dec = [str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", "-f", "concat", "-safe", "0", "-i", str(lst),
+               "-map", "0:v:0", "-f", "null", "-"]
+        rc, _, err = _run_capture(dec, cancel, 180)
+        return rc == 0 and not err.strip()
+
+
+def loop_at_keyframe(bg: VideoInfo, key_pts: float, total: float) -> LoopPlan:
+    reps = max(1, math.ceil(total / key_pts - 1e-9))
+    seams = tuple(round(key_pts * k, 3) for k in range(1, reps) if key_pts * k < total)
+    return LoopPlan(key_pts, key_pts, reps, seams, False,
+                    f"배경 파일 끝 이음이 깨지지 않도록 마지막 키프레임({format_duration(key_pts)})에서 잘라 반복합니다 "
+                    "(파일 끝 약간이 반복마다 빠집니다). ④에서 만든 영상을 쓰면 한 바퀴 경계에서 자연스럽게 이어집니다.")
+
+
 def write_bg_list(bg: VideoInfo, loop: LoopPlan, target: Path, cut_dts: float | None = None) -> None:
     """배경 반복 목록. 한 바퀴 경계에서 자를 때: outpoint = 경계 키프레임 DTS (그 앞 GOP 패킷만 남김),
     duration = 경계 표시 시각 (다음 반복의 시각이 정확히 이어지도록)."""
@@ -502,7 +545,9 @@ def write_bg_list(bg: VideoInfo, loop: LoopPlan, target: Path, cut_dts: float | 
     for _ in range(loop.repeats):
         lines.append(f"file '{escape_concat_path(bg.path)}'")
         if loop.outpoint is not None and cut_dts is not None:
-            lines.append(f"outpoint {cut_dts:.6f}")
+            # outpoint는 DTS < outpoint 인 패킷만 남긴다. 29.97(1001/30000) 같은 FPS는 소수 6자리로 적으면
+            # 경계 키프레임의 실제 DTS보다 조금 커질 수 있어 키프레임이 앞 구간에 섞여 프레임이 겹친다 → 1/4프레임 앞에서 자름
+            lines.append(f"outpoint {cut_dts - 0.25 / max(bg.fps, 1.0):.6f}")
             lines.append(f"duration {loop.outpoint:.6f}")
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -553,6 +598,8 @@ class StreamDurations:
     codec: str
     pix_fmt: str
     fps: float
+    audio_streams: int = 1
+    video_streams: int = 1
 
 
 def probe_streams(ffprobe: Path, path: Path) -> StreamDurations:
@@ -575,8 +622,11 @@ def probe_streams(ffprobe: Path, path: Path) -> StreamDurations:
         except (TypeError, ValueError):
             return fmt
     from .core import parse_fps
+    streams = d.get("streams", [])
     return StreamDurations(dur(v), dur(a), int(v.get("width") or 0), int(v.get("height") or 0),
-                           str(v.get("codec_name") or ""), str(v.get("pix_fmt") or ""), parse_fps(v.get("avg_frame_rate")))
+                           str(v.get("codec_name") or ""), str(v.get("pix_fmt") or ""), parse_fps(v.get("avg_frame_rate")),
+                           sum(1 for s in streams if s.get("codec_type") == "audio"),
+                           sum(1 for s in streams if s.get("codec_type") == "video"))
 
 
 def seam_check(ffmpeg: Path, path: Path, times: Sequence[float], cancel: Event | None = None, span: float = 3.0) -> None:
@@ -671,6 +721,12 @@ def run_playlist_build(*, ffmpeg: Path, ffprobe: Path, plan: PlaylistPlan, outpu
             cut = boundary_key_dts(ffprobe, plan.bg.path, loop.outpoint, plan.bg.fps)
             if cut is None:  # 경계에 키프레임이 없으면(④ 결과가 아닌 경우 등) 파일 전체 반복으로
                 loop = plan_loop(plan.bg, None, plan.total)
+        if loop.outpoint is None and loop.repeats > 1:
+            # 파일 전체 반복: 끝 → 처음 이음을 미리 짧게 디코드해 보고, 깨지면 마지막 키프레임에서 자른다
+            report(a_w, "반복 이음 미리 확인 중")
+            lk = last_keyframe(ffprobe, plan.bg.path, plan.bg.duration)
+            if lk is not None and not loop_join_clean(ffmpeg, plan.bg, lk[0], stop):
+                loop, cut = loop_at_keyframe(plan.bg, lk[0], plan.total), lk[1]
         write_bg_list(plan.bg, loop, bg_list, cut)
         vtext = "배경 영상 반복 + 음악 합치는 중 (무손실 복사)" if plan.copy_video else "영상 인코딩 중" + (
             " (곡 제목 입히기)" if plan.burn_titles else "")
@@ -679,6 +735,9 @@ def run_playlist_build(*, ffmpeg: Path, ffprobe: Path, plan: PlaylistPlan, outpu
             raise BuildError("완성 파일이 만들어지지 않았습니다.")
         report(0.96, "길이·싱크 검사 중")
         sd = probe_streams(ffprobe, part)
+        if sd.audio_streams != 1 or sd.video_streams != 1:  # 음악 1개만 (배경 원본 오디오가 섞이거나 겹치면 안 됨)
+            raise BuildError(f"완성 파일 스트림이 예상과 다릅니다 (영상 {sd.video_streams}개 / 오디오 {sd.audio_streams}개 — "
+                             "오디오는 선택한 음원 1개여야 함)")
         if abs(sd.audio - plan.total) > AUDIO_TOLERANCE:
             raise BuildError(f"오디오 길이 검증 실패: 예상 {plan.total:.2f}초, 실제 {sd.audio:.2f}초")
         if abs(sd.video - sd.audio) > max(AV_TOLERANCE, 2.5 / max(sd.fps, 1.0)):

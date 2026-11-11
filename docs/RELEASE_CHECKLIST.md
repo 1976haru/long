@@ -11,7 +11,7 @@
 | 진입점 | `main.py` (`--self-test <결과.json>` 지원) | 격리 설정에서 화면 자가 점검 |
 | 빌드 방식 | PyInstaller `--onefile --windowed`, 이름 `PlaylistLongVideoMaker_v0.3` | `BUILD_WINDOWS_EXE.bat`, `PlaylistLongVideoMaker_v0.3.spec` |
 | 포함 자료 | `cloud\long_live_worker.py`, `deploy\linux\`, `docs\*.html` | 그대로 |
-| 새 모듈 ④⑤⑥ | `app/bg_*`, `app/stock_*`, `app/pl_*` — 순수 Python, 표준 라이브러리(urllib·ctypes·json·hashlib)만 | 새 pip 의존성 없음. 창은 함수 안에서 import하지만 PyInstaller는 함수 안 import도 수집함 → 빌드 후 `--self-test`의 `bg_*`/`stock_window`/`playlist_window` 항목으로 실제 포함 확인 |
+| 새 모듈 ④⑤⑥ + 오디오 | `app/bg_*`, `app/stock_*`, `app/pl_*`, `app/media_audio.py` — 순수 Python, 표준 라이브러리(urllib·ctypes·json·hashlib)만 | 새 pip 의존성 없음. 창은 함수 안에서 import하지만 PyInstaller는 함수 안 import도 수집함 → 빌드 후 `--self-test`의 `bg_*`/`stock_window`/`playlist_window` 항목과 `bg_audio_ui`(④⑤ 오디오 표시·무음 사본 버튼)로 실제 포함 확인 |
 | 금지 라이브러리 | `keyring`·`requests`·클라우드 SDK 미사용 (`tests/test_cloud_security.py`) | ⑤ 기존 키 호환은 Windows `CredReadW` 읽기 전용 |
 | 개발 환경 | Python 3.14.4 · PyInstaller 6.22.3 | 같은 버전으로 빌드 권장 |
 | tzdata | 빌드 bat에서 설치 | 예약 시간대 계산용 |
@@ -29,6 +29,7 @@
 | ④⑥ H.265 저장용 | libx265 | H.264로 만들고 안내 (④) / 선택지 비활성 안내 (⑥) |
 | ⑤ 미리보기 재생 | `ffplay.exe` (같은 폴더) | 미리보기만 불가, 검색·다운로드는 가능 |
 | ⑥ 곡 제목 입히기 | libass (`subtitles` 필터) | 제작 전에 "자막 입히기 불가" 안내, SRT 파일은 계속 저장 가능 |
+| 배경 원본 오디오 검사·무음 사본 | ffprobe · ffmpeg 스트림 복사 (추가 구성 없음) | 검사는 '확인 불가'로 표시, 무음 사본만 불가 |
 
 현재 개발 PC의 WinGet Gyan FFmpeg는 위 항목을 모두 포함합니다 (확인: libx264·libx265·libmp3lame·aac·subtitles·acrossfade·ffplay).
 
@@ -76,7 +77,7 @@ set PLVM_TEST_SETTINGS_DIR=D:\PLVM_EXE_BUILD_TMP\selftest_settings
 set PLVM_TEST_SETTINGS_DIR=
 ```
 
-`selftest_new.json`의 `all_ok`가 `true`이고 `bg_*`·`stock_window`·`playlist_window`가 모두 OK일 때만 계속합니다.
+`selftest_new.json`의 `all_ok`가 `true`이고 `bg_*`(`bg_audio_ui` 포함)·`stock_window`·`playlist_window`가 모두 OK일 때만 계속합니다.
 
 3) 백업(5번) → 4) 같은 이름으로 교체 (`dist\PlaylistLongVideoMaker_v0.3.exe`) → 5) 교체본으로 같은 `--self-test` 다시 실행 →
 6) 실제 설정 폴더 SHA256이 백업 manifest와 같은지 확인 (프로그램이 시작만으로 설정을 바꾸지 않았는지) → 7) 성공 확정, 임시 빌드 폴더 정리.
@@ -97,4 +98,5 @@ set PLVM_TEST_SETTINGS_DIR=
 - [ ] 백업 폴더 + SHA256 manifest + 복원 시험
 - [ ] 같은 이름으로 교체, 교체본 `--self-test` all_ok
 - [ ] 실제 설정·토큰 파일 SHA256 변화 없음
+- [ ] ④ 결과 오디오 0개 · ⑥ 결과 오디오 1개(음원만) — 실제 자연 영상(오디오 포함)으로 1회 확인
 - [ ] 실제 LIVE 송출·YouTube 업로드는 사용자가 직접 (자동 실행 안 함)

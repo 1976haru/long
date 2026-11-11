@@ -111,6 +111,9 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
         try:
             w = app._open_bg()
             ok("bg_window", w.winfo_exists() and hasattr(w, "btn_start"), w.title())
+            from . import media_audio as _MA
+            ok("bg_audio_ui", hasattr(w, "btn_silent") and hasattr(w, "btn_recheck_audio") and bool(w.always_exclude.get())
+               and _MA.check_audio(None, Path("x.mp4")).status == _MA.UNKNOWN, _MA.EXCLUDE_OPTION)
             ok("bg_ui_steps", len(getattr(w, "step_labels", [])) == 8 and hasattr(w, "btn_measure")
                and hasattr(w, "btn_order") and w.codec_key() in ("h264", "hevc"), w.step_hint.get()[:40])
             if not (app.ffmpeg and app.ffprobe):
@@ -188,6 +191,7 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
             sw.mode.set(MODE_LONG)
             sw._mode_changed()
             ok("stock_window", sw.winfo_exists() and hasattr(sw, "btn_dl") and hasattr(sw, "btn_send")
+               and hasattr(sw, "btn_silent") and not sw.save_silent.get()
                and q.text == "lake snow" and len(q.groups) == 2 and "stock" in app.mode_cards, sw.title())
             sw.destroy()
         except Exception as e:
