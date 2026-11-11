@@ -181,6 +181,17 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
             ok("bg_cleanup", not Path(tmp).exists(), tmp)
 
     def s6():
+        try:  # ⑤ 검색 화면: 네트워크 없이 창·주제 변환·모드 분리만 확인 (실제 검색·다운로드는 하지 않음)
+            sw = app._open_stock()
+            from .stock_sources import MODE_LONG, build_query
+            q = build_query(["lake", "snow"], "")
+            sw.mode.set(MODE_LONG)
+            sw._mode_changed()
+            ok("stock_window", sw.winfo_exists() and hasattr(sw, "btn_dl") and hasattr(sw, "btn_send")
+               and q.text == "lake snow" and len(q.groups) == 2 and "stock" in app.mode_cards, sw.title())
+            sw.destroy()
+        except Exception as e:
+            ok("stock_window", False, repr(e)[:300])
         for w in (getattr(app, "jp_helper_win", None), getattr(app, "live_schedule_win", None), app._live_window()):
             try:
                 if w is not None and w.winfo_exists():

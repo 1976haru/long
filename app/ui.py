@@ -174,6 +174,26 @@ class MainWindow(tk.Tk):
         for w in (card, title, desc, foot):
             w.bind("<Button-1>", lambda e: self._open_bg())
         self.mode_cards["bg"] = card
+        self._stock_card(bar)
+
+    def _stock_card(self, bar):
+        """⑤ 배경 영상 검색·다운로드 — ④ 카드 아래 한 줄 카드 (기존 ①~④ 배치는 그대로)."""
+        bg, border, fg = "#f6f6f6", "#c4c4c4", "#202020"
+        card = tk.Frame(bar, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border, cursor="hand2")
+        card.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        title = tk.Label(card, text="⑤ 배경 영상 검색·다운로드", bg=bg, fg=fg, font="PLS.Section")
+        title.pack(side="left", padx=(10, 8), pady=5)
+        desc = tk.Label(card, text="주제로 무료 영상 검색 → 실제 재생 → 권리 확인 → 선택 다운로드 → ④로 보내기", bg=bg, fg="#333333")
+        desc.pack(side="left", pady=5)
+        why = tk.Label(card, text="ⓘ 언제 쓰나요?", bg=bg, fg="#1d4fa8", cursor="hand2")
+        why.pack(side="left", padx=10)
+        why.bind("<Button-1>", lambda e: (self._card_help("stock", "⑤ 배경 영상 검색·다운로드"), "break")[1])
+        self.card_help_links["stock"] = why
+        foot = tk.Label(card, text="검색 열기 ▶", bg=bg, fg="#1d4fa8", font="PLS.Strong")
+        foot.pack(side="right", padx=10)
+        for w in (card, title, desc, foot):
+            w.bind("<Button-1>", lambda e: self._open_stock())
+        self.mode_cards["stock"] = card
 
     # ---------- 글자 크기 ----------
     def _set_font_size(self, size):
@@ -717,6 +737,24 @@ class MainWindow(tk.Tk):
         self.bg_win = BackgroundMakerWindow(self, tools=self._live_tools, send_to_long=self._receive_from_bg)
         return self.bg_win
 
+    def _open_stock(self):
+        w = self._alive(getattr(self, "stock_win", None))
+        if w is not None:
+            w.deiconify(); w.lift(); w.focus_set(); return w
+        from .stock_ui import StockSearchWindow
+        self.stock_win = StockSearchWindow(self, tools=self._live_tools, send_to_bg=self._receive_stock,
+                                           peek_tools=self._peek_tools)
+        return self.stock_win
+
+    def _receive_stock(self, paths):
+        """⑤에서 받은 영상을 ④ MP4 목록에 추가 (④의 디졸브·반복·중복·화질 설정은 그대로 재사용)."""
+        w = self._open_bg()
+        if getattr(w, "running", False):
+            messagebox.showwarning("④ 배경 만들기", "④에서 제작이 진행 중입니다. 끝난 뒤 다시 보내세요.", parent=w); return False
+        ok = w.add_paths([Path(p) for p in paths])
+        w.deiconify(); w.lift()
+        return ok
+
     def _receive_from_bg(self, path):
         """④에서 만든 배경 영상을 ① SET 목록에 넣는다 (① 무손실 반복 경로 그대로)."""
         if self.running:
@@ -739,6 +777,12 @@ class MainWindow(tk.Tk):
         if j.status != "완료" or not out.is_file():
             messagebox.showwarning("예약 업로드", "제작이 완료된 영상만 예약 업로드로 보낼 수 있습니다."); return None
         return self._open_upload(str(out), out.stem)
+
+    def _peek_tools(self):
+        """FFmpeg 선택 창 없이 현재 찾을 수 있는 FFmpeg만 돌려준다 (⑤ 창 열기·썸네일용)."""
+        if self.ffmpeg and self.ffprobe and self.ffmpeg.exists() and self.ffprobe.exists():
+            return (self.ffmpeg, self.ffprobe)
+        return (self.ffmpeg, self.ffprobe) if self._tools() else (None, None)
 
     def _live_tools(self):
         return (self.ffmpeg,self.ffprobe) if self._need_tools() else (None,None)
