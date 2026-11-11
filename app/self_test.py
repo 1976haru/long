@@ -192,6 +192,19 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
             sw.destroy()
         except Exception as e:
             ok("stock_window", False, repr(e)[:300])
+        try:  # ⑥ 플레이리스트: 창·제목 추출·12초 SRT 형식만 확인 (실제 제작·FFmpeg 실행 없음)
+            pw = app._open_playlist()
+            from . import pl_core as PC
+            tr = [PC.Track(Path(f"{k:02d}. 曲{k}.mp3"), PC.title_from_filename(f"{k:02d}. 曲{k}.mp3"), 180.0 + k, 0.0,
+                           "mp3", 44100, 2, 1, str(k)) for k in range(1, PC.SET_SIZE + 1)]
+            ent, total = PC.build_timeline(tr)
+            srt = PC.build_srt(ent)
+            ok("playlist_window", pw.winfo_exists() and hasattr(pw, "btn_start") and hasattr(pw, "btn_srt")
+               and "playlist" in app.mode_cards and not PC.validate_srt(srt, ent) and ent[1].label == "02. 曲2"
+               and abs(ent[0].title_end - PC.TITLE_SECONDS) < 1e-6, pw.title())
+            pw.destroy()
+        except Exception as e:
+            ok("playlist_window", False, repr(e)[:300])
         for w in (getattr(app, "jp_helper_win", None), getattr(app, "live_schedule_win", None), app._live_window()):
             try:
                 if w is not None and w.winfo_exists():

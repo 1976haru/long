@@ -449,12 +449,14 @@ def _terminate(proc: subprocess.Popen) -> None:
             pass
 
 
-def run_ffmpeg_progress(cmd: list[str], cancel_event: Event, on_seconds: Callable[[float], None] | None = None) -> None:
-    """FFmpeg 1개 실행. 중지 요청 시 즉시 종료한다. 실패하면 마지막 오류 줄과 함께 BuildError."""
+def run_ffmpeg_progress(cmd: list[str], cancel_event: Event, on_seconds: Callable[[float], None] | None = None,
+                        cwd: Path | None = None) -> None:
+    """FFmpeg 1개 실행. 중지 요청 시 즉시 종료한다. 실패하면 마지막 오류 줄과 함께 BuildError.
+    cwd: ⑥ 제목 입히기처럼 필터에 상대 파일명을 쓸 때만 (한글 경로를 필터 문자열에 넣지 않기 위해)."""
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 text=True, encoding="utf-8", errors="replace", bufsize=1,
-                                creationflags=creationflags_no_window())
+                                creationflags=creationflags_no_window(), cwd=str(cwd) if cwd else None)
     except OSError as e:
         raise BuildError(f"FFmpeg를 실행할 수 없습니다: {e}") from e
     recent: list[str] = []
@@ -736,6 +738,9 @@ def run_background_build(
                                  "이 작업의 임시 파일만 지웠습니다.\n" + str(e)) from e
             raise
         final = probe_video(r.output, ffprobe)
+        from .pl_core import write_bg_sidecar  # ⑥이 한 바퀴 경계에서만 반복하도록 (실패해도 ④ 결과에는 영향 없음)
+        write_bg_sidecar(r.output, cycle=cinfo.duration, duration=final.duration, size=final.size, width=final.width,
+                         height=final.height, fps=final.fps, codec=final.video_codec, repeats=repeats)
         if progress_cb:
             progress_cb(1.0, "완료")
         return BgResult(r.output, final.duration, final.size, final.width, final.height, final.fps,

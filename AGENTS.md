@@ -34,4 +34,5 @@ git diff --check
 - app/cloud_*.py, cloud/, deploy/linux/: 무료 Cloud(OCI Always Free) LIVE (docs/FREE_CLOUD.md). 유료 Cloud 자원 생성/결제 API 호출 금지, shell=True 금지
 - app/bg_core.py, app/bg_analysis.py, app/bg_ui.py: ④ 내 영상으로 배경 만들기. 디졸브(xfade)를 위해 **이 경로에서만** 사용자가 [▶ 제작 시작]을 누를 때 한 바퀴 분량을 재인코딩하고, 목표 길이 반복은 core.run_concat_copy(-c copy)를 그대로 호출한다. 분석은 FFmpeg 48×27 샘플만 사용. 기본 출력은 H.264 yuv420p(LIVE 호환), H.265는 사용자가 고를 때만. 화질 비교 도구: tools/bg_codec_bench.py
 - app/stock_net.py, app/stock_sources.py, app/stock_rights.py, app/stock_keys.py, app/stock_download.py, app/stock_player.py, app/stock_ui.py: ⑤ 배경 영상 검색·다운로드 (Pexels·Pixabay·Wikimedia Commons·Internet Archive 공식 API만, 표준 라이브러리 urllib). 허용 호스트+redirect 재검사, 제공처별 간격·429·24시간 캐시, API 키는 DPAPI 파일만, 길이 모드(10~120초 / 확인된 180초 이상) 엄격 분리·자동 대체 금지, 권리 상태는 참고용(보증 문구 금지), 선택한 영상만 다운로드, 미리보기는 ffplay 프로세스 제어(Python 프레임 디코딩 없음)
+- app/pl_core.py, app/pl_ui.py: ⑥ 음악 플레이리스트 (배경 MP4 + 음원 15곡 → MP4 + 곡 시작 12초 제목 SRT). 음원은 디코드로 실제 길이 확인, 오디오는 AAC 하나로 연결(공백 없음·크로스페이드는 선택 시만). 영상은 규격이 맞고 제목 입히기가 없으면 -c copy 반복만, 해상도·코덱 변경·제목 입히기 때만 인코딩. ④ 결과는 `*.plvm_bg.json`(한 바퀴 길이)으로 경계 키프레임 DTS에서만 반복. ①②③에는 보내기만 (자동 시작 금지)
 - tests/: 회차/무손실 연결 회귀 테스트

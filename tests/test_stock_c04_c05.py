@@ -754,3 +754,19 @@ def test_winvault_reader_layout_without_keyring_package():
     assert r.get_password(LEGACY_SERVICE, "pixabay") == "BBB"
     assert r.get_password(LEGACY_SERVICE, "Pexels") is None
     assert all(t in (LEGACY_SERVICE, f"pexels@{LEGACY_SERVICE}", f"pixabay@{LEGACY_SERVICE}", f"Pexels@{LEGACY_SERVICE}") for t in calls)
+
+
+def test_status_line_is_kept_per_mode(tkroot):
+    """짧은 모드 결과 문구가 장편 모드 화면에 남지 않는다 (모드별 상태 문구)."""
+    from app import stock_ui as U
+    w = U.StockSearchWindow(tkroot, tools=lambda: (None, None), adapters={}, check_dns=False)
+    try:
+        w.mode.set(S.MODE_SHORT); w._mode_changed()
+        w._on_search_done(S.MODE_LONG, [])
+        assert "장편" not in w.status.get()
+        w.mode.set(S.MODE_LONG); w._mode_changed()
+        assert "확인된 장편 원본 없음" in w.status.get()
+        w.mode.set(S.MODE_SHORT); w._mode_changed()
+        assert "아직 검색하지 않았습니다" in w.status.get()
+    finally:
+        w.destroy()

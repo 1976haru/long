@@ -161,39 +161,63 @@ class MainWindow(tk.Tk):
         bg, border, fg = "#f6f6f6", "#c4c4c4", "#202020"
         card = tk.Frame(bar, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border, cursor="hand2")
         card.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
-        title = tk.Label(card, text="④ 내 영상으로 배경 만들기", bg=bg, fg=fg, font="PLS.Section")
-        title.pack(side="left", padx=(10, 8), pady=5)
-        desc = tk.Label(card, text="MP4 여러 개를 자연스러운 디졸브로 이어 3~60분 배경 영상", bg=bg, fg="#333333")
-        desc.pack(side="left", pady=5)
-        why = tk.Label(card, text="ⓘ 언제 쓰나요?", bg=bg, fg="#1d4fa8", cursor="hand2")
-        why.pack(side="left", padx=10)
-        why.bind("<Button-1>", lambda e: (self._card_help("bg", "④ 내 영상으로 배경 만들기"), "break")[1])
-        self.card_help_links["bg"] = why
         foot = tk.Label(card, text="배경 만들기 열기 ▶", bg=bg, fg="#1d4fa8", font="PLS.Strong")
         foot.pack(side="right", padx=10)
+        why = tk.Label(card, text="ⓘ 언제 쓰나요?", bg=bg, fg="#1d4fa8", cursor="hand2")
+        why.pack(side="right", padx=(10, 4))
+        why.bind("<Button-1>", lambda e: (self._card_help("bg", "④ 내 영상으로 배경 만들기"), "break")[1])
+        self.card_help_links["bg"] = why
+        title = tk.Label(card, text="④ 내 영상으로 배경 만들기", bg=bg, fg=fg, font="PLS.Section")
+        title.pack(side="left", padx=(10, 8), pady=5)
+        desc = tk.Label(card, text="MP4 여러 개를 자연스러운 디졸브로 이어 3~60분 배경 영상", bg=bg, fg="#333333", anchor="w")
+        desc.pack(side="left", fill="x", expand=True, pady=5)
         for w in (card, title, desc, foot):
             w.bind("<Button-1>", lambda e: self._open_bg())
         self.mode_cards["bg"] = card
         self._stock_card(bar)
 
     def _stock_card(self, bar):
-        """⑤ 배경 영상 검색·다운로드 — ④ 카드 아래 한 줄 카드 (기존 ①~④ 배치는 그대로)."""
+        """⑤ 배경 영상 검색·다운로드 — ④ 카드 아래 줄의 왼쪽 절반 (⑥과 한 줄: 메인 화면 높이를 늘리지 않음)."""
         bg, border, fg = "#f6f6f6", "#c4c4c4", "#202020"
-        card = tk.Frame(bar, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border, cursor="hand2")
-        card.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
-        title = tk.Label(card, text="⑤ 배경 영상 검색·다운로드", bg=bg, fg=fg, font="PLS.Section")
-        title.pack(side="left", padx=(10, 8), pady=5)
-        desc = tk.Label(card, text="주제로 무료 영상 검색 → 실제 재생 → 권리 확인 → 선택 다운로드 → ④로 보내기", bg=bg, fg="#333333")
-        desc.pack(side="left", pady=5)
-        why = tk.Label(card, text="ⓘ 언제 쓰나요?", bg=bg, fg="#1d4fa8", cursor="hand2")
-        why.pack(side="left", padx=10)
+        row = ttk.Frame(bar)
+        row.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        row.columnconfigure(0, weight=1, uniform="half")
+        row.columnconfigure(1, weight=1, uniform="half")
+        self._row56 = row
+        card = tk.Frame(row, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border, cursor="hand2")
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
+        foot = tk.Label(card, text="열기 ▶", bg=bg, fg="#1d4fa8", font="PLS.Strong")
+        foot.pack(side="right", padx=10)
+        why = tk.Label(card, text="ⓘ 도움말", bg=bg, fg="#1d4fa8", cursor="hand2")
+        why.pack(side="right", padx=(10, 4))
         why.bind("<Button-1>", lambda e: (self._card_help("stock", "⑤ 배경 영상 검색·다운로드"), "break")[1])
         self.card_help_links["stock"] = why
-        foot = tk.Label(card, text="검색 열기 ▶", bg=bg, fg="#1d4fa8", font="PLS.Strong")
-        foot.pack(side="right", padx=10)
+        title = tk.Label(card, text="⑤ 배경 영상 검색·다운로드", bg=bg, fg=fg, font="PLS.Section", anchor="w")
+        title.pack(side="left", fill="x", expand=True, padx=(10, 8), pady=5)
+        desc = tk.Label(card, text="무료 영상 검색·재생·권리 확인 → ④", bg=bg, fg="#333333", anchor="w")  # 반쪽 카드: 설명은 ⓘ 도움말로 (잘린 글자를 보이지 않게)
         for w in (card, title, desc, foot):
             w.bind("<Button-1>", lambda e: self._open_stock())
         self.mode_cards["stock"] = card
+        self._playlist_card(bar)
+
+    def _playlist_card(self, bar):
+        """⑥ 음악 플레이리스트 만들기 — ⑤ 카드 오른쪽 절반."""
+        bg, border, fg = "#f6f6f6", "#c4c4c4", "#202020"
+        card = tk.Frame(self._row56, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border,
+                        cursor="hand2")
+        card.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
+        foot = tk.Label(card, text="열기 ▶", bg=bg, fg="#1d4fa8", font="PLS.Strong")
+        foot.pack(side="right", padx=10)
+        why = tk.Label(card, text="ⓘ 도움말", bg=bg, fg="#1d4fa8", cursor="hand2")
+        why.pack(side="right", padx=(10, 4))
+        why.bind("<Button-1>", lambda e: (self._card_help("playlist", "⑥ 음악 플레이리스트 만들기"), "break")[1])
+        self.card_help_links["playlist"] = why
+        title = tk.Label(card, text="⑥ 음악 플레이리스트 만들기", bg=bg, fg=fg, font="PLS.Section", anchor="w")
+        title.pack(side="left", fill="x", expand=True, padx=(10, 8), pady=5)
+        desc = tk.Label(card, text="음원 15곡 → MP4 + 12초 제목 SRT", bg=bg, fg="#333333", anchor="w")  # 반쪽 카드: 설명은 ⓘ 도움말로 (잘린 글자를 보이지 않게)
+        for w in (card, title, desc, foot):
+            w.bind("<Button-1>", lambda e: self._open_playlist())
+        self.mode_cards["playlist"] = card
 
     # ---------- 글자 크기 ----------
     def _set_font_size(self, size):
@@ -746,6 +770,27 @@ class MainWindow(tk.Tk):
                                            peek_tools=self._peek_tools)
         return self.stock_win
 
+    def _open_playlist(self):
+        w = self._alive(getattr(self, "playlist_win", None))
+        if w is not None:
+            w.deiconify(); w.lift(); w.focus_set(); return w
+        from .pl_ui import PlaylistMakerWindow
+        self.playlist_win = PlaylistMakerWindow(self, tools=self._live_tools, peek_tools=self._peek_tools,
+                                                send_to_long=lambda p: self._receive_from_bg(p, source="⑥ 플레이리스트"),
+                                                send_to_live=self._receive_to_live,
+                                                send_to_upload=lambda p: self._open_upload(str(p), Path(p).stem))
+        return self.playlist_win
+
+    def _receive_to_live(self, path):
+        """⑥ 결과를 ② LIVE Playlist에 넣는다 — LIVE READY 검사는 ②의 기존 검사 그대로, 송출은 시작하지 않는다."""
+        self._open_live()
+        w = self._live_window()
+        if w is None:
+            return []
+        added = w.add_playlist_paths([str(path)])
+        w.deiconify(); w.lift()
+        return added
+
     def _receive_stock(self, paths):
         """⑤에서 받은 영상을 ④ MP4 목록에 추가 (④의 디졸브·반복·중복·화질 설정은 그대로 재사용)."""
         w = self._open_bg()
@@ -755,13 +800,13 @@ class MainWindow(tk.Tk):
         w.deiconify(); w.lift()
         return ok
 
-    def _receive_from_bg(self, path):
-        """④에서 만든 배경 영상을 ① SET 목록에 넣는다 (① 무손실 반복 경로 그대로)."""
+    def _receive_from_bg(self, path, source="④ 배경 영상"):
+        """④·⑥에서 만든 영상을 ① SET 목록에 넣는다 (① 무손실 반복 경로 그대로)."""
         if self.running:
             messagebox.showwarning("① 영상 늘리기", "장시간 제작이 진행 중입니다. 끝난 뒤 다시 보내세요.", parent=self); return
         self.add_set_paths([str(path)])
         self.deiconify(); self.lift(); self.focus_set()
-        self.status.set(f"④ 배경 영상을 SET에 추가했습니다: {Path(path).name}")
+        self.status.set(f"{source}을 SET에 추가했습니다: {Path(path).name}")
 
     def _live_playlist_snapshot(self):
         """예약 LIVE 창: 열려 있는 LIVE 창의 Playlist (없으면 빈 목록)."""

@@ -1456,8 +1456,20 @@ class LiveWindow(tk.Toplevel):
             return
         picked = filedialog.askopenfilenames(parent=self, title="Playlist에 넣을 LIVE READY MP4 선택",
                                              filetypes=[("MP4", "*.mp4"), ("모든 파일", "*.*")])
+        self.add_playlist_paths(picked or (), ffprobe=ffprobe)
+
+    def add_playlist_paths(self, paths, *, ffprobe=None) -> list:
+        """Playlist에 파일 추가 + LIVE READY 분석 (송출은 시작하지 않음). ⑥ 플레이리스트에서 보낼 때도 같은 검사."""
+        if ffprobe is None:
+            _, ffprobe = self._tools()
+            if not ffprobe:
+                messagebox.showerror("FFmpeg", "FFmpeg/ffprobe를 찾을 수 없습니다. 메인 창에서 FFmpeg 설정을 확인하세요.", parent=self)
+                return []
+            if not self.playlist_mode:
+                self.source_mode.set("playlist")
+                self._on_source_mode()
         added, problems = [], []
-        for raw in picked or ():
+        for raw in paths:
             try:
                 added.append(self.playlist.add(Path(raw).resolve()).path)
             except PlaylistError as e:
@@ -1472,6 +1484,7 @@ class LiveWindow(tk.Toplevel):
                     q.put(("pl_ready", path, analyze_live_ready(path, ffprobe)))
             threading.Thread(target=work, name="playlist-analyze", daemon=True).start()
         self._refresh_playlist()
+        return added
 
     def _pl_selected(self) -> int | None:
         sel = self.ptree.selection()

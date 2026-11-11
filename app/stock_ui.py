@@ -80,6 +80,7 @@ class StockSearchWindow(tk.Toplevel):
         self.results: dict[str, list[Candidate]] = {MODE_SHORT: [], MODE_LONG: []}
         self.selected: dict[str, set[str]] = {MODE_SHORT: set(), MODE_LONG: set()}
         self.prov_status: dict[str, dict[str, str]] = {MODE_SHORT: {}, MODE_LONG: {}}
+        self.mode_status: dict[str, str] = {MODE_SHORT: "", MODE_LONG: ""}  # 모드별 마지막 검색 결과 문구
         self.res = tk.StringVar(value=RES_LABELS.get(self.mode_res[self.mode.get()], RES_LABELS[RES_FHD]))
         topics = saved.get("topics") if isinstance(saved.get("topics"), list) else list(DEFAULT_TOPICS)
         self.topic_vars = {t.key: tk.BooleanVar(value=t.key in topics) for t in TOPICS}
@@ -242,7 +243,7 @@ class StockSearchWindow(tk.Toplevel):
         lvs.pack(side="right", fill="y")
 
         dr = ttk.Frame(bottom); dr.pack(fill="x")
-        self.btn_dl = ttk.Button(dr, text="⬇ 선택 다운로드", command=self.download_selected, style="Primary.TButton")
+        self.btn_dl = ttk.Button(dr, text="선택 다운로드", command=self.download_selected, style="Primary.TButton")
         self.btn_dl.pack(side="left", fill="x", expand=True)
         self.btn_dl_cancel = ttk.Button(dr, text="■ 다운로드 취소", command=self.cancel_dl.set, state="disabled",
                                         style="Danger.TButton")
@@ -292,6 +293,7 @@ class StockSearchWindow(tk.Toplevel):
     def _mode_changed(self):
         """모드를 바꾸면 그 모드의 결과·해상도 필터만 보여준다 (다른 모드 결과로 대체하거나 자동 검색하지 않음)."""
         self.res.set(RES_LABELS[self.mode_res.get(self.mode.get(), RES_FHD)])
+        self.status.set(self.mode_status.get(self.mode.get()) or "이 모드는 아직 검색하지 않았습니다. [🔍 검색]을 누르세요.")
         self._show_results()
         self._refresh_providers()
         self._save()
@@ -319,7 +321,7 @@ class StockSearchWindow(tk.Toplevel):
             self.btn_search.configure(state="disabled" if busy else "normal")
             self.btn_cancel_search.configure(state="normal" if busy else "disabled")
             n = len(self.selected[self.mode.get()])
-            self.btn_dl.configure(text=f"⬇ 선택 다운로드 ({n}개)", state="disabled" if self.downloading or not n else "normal")
+            self.btn_dl.configure(text=f"선택 다운로드 ({n}개)", state="disabled" if self.downloading or not n else "normal")
             self.btn_dl_cancel.configure(state="normal" if self.downloading else "disabled")
             self.btn_send.configure(state="normal" if self.send_to_bg_cb and self.lib.get_children() else "disabled")
         except tk.TclError:
@@ -385,6 +387,7 @@ class StockSearchWindow(tk.Toplevel):
             msg = f"결과 {n}개 (주제 모두 일치 {full}개) — 썸네일 확인 후 [▶ 미리보기 재생]으로 실제 영상을 보세요."
         if self.cancel_search.is_set():
             msg = "검색을 취소했습니다. " + msg
+        self.mode_status[mode] = msg
         if mode == self.mode.get():
             self.status.set(msg)
         self._refresh_buttons()
