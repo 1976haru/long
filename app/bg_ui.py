@@ -11,6 +11,7 @@ import queue
 import subprocess
 import tempfile
 import threading
+import time
 import tkinter as tk
 import uuid
 from pathlib import Path
@@ -19,10 +20,11 @@ from tkinter import filedialog, messagebox, ttk
 from . import bg_analysis as A
 from . import media_audio as MA
 from .bg_core import (
-    CODEC_H264, CODEC_HEVC, DEFAULT_DISSOLVE, DISSOLVE_CHOICES, ENCODE_PROFILES, GUARD_OWNER, PREVIEW_CONTEXT,
-    QUALITY_4K, QUALITY_FHD, TARGET_MINUTES, BgPlan, Clip, build_bg_plan, choose_output_spec, cleanup_stale_temp,
-    default_bg_output_name, get_profile, hevc_available, make_seam_preview, measure_bitrate, run_background_build,
-    with_measured_rate,
+    CODEC_H264, CODEC_HEVC, DEFAULT_DISSOLVE, DEFAULT_PROJECT_FPS, DISSOLVE_CHOICES, ENCODE_PROFILES, GUARD_OWNER,
+    PREVIEW_CONTEXT, PROJECT_FPS_CHOICES, QUALITY_4K, QUALITY_FHD, TARGET_MINUTES, BgPlan, Clip, build_bg_plan,
+    choose_output_spec, cleanup_stale_temp, default_bg_output_name, estimate_build_seconds, format_precise,
+    get_profile, hevc_available, make_seam_preview, measure_bitrate, measurement_pieces, parse_length,
+    run_background_build, with_measured_rate,
 )
 from .core import BuildCancelled, enough_disk_space, ensure_unique_output, format_duration, free_bytes, probe_video
 from .settings import load_settings, update_settings
@@ -45,6 +47,18 @@ def _busy_text(owner):
 
 def _dissolve_label(v: float) -> str:
     return f"{v:g}초"
+
+
+CUSTOM = 0  # self.minutes 값: 음악 길이 직접 입력
+
+
+def _fps_label(v: float) -> str:
+    return f"{v:g}"
+
+
+def _time_text(seconds: float) -> str:
+    m = int(round(seconds / 60))
+    return f"약 {m // 60}시간 {m % 60}분" if m >= 60 else f"약 {max(1, m)}분"
 
 
 class BackgroundMakerWindow(tk.Toplevel):
@@ -90,7 +104,16 @@ class BackgroundMakerWindow(tk.Toplevel):
         except (TypeError, ValueError):
             d0, m0 = DEFAULT_DISSOLVE, 10
         self.dissolve = tk.StringVar(value=_dissolve_label(d0 if d0 in DISSOLVE_CHOICES else DEFAULT_DISSOLVE))
-        self.minutes = tk.IntVar(value=m0 if m0 in TARGET_MINUTES else 10)
+        self.minutes = tk.IntVar(value=m0 if m0 in TARGET_MINUTES or m0 == CUSTOM else 10)  # 0 = 음악 길이 직접 입력
+        self.custom_length = tk.StringVar(value=str(saved.get("custom_length") or "00:50:07"))
+        try:
+            pf = float(saved.get("project_fps", DEFAULT_PROJECT_FPS))
+        except (TypeError, ValueError):
+            pf = DEFAULT_PROJECT_FPS
+        self.project_fps = tk.StringVar(value=_fps_label(pf if pf in PROJECT_FPS_CHOICES else DEFAULT_PROJECT_FPS))
+        self.length_check = tk.StringVar()
+        self.measured_speed: dict[tuple, float] = {}   # 계획 서명 → 실측 인코딩 속도 (영상 초 / 실제 초)
+        self._length_job = None
         self.quality = tk.StringVar(value=saved.get("quality") if saved.get("quality") in (QUALITY_FHD, QUALITY_4K) else QUALITY_FHD)
         self.profile = tk.StringVar(value=get_profile(saved.get("profile")).label)
         self.codec = tk.StringVar(value=CODEC_HEVC if saved.get("codec") == CODEC_HEVC else CODEC_H264)
@@ -134,7 +157,8 @@ class BackgroundMakerWindow(tk.Toplevel):
         root = ttk.Frame(self.scroll.body, padding=10)
         root.pack(fill="both", expand=True)
         ttk.Label(root, text=TITLE, font="PLS.Title").pack(anchor="w")
-        ttk.Label(root, text="직접 준비한 MP4 여러 개를 자연스러운 디졸브로 이어 3~60분 배경 영상을 만듭니다. "
+        ttk.Label(root, text="직접 준비한 MP4 여러 개를 자연스러운 디졸브로 이어 3~60분 또는 음악 전체 길이(직접 입력, "
+                             "최대 12시간)의 배경 영상을 만듭니다. "
                              "원본 오디오는 넣지 않습니다 (음악은 나중에 따로). 기본값 그대로 [⑦ 제작 시작]만 눌러도 됩니다.",
                   style="Hint.TLabel", wraplength=1100, justify="left").pack(anchor="w", pady=(0, 4))
         sb = ttk.Frame(root); sb.pack(fill="x", pady=(0, 6))
@@ -219,6 +243,8 @@ class BackgroundMakerWindow(tk.Toplevel):
         for m in TARGET_MINUTES:
             ttk.Radiobutton(o1, text=f"{m}분", value=m, variable=self.minutes,
                             command=self._options_changed).pack(side="left", padx=2)
+        ttk.Radiobutton(o1, text="음악 길이 직접 입력", value=CUSTOM, variable=self.minutes,
+                        command=self._options_changed).pack(side="left", padx=2)
         ttk.Label(o1, text="   해상도").pack(side="left", padx=(12, 0))
         ttk.Radiobutton(o1, text="FHD (기본·빠름)", value=QUALITY_FHD, variable=self.quality,
                         command=self._options_changed).pack(side="left", padx=2)
@@ -229,6 +255,22 @@ class BackgroundMakerWindow(tk.Toplevel):
                           values=[_dissolve_label(v) for v in DISSOLVE_CHOICES])
         cb.pack(side="left", padx=(4, 0))
         cb.bind("<<ComboboxSelected>>", lambda e: self._options_changed())
+        oc = ttk.Frame(f3); oc.pack(fill="x", pady=(4, 0))
+        ttk.Label(oc, text="음악 전체 길이").pack(side="left")
+        self.ent_length = ttk.Entry(oc, textvariable=self.custom_length, width=14)
+        self.ent_length.pack(side="left", padx=(4, 4))
+        self.ent_length.bind("<FocusIn>", lambda e: self._use_custom())
+        ttk.Label(oc, text="CapCut 프로젝트 FPS (:FF 표기용)").pack(side="left", padx=(8, 2))
+        fcb = ttk.Combobox(oc, textvariable=self.project_fps, state="readonly", width=7,
+                           values=[_fps_label(v) for v in PROJECT_FPS_CHOICES])
+        fcb.pack(side="left")
+        fcb.bind("<<ComboboxSelected>>", lambda e: self._length_changed())
+        ttk.Label(oc, textvariable=self.length_check, font="PLS.Strong").pack(side="left", padx=(8, 0))
+        ttk.Label(f3, text="예: 00:50:07 · 00:50:07.250 (소수 초) · 00:50:07:15 (CapCut 프레임 표기). 최대 12:00:00. "
+                           "결과는 원본 오디오 없는 자연풍경 MP4이며, 목표보다 짧지 않게 1프레임 안으로 맞춥니다 "
+                           "(음원은 CapCut에서 따로 넣으세요).", style="Hint.TLabel", wraplength=1100,
+                  justify="left").pack(anchor="w")
+        self.custom_length.trace_add("write", lambda *a: self._length_changed(typed=True))
         o3 = ttk.Frame(f3); o3.pack(fill="x", pady=(4, 0))
         ttk.Label(o3, text="화질·용량").pack(side="left")
         self.profile_buttons = []
@@ -645,11 +687,65 @@ class BackgroundMakerWindow(tk.Toplevel):
         self._save_settings()
         self._refresh_all(select=self._selected_index())
 
+    # ---------------- 음악 길이 직접 입력 ----------------
+    def project_fps_value(self) -> float:
+        try:
+            v = float(self.project_fps.get())
+        except (TypeError, ValueError):
+            return DEFAULT_PROJECT_FPS
+        return v if v in PROJECT_FPS_CHOICES else DEFAULT_PROJECT_FPS
+
+    def target_seconds(self) -> float:
+        """출력 길이(초). 직접 입력이면 HH:MM:SS(.mmm / :FF)를 해석 — 잘못되면 ValueError."""
+        m = int(self.minutes.get())
+        if m != CUSTOM:
+            return float(m * 60)
+        return parse_length(self.custom_length.get(), self.project_fps_value())
+
+    def _use_custom(self):
+        if int(self.minutes.get()) != CUSTOM:
+            self.minutes.set(CUSTOM)
+            self._options_changed()
+
+    def _length_changed(self, typed: bool = False):
+        """입력하는 즉시 형식 검사, 계산(예상 반복·용량·시간)은 입력이 멈춘 뒤 0.3초에 한 번만."""
+        if typed and int(self.minutes.get()) != CUSTOM:
+            self.minutes.set(CUSTOM)
+        self._update_length_check()
+        if self._length_job is not None:
+            try:
+                self.after_cancel(self._length_job)
+            except tk.TclError:
+                pass
+        self._length_job = self.after(300, self._length_settled)
+
+    def _length_settled(self):
+        self._length_job = None
+        try:
+            self._save_settings()
+            self._recalc(self.duplicate_findings())
+            self._refresh_buttons()
+        except tk.TclError:
+            pass
+
+    def _update_length_check(self):
+        if int(self.minutes.get()) != CUSTOM:
+            self.length_check.set("")
+            return
+        try:
+            t = parse_length(self.custom_length.get(), self.project_fps_value())
+        except ValueError as e:
+            self.length_check.set(f"⚠ {e}")
+            return
+        self.length_check.set(f"✓ {format_precise(t)} ({t:,.3f}초)")
+
     def _save_settings(self):
         try:
             update_settings(**{SETTINGS_KEY: {"dissolve": self.dissolve_seconds(), "minutes": int(self.minutes.get()),
                                               "quality": self.quality.get(), "outdir": self.outdir.get().strip(),
-                                              "profile": self.profile_key(), "codec": self.codec_key()}})
+                                              "profile": self.profile_key(), "codec": self.codec_key(),
+                                              "custom_length": self.custom_length.get().strip()[:32],
+                                              "project_fps": self.project_fps_value()}})
         except Exception:
             pass
 
@@ -845,8 +941,18 @@ class BackgroundMakerWindow(tk.Toplevel):
             if self._name_auto:
                 self.outname.set("")
             return
+        self._update_length_check()
+        try:
+            target = self.target_seconds()
+        except ValueError as e:
+            self.plan_text.set(f"⚠ 음악 길이: {e}")
+            self.size_text.set("")
+            self.warn_text.set("")
+            return
         if self._name_auto:
-            self.outname.set(default_bg_output_name(self.clips, int(self.minutes.get())))
+            custom = int(self.minutes.get()) == CUSTOM
+            self.outname.set(default_bg_output_name(self.clips, int(self.minutes.get()),
+                                                    seconds=target if custom else None))
         warns: list[str] = []
         d, note = self.effective_dissolve()
         if note:
@@ -858,7 +964,7 @@ class BackgroundMakerWindow(tk.Toplevel):
             spec = choose_output_spec([c.info for c in active], self.quality.get(),
                                       hevc_available=self._hevc_ok() if codec == CODEC_HEVC else False,
                                       profile=prof.key, codec=codec)
-            plan = build_bg_plan(active, int(self.minutes.get()) * 60, d, spec)
+            plan = build_bg_plan(active, target, d, spec)
         except ValueError as e:
             self.plan_text.set(f"⚠ {e}")
             self.size_text.set("")
@@ -879,9 +985,20 @@ class BackgroundMakerWindow(tk.Toplevel):
             free_txt = f" · 여유 공간 {_gb(free)}" + (f" ⚠ 부족 (필요 약 {_gb(need)})" if short else " ✓ 충분")
         except Exception:
             pass
+        laps = plan.target / plan.cycle_duration
+        whole = int(laps + 1e-9)
+        lap_txt = (f"전체 장면 순서 {whole}바퀴" + (" 후 정확히 끝남" if abs(laps - whole) < 1e-6
+                                                 else f" + {whole + 1}번째 바퀴 중간에서 끝남") if whole
+                   else "한 바퀴가 끝나기 전에 끝남")
+        secs = estimate_build_seconds(plan, self.measured_speed.get(self.plan_key(plan)))
         self.plan_text.set(
             f"{plan.spec.label} · {plan.spec.fps:g} FPS · 디졸브 {plan.dissolve:.2f}초 · 한 바퀴 {format_duration(plan.cycle_duration)}"
-            f" × 약 {plan.target / plan.cycle_duration:.1f}바퀴 → {format_duration(plan.target)}")
+            f" × 약 {laps:.1f}바퀴 → {format_precise(plan.target)} ({plan.target_frames:,}프레임)\n"
+            f"예상 반복: {lap_txt} · 예상 제작 시간 {_time_text(secs)} (대략, PC 성능에 따라 다름"
+            f"{' · 실측 속도 기준' if self.plan_key(plan) in self.measured_speed else ''})")
+        if secs > 3 * 3600:
+            warns.append(f"제작 시간이 {_time_text(secs)} 걸릴 수 있습니다. 제작 중에는 PC 절전이 자동으로 막히며, "
+                         "[■ 중단]을 누르면 임시 파일만 지우고 멈춥니다.")
         if plan.measured_bps:
             lo, hi = plan.size_range
             size = f"예상 최종 크기 약 {_mb(lo)} ~ {_mb(hi)} (실측 {plan.measured_bps * 8 / 1e6:.1f} Mbps 기준)"
@@ -999,8 +1116,13 @@ class BackgroundMakerWindow(tk.Toplevel):
 
     def _measure_worker(self, ff, plan, key, work):
         try:
+            t0 = time.monotonic()
             bps = measure_bitrate(Path(ff), plan, self.measure_cancel, work,
                                   progress_cb=lambda f, t: self.events.put(("status", t)))
+            spent = time.monotonic() - t0   # FFmpeg 시작 시간까지 포함 → 실제보다 느리게(=안전하게) 나온다
+            encoded = sum(p.length for p in measurement_pieces(plan))
+            if spent > 0 and encoded > 0:
+                self.measured_speed[key] = encoded / spent
             self.events.put(("measured", key, bps))
         except BuildCancelled:
             self.events.put(("measure_error", ""))
@@ -1086,8 +1208,12 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.running = False
         self.last_output = r.output
         self.bar["value"] = 100
-        self.status.set(f"완성: {r.output.name} · {format_duration(r.duration)} · {r.width}×{r.height} · "
-                        f"{r.fps:g} FPS · {r.size / 1024**2:.0f} MB · 걸린 시간 {format_duration(r.elapsed)}")
+        exact = ""
+        if r.target_frames:
+            exact = (f" · 목표 {format_precise(r.target)} 대비 {r.error_seconds * 1000:+.1f} ms "
+                     f"({r.frames:,}/{r.target_frames:,}프레임{' 일치' if r.frames == r.target_frames else ''}) · 오디오 없음")
+        self.status.set(f"완성: {r.output.name} · {format_precise(r.duration)} · {r.width}×{r.height} · "
+                        f"{r.fps:g} FPS · {r.size / 1024**2:.0f} MB · 걸린 시간 {format_duration(r.elapsed)}{exact}")
         self._refresh_buttons()
         self.result = r
 
@@ -1191,6 +1317,12 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.preview_cancel.set()
         self.measure_cancel.set()
         self.silent_cancel.set()
+        if self._length_job is not None:
+            try:
+                self.after_cancel(self._length_job)
+            except tk.TclError:
+                pass
+            self._length_job = None
         for t in self._threads:  # FFmpeg를 남기지 않도록 잠깐 기다린다 (작업 스레드가 FFmpeg를 종료)
             t.join(timeout=8)
         for p in self.preview_files:  # 이 창이 만든 미리보기 파일만 지운다

@@ -10,9 +10,15 @@
 2) 조각들을 -c copy로 이어 cycle.mp4 를 만들고 ffprobe + 디코드 검사로 확인한다.
 3) cycle.mp4 를 core.run_concat_copy(-c copy)로 목표 길이만큼 반복 연결한다
    (.part.mp4 로 만든 뒤 ffprobe 검증 성공 시 최종 파일로 교체).
+
+정확한 길이 (음악 길이 직접 입력 · CapCut용): 목표를 출력 FPS의 프레임 수 N(올림 → 목표보다 짧지 않음)으로 바꾼다.
+마지막 바퀴는 '-t 자르기'(패킷 기준이라 B-프레임에서 프레임 단위가 보장되지 않음) 대신, 이미 만든 조각 파일 중 앞쪽
+조각을 그대로(-c copy) 쓰고, 끝이 걸리는 조각 1개만 같은 설정으로 필요한 프레임 수까지 다시 인코딩(끝 조각)한다.
+조각마다 키프레임으로 시작하는 독립 파일이라 이어 붙인 결과는 정확히 N프레임이 된다 (ffprobe로 확인).
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import shutil
@@ -32,6 +38,10 @@ from .core import (
 )
 
 TARGET_MINUTES = (3, 10, 20, 30, 60)
+MAX_TARGET_SECONDS = 12 * 3600   # 직접 입력 최대 12시간
+PROJECT_FPS_CHOICES = (23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0)  # CapCut HH:MM:SS:FF 표기의 프로젝트 FPS
+DEFAULT_PROJECT_FPS = 30.0       # CapCut 기본 프로젝트 FPS
+COPY_BYTES_PER_SECOND = 120 * 1024**2  # 예상 제작 시간용: 무손실 반복 연결(디스크 읽기+쓰기) 보수적 속도
 DISSOLVE_CHOICES = (0.5, 1.0, 1.5, 2.0)
 DEFAULT_DISSOLVE = 1.0
 DISK_FLOOR = 512 * 1024**2      # 작업 중 이 이하로 남으면(또는 남은 작업량+이 값보다 적으면) 안전하게 중단
@@ -206,6 +216,11 @@ class BgPlan:
     measured_bps: float = 0.0  # >0: 실제 시험 인코딩(measure_bitrate)으로 잰 평균 바이트/초
 
     @property
+    def target_frames(self) -> int:
+        """목표 길이를 출력 FPS(정확한 분수)의 프레임 수로 — 올림이라 결과가 목표보다 짧지 않다 (오차 1프레임 미만)."""
+        return target_frame_count(self.target, self.spec.fps)
+
+    @property
     def required_bytes(self) -> int:
         if self.measured_bps > 0:  # 실측값 + 25% 여유 (짧은 시험 구간이 전체를 대표하지 못할 수 있음)
             rate = self.measured_bps * MEASURE_HEADROOM
@@ -225,9 +240,10 @@ def peak_bytes(cycle: int | float, final: int | float) -> int:
     """작업 중 동시에 차지하는 최대 공간.
 
     1) 조각 인코딩: 조각 합계(≈cycle)  2) 조각 → cycle.mp4 연결: 조각 + cycle = 2×cycle
-    3) 조각 삭제 후 cycle.mp4 → 최종 .part.mp4 반복 연결: cycle + final  (교체는 같은 폴더 이름 변경이라 추가 공간 없음)
+    3) 마지막 바퀴용 앞쪽 조각만 남기고 cycle.mp4 → 최종 .part.mp4 반복 연결:
+       cycle + 남긴 조각(≤ min(cycle, final)) + final  (교체는 같은 폴더 이름 변경이라 추가 공간 없음)
     """
-    return int(cycle + max(cycle, final))
+    return int(cycle + max(cycle, final + min(cycle, final)))
 
 
 @dataclass(frozen=True)
@@ -241,6 +257,93 @@ class BgResult:
     cycle_duration: float
     repeats: int
     elapsed: float
+    target: float = 0.0          # 요청한 길이 (초)
+    frames: int = 0              # 완성 파일의 실제 프레임 수 (ffprobe)
+    target_frames: int = 0       # 목표 프레임 수
+    error_seconds: float = 0.0   # 실제 길이 - 목표 (+면 목표보다 김, 1프레임 미만이 정상)
+    tail_frames: int = 0         # 끝 맞춤으로 다시 인코딩한 프레임 수 (0 = 조각 경계에서 정확히 끝남)
+
+
+# ---------------- 길이 입력 · 프레임 ----------------
+
+def exact_fps(fps: float) -> float:
+    """29.97 → 30000/1001 처럼 FFmpeg가 실제로 쓰는 정확한 값 (12시간에서 1프레임 이상 어긋나지 않게)."""
+    for std, num in ((23.976, 24000), (29.97, 30000), (59.94, 60000)):
+        if abs(fps - std) < 0.01:
+            return num / 1001
+    return float(fps)
+
+
+def target_frame_count(seconds: float, fps: float) -> int:
+    """목표 초 → 프레임 수 (올림: 결과가 목표보다 짧아 CapCut 끝에 검은 화면이 생기지 않게)."""
+    return max(1, math.ceil(seconds * exact_fps(fps) - 1e-6))
+
+
+def parse_length(text: str, project_fps: float | None = None) -> float:
+    """음악 길이 직접 입력 → 초.
+
+    허용: HH:MM:SS · HH:MM:SS.mmm (소수 1~3자리) · MM:SS · HH:MM:SS:FF (CapCut 프레임 표기, project_fps 필요).
+    분·초는 0~59, 프레임은 0 ~ (FPS-1). 0보다 크고 최대 12시간. 잘못되면 ValueError(화면에 그대로 보여 줄 문장).
+    """
+    s = (text or "").strip().replace(",", ".").replace("；", ":").replace("：", ":")
+    if not s:
+        raise ValueError("음악 길이를 입력하세요 (예: 00:50:07).")
+    parts = [p.strip() for p in s.split(":")]
+    if len(parts) not in (2, 3, 4) or any(not p for p in parts):
+        raise ValueError("형식이 올바르지 않습니다. 예: 00:50:07 · 00:50:07.250 · 00:50:07:15")
+    frames = None
+    if len(parts) == 4:
+        *parts, ff = parts
+        if not ff.isdigit():
+            raise ValueError("프레임(:FF)은 숫자로 입력하세요. 예: 00:50:07:15")
+        frames = int(ff)
+    if len(parts) == 2:
+        parts = ["0"] + parts
+    hh, mm, ss = parts
+    if not hh.isdigit() or not mm.isdigit():
+        raise ValueError("시·분은 숫자로 입력하세요. 예: 00:50:07")
+    whole, dot, frac = ss.partition(".")
+    if not whole.isdigit() or len(whole) > 2 or (dot and (not frac.isdigit() or len(frac) > 3)):
+        raise ValueError("초는 SS 또는 SS.mmm(소수 3자리까지)로 입력하세요. 예: 07 · 07.250")
+    if frames is not None and dot:
+        raise ValueError("프레임 표기(HH:MM:SS:FF)에는 소수 초를 함께 쓸 수 없습니다.")
+    h, m, sec = int(hh), int(mm), int(whole) + (int(frac) / 10 ** len(frac) if dot else 0.0)
+    if m > 59 or int(whole) > 59:
+        raise ValueError("분과 초는 0~59 사이여야 합니다.")
+    total = h * 3600 + m * 60 + sec
+    if frames is not None:
+        if not project_fps or project_fps <= 0:
+            raise ValueError("프레임 표기(:FF)를 쓰려면 CapCut 프로젝트 FPS를 고르세요.")
+        nominal = int(round(project_fps))
+        if frames >= nominal:
+            raise ValueError(f"프레임(:FF)은 0~{nominal - 1} 사이여야 합니다 ({project_fps:g} FPS).")
+        total += frames / exact_fps(project_fps)
+    if total <= 0:
+        raise ValueError("길이는 0보다 커야 합니다.")
+    if total > MAX_TARGET_SECONDS + 1e-9:
+        raise ValueError("최대 12시간(12:00:00)까지 입력할 수 있습니다.")
+    return total
+
+
+def format_precise(seconds: float) -> str:
+    """HH:MM:SS.mmm (밀리초는 버림 — 3007.0040 → 00:50:07.004)."""
+    ms_total = int(math.floor(max(0.0, seconds) * 1000 + 1e-6))
+    s, ms = divmod(ms_total, 1000)
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def length_tag(seconds: float) -> str:
+    """파일명용 길이 표기: 600 → 10M, 3007 → 50M07S, 3007.25 → 50M07S250, 3600 → 1H00M00S."""
+    ms_total = int(round(seconds * 1000))
+    s, ms = divmod(ms_total, 1000)
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    if not h and not s and not ms:
+        return f"{m}M"
+    tag = f"{h}H{m:02d}M{s:02d}S" if h else f"{m}M{s:02d}S"
+    return tag + (f"{ms:03d}" if ms else "")
 
 
 # ---------------- 출력 규격 ----------------
@@ -342,6 +445,8 @@ def build_bg_plan(clips: Sequence[Clip], target: float, dissolve: float, spec: O
         raise ValueError("사용할 영상이 없습니다. 영상을 추가하거나 '제외'를 해제하세요.")
     if target <= 0:
         raise ValueError("출력 길이를 선택하세요.")
+    if target > MAX_TARGET_SECONDS + 1e-9:
+        raise ValueError("출력 길이는 최대 12시간까지 지원합니다.")
     if dissolve <= 0:
         raise ValueError("디졸브 시간은 0보다 커야 합니다.")
     fps = spec.fps
@@ -382,11 +487,53 @@ def build_bg_plan(clips: Sequence[Clip], target: float, dissolve: float, spec: O
     return BgPlan(tuple(pieces), d, cycle, float(target), repeats, spec, expected_size, work_size, count, tuple(warnings))
 
 
-def default_bg_output_name(clips: Sequence[Clip], minutes: int) -> str:
+def default_bg_output_name(clips: Sequence[Clip], minutes: int = 0, *, seconds: float | None = None) -> str:
+    """기존 버튼은 '_BG_10M', 직접 입력은 '_BG_50M07S'처럼 길이를 그대로 적는다."""
     active = [c for c in clips if c.enabled]
     stem = active[0].path.stem if active else "BACKGROUND"
     extra = f"_외{len(active) - 1}" if len(active) > 1 else ""
-    return f"{stem}{extra}_BG_{minutes}M.mp4"
+    tag = length_tag(seconds) if seconds is not None else f"{minutes}M"
+    return f"{stem}{extra}_BG_{tag}.mp4"
+
+
+def split_last_cycle(piece_frames: Sequence[int], target_frames: int) -> tuple[int, int, int]:
+    """목표 프레임 수를 (전체 바퀴 수, 마지막 바퀴에서 그대로 쓸 앞쪽 조각 수 k, 끝 조각에서 쓸 프레임 수 t)로 나눈다.
+
+    결과 = cycle × full + 조각[0..k-1] + (t > 0 이면 조각 k의 처음 t프레임).  k == len(조각)이면 t == 0.
+    """
+    total = sum(piece_frames)
+    if total <= 0 or target_frames <= 0:
+        raise ValueError("프레임 수가 올바르지 않습니다.")
+    full, rem = divmod(target_frames, total)
+    if rem == 0:
+        return full, 0, 0
+    acc = 0
+    for k, n in enumerate(piece_frames):
+        if acc + n > rem:
+            return full, k, rem - acc
+        acc += n
+    return full, len(piece_frames), 0  # 도달하지 않음 (rem < total)
+
+
+def _encode_speed_guess(spec: OutputSpec) -> float:
+    """예상 제작 시간용 인코딩 속도 (영상 초 / 실제 초). 보통 PC 기준 보수적인 값 — 실측하면 그 값을 쓴다."""
+    by_preset = {"veryfast": 3.0, "faster": 2.5, "fast": 1.6, "medium": 1.1, "slow": 0.6}
+    v = by_preset.get(spec.preset, 1.0)
+    if spec.codec == CODEC_HEVC:
+        v *= 0.35
+    v /= max(0.25, (spec.width * spec.height) / (1920 * 1080))
+    v /= max(1.0, spec.fps / 30.0)
+    return max(0.02, v)
+
+
+def estimate_build_seconds(plan: BgPlan, encode_speed: float | None = None) -> float:
+    """대략의 제작 시간 (초): 한 바퀴 + 끝 조각 인코딩 + 디코드 검사 + 무손실 반복 연결(디스크 속도)."""
+    speed = encode_speed if encode_speed and encode_speed > 0 else _encode_speed_guess(plan.spec)
+    longest = max((p.length for p in plan.pieces), default=0.0)
+    encode = (plan.cycle_duration + min(longest, plan.target)) / speed
+    decode = plan.cycle_duration / 8.0
+    copy = plan.expected_size / COPY_BYTES_PER_SECOND
+    return encode + decode + copy + 5.0
 
 
 # ---------------- FFmpeg 실행 ----------------
@@ -407,8 +554,9 @@ def _norm_chain(spec: OutputSpec, length: float) -> str:
             f"format=yuv420p,settb=AVTB")
 
 
-def piece_command(ffmpeg: Path, piece: Piece, spec: OutputSpec, out: Path) -> list[str]:
-    cmd = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-nostdin"]
+def piece_command(ffmpeg: Path, piece: Piece, spec: OutputSpec, out: Path, max_frames: int | None = None) -> list[str]:
+    """조각 1개 인코딩. max_frames: 끝 맞춤용 — 같은 필터(디졸브 곡선 포함)로 처음 max_frames 프레임만 만든다."""
+    cmd =[str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-nostdin"]
     segs = [piece.a] + ([piece.b] if piece.b is not None else [])
     for seg in segs:
         # 입력 앞 -ss + 재인코딩 = 프레임 단위 정확한 탐색. -t는 약간 여유를 두고 trim으로 정확히 자른다.
@@ -421,7 +569,9 @@ def piece_command(ffmpeg: Path, piece: Piece, spec: OutputSpec, out: Path) -> li
     else:
         graph = f"[0:v]{_norm_chain(spec, piece.length)}[v]"
     n_frames = max(1, int(round(piece.length * spec.fps)))
-    cmd += ["-filter_complex", graph, "-map", "[v]", "-an", "-sn", "-dn", "-map_metadata", "-1",
+    if max_frames is not None:
+        n_frames = max(1, min(n_frames, int(max_frames)))
+    cmd +=["-filter_complex", graph, "-map", "[v]", "-an", "-sn", "-dn", "-map_metadata", "-1",
             "-frames:v", str(n_frames), "-r", fps_expr(spec.fps), "-c:v", spec.encoder,
             "-preset", spec.preset, "-crf", str(spec.crf), "-pix_fmt", "yuv420p",
             "-g", str(max(1, int(round(spec.fps * 2))))]
@@ -517,6 +667,45 @@ def decode_check(ffmpeg: Path, path: Path, cancel_event: Event) -> None:
             raise BuildError("디졸브 편집본 디코드 검사 실패:\n" + (err or "").strip()[-600:])
     finally:
         _terminate(p)
+
+
+def probe_frames(ffprobe: Path, path: Path) -> tuple[int, float]:
+    """(영상 프레임 수, 영상 스트림 길이 초) — MP4 헤더(stts)에서 바로 읽어 12시간 파일도 즉시 끝난다.
+
+    헤더에 프레임 수가 없으면 패킷을 세어(디코드 없이 demux만) 구한다.
+    """
+    def run(extra: list[str], entries: str) -> dict:
+        cmd = [str(ffprobe), "-v", "error", "-select_streams", "v:0", *extra, "-show_entries", entries,
+               "-of", "json", str(path)]
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
+                               creationflags=creationflags_no_window())
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise BuildError(f"ffprobe를 실행할 수 없습니다: {e}") from e
+        if p.returncode != 0:
+            raise BuildError(f"영상 프레임 수를 확인할 수 없습니다: {Path(path).name}\n{p.stderr.strip()[-300:]}")
+        try:
+            return (json.loads(p.stdout).get("streams") or [{}])[0]
+        except (ValueError, IndexError) as e:
+            raise BuildError(f"영상 프레임 수를 확인할 수 없습니다: {Path(path).name}") from e
+
+    st = run([], "stream=nb_frames,duration")
+    try:
+        frames = int(st.get("nb_frames") or 0)
+    except (TypeError, ValueError):
+        frames = 0
+    if frames <= 0:
+        try:
+            frames = int(run(["-count_packets"], "stream=nb_read_packets").get("nb_read_packets") or 0)
+        except (TypeError, ValueError):
+            frames = 0
+    try:
+        duration = float(st.get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if frames <= 0:
+        raise BuildError(f"영상 프레임 수를 확인할 수 없습니다: {Path(path).name}")
+    return frames, duration
 
 
 def _concat_copy_simple(ffmpeg: Path, files: Sequence[Path], out: Path, cancel_event: Event) -> None:
@@ -689,12 +878,20 @@ def run_background_build(
                                   "실제 인코딩 크기로 다시 계산해 보니")
 
         report(encode_weight, "한 바퀴 영상 합치는 중 (무손실)")
+        piece_frames = [probe_frames(ffprobe, f)[0] for f in files]
         cycle = temp_dir / "cycle.mp4"
         try:
             _concat_copy_simple(ffmpeg, files, cycle, stop)
         except BuildCancelled:
             watch.raise_reason()
-        for f in files:
+        # 정확한 끝: 목표 프레임 수 = 전체 바퀴 × cycle + 앞쪽 조각 k개(그대로) + 끝 조각(t프레임만 다시 인코딩)
+        n_target = plan.target_frames
+        full, keep, tail_n = split_last_cycle(piece_frames, n_target)
+        if keep == 0 and tail_n == 0:   # 목표가 바퀴 경계에서 정확히 끝남
+            keep_files: list[Path] = []
+        else:
+            keep_files = files[:keep]
+        for f in files[len(keep_files):]:
             try:
                 f.unlink()
             except OSError:
@@ -710,8 +907,10 @@ def run_background_build(
         if abs(cinfo.duration - plan.cycle_duration) > max(0.5, 3 / plan.spec.fps * len(plan.pieces)):
             raise BuildError(f"편집본 길이 검증 실패: 예상 {plan.cycle_duration:.2f}초, 실제 {cinfo.duration:.2f}초")
 
-        repeats = max(1, math.ceil(plan.target / cinfo.duration - 1e-9))
-        final_size = int(cinfo.size * min(plan.target, cinfo.duration * repeats) / cinfo.duration)
+        cycle_frames = sum(piece_frames)
+        fps_x = exact_fps(plan.spec.fps)
+        repeats = full + (1 if (keep or tail_n) else 0)
+        final_size = int(cinfo.size * n_target / cycle_frames)
         # 3) 한 바퀴 실제 크기로 최종 MP4 공간 재검사 (cycle.mp4는 이미 디스크에 있으므로 최종 크기만 필요)
         ok, free, need = enough_disk_space(output.parent, final_size)
         if not ok:
@@ -719,9 +918,24 @@ def run_background_build(
                              f"남음 {free / 1024**3:.1f} GB / 필요 약 {need / 1024**3:.1f} GB. "
                              "원본과 기존 파일은 그대로이며, 이 작업의 임시 파일만 지웠습니다. "
                              "공간을 확보하거나 길이를 줄이거나 [화질·용량]에서 용량이 작은 설정을 고르세요.")
+        tail_file: Path | None = None
+        if tail_n:
+            check_stop()
+            tail_piece = plan.pieces[keep]
+            tail_file = temp_dir / "tail.mp4"
+            report(encode_weight + 0.03, f"끝 길이 맞추는 중 · {tail_piece.label} 처음 {tail_n}프레임 (이 조각만 인코딩)")
+            try:
+                run_ffmpeg_progress(piece_command(ffmpeg, tail_piece, plan.spec, tail_file, max_frames=tail_n), stop)
+            except BuildCancelled:
+                watch.raise_reason()
+            got = probe_frames(ffprobe, tail_file)[0] if tail_file.exists() else 0
+            if got != tail_n:
+                raise BuildError(f"끝 조각 프레임 수가 맞지 않습니다: 예상 {tail_n}, 실제 {got}")
+        sequence = (cycle,) * full + tuple(keep_files) + ((tail_file,) if tail_file else ())
         watch.remaining = lambda: max(0, int(final_size * 1.02) - _file_size(part))
-        long_plan = BuildPlan(sequence=(cycle,) * repeats, expected_duration=plan.target,
-                              expected_size=final_size, cycles=repeats, trim_to=plan.target, mode="time")
+        # -t 자르기 없이 이어 붙인다 (마지막 바퀴는 위에서 프레임 단위로 맞춤) → 정확히 n_target 프레임
+        long_plan = BuildPlan(sequence=sequence, expected_duration=n_target / fps_x,
+                              expected_size=final_size, cycles=repeats, trim_to=None, mode="time")
         base = encode_weight + 0.04
 
         def on_long(frac: float, _text: str) -> None:
@@ -744,13 +958,31 @@ def run_background_build(
             except OSError:
                 pass
             raise BuildError("완성 파일에 오디오 스트림이 있어 배경 전용 조건을 만족하지 않습니다 (결과를 지웠습니다).")
+        out_frames, stream_dur = probe_frames(ffprobe, r.output)
+        actual = out_frames / fps_x
+        if out_frames < n_target or out_frames > n_target + 1:
+            # 목표보다 짧으면 CapCut 끝에 검은 화면이 생긴다 → 결과를 쓰지 않는다 (1프레임 초과로 길어도 실패로 본다)
+            try:
+                r.output.unlink()
+            except OSError:
+                pass
+            raise BuildError(f"완성 길이 검증 실패: 목표 {n_target:,}프레임({format_precise(plan.target)}), 실제 "
+                             f"{out_frames:,}프레임({format_precise(actual)}). 결과를 지웠습니다 (원본은 그대로).")
+        if stream_dur and stream_dur + 0.5 / fps_x < plan.target:
+            try:
+                r.output.unlink()
+            except OSError:
+                pass
+            raise BuildError(f"완성 영상이 목표보다 짧습니다: 목표 {format_precise(plan.target)}, 실제 "
+                             f"{format_precise(stream_dur)}. 결과를 지웠습니다 (원본은 그대로).")
         from .pl_core import write_bg_sidecar  # ⑥이 한 바퀴 경계에서만 반복하도록 (실패해도 ④ 결과에는 영향 없음)
         write_bg_sidecar(r.output, cycle=cinfo.duration, duration=final.duration, size=final.size, width=final.width,
                          height=final.height, fps=final.fps, codec=final.video_codec, repeats=repeats)
         if progress_cb:
             progress_cb(1.0, "완료")
         return BgResult(r.output, final.duration, final.size, final.width, final.height, final.fps,
-                        cinfo.duration, repeats, time.monotonic() - started)
+                        cinfo.duration, repeats, time.monotonic() - started, target=plan.target, frames=out_frames,
+                        target_frames=n_target, error_seconds=actual - plan.target, tail_frames=tail_n)
     finally:
         watch.close()
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -965,5 +1197,7 @@ __all__ = [
     "cleanup_stale_temp", "decode_check", "probe_video", "fps_expr", "EncodeProfile", "ENCODE_PROFILES",
     "PROFILE_BEST", "get_profile", "peak_bytes", "seam_segments", "seam_preview_command", "make_seam_preview",
     "CODEC_H264", "CODEC_HEVC", "HEVC_BASE_CRF", "measure_bitrate", "measurement_pieces", "with_measured_rate",
-    "MEASURE_HEADROOM", "OWNER_FILE",
+    "MEASURE_HEADROOM", "OWNER_FILE", "MAX_TARGET_SECONDS", "PROJECT_FPS_CHOICES", "DEFAULT_PROJECT_FPS", "exact_fps",
+    "target_frame_count", "parse_length", "format_precise", "length_tag", "split_last_cycle", "estimate_build_seconds",
+    "probe_frames",
 ]

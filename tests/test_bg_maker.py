@@ -427,10 +427,12 @@ def test_required_bytes_is_peak_of_cycle_plus_final():
     p = B.build_bg_plan(clips, 600, 1.0, spec)
     cyc = spec.bytes_per_second * p.cycle_duration
     assert p.work_size == pytest.approx(cyc, rel=1e-6)
-    assert p.required_bytes == pytest.approx(cyc + p.expected_size, rel=1e-6)
-    short = B.build_bg_plan(clips, 20, 1.0, spec)  # 최종이 한 바퀴보다 짧으면 2×cycle(조각+cycle.mp4)이 최대
-    assert short.required_bytes == pytest.approx(2 * short.work_size, rel=1e-6)
-    assert B.peak_bytes(10, 100) == 110 and B.peak_bytes(10, 5) == 20
+    # 반복 연결 중: cycle.mp4 + 마지막 바퀴용으로 남긴 앞쪽 조각(최대 1바퀴) + 최종 파일
+    assert p.required_bytes == pytest.approx(2 * cyc + p.expected_size, rel=1e-6)
+    short = B.build_bg_plan(clips, 20, 1.0, spec)  # 최종이 한 바퀴보다 짧으면: cycle + 남긴 조각(≤최종) + 최종
+    fin = spec.bytes_per_second * 20
+    assert short.required_bytes == pytest.approx(max(2 * short.work_size, short.work_size + 2 * fin), rel=1e-6)
+    assert B.peak_bytes(10, 100) == 120 and B.peak_bytes(10, 5) == 20 and B.peak_bytes(10, 8) == 26
 
 
 def _two_clips(clips_dir):
