@@ -32,6 +32,10 @@ from pathlib import Path
 from threading import Event
 from typing import Callable, Sequence
 
+from .bg_fit import (
+    DEFAULT_BLUR, DEFAULT_PAD, FIT_BLUR, FIT_FILL, FIT_SHORT, MOTION_NONE, MediaMeta, fit_filter, fit_notes,
+    motion_filter, native_height,
+)
 from .core import (
     BuildCancelled, BuildError, BuildPlan, VideoInfo, creationflags_no_window, enough_disk_space, escape_concat_path,
     format_duration, free_bytes, probe_video, run_concat_copy, write_concat_file,
@@ -110,8 +114,10 @@ def get_profile(key: str | None) -> EncodeProfile:
     return next((p for p in ENCODE_PROFILES if p.key == key), ENCODE_PROFILES[0])
 
 
+QUALITY_HD = "HD"       # 1280×720 (선택)
 QUALITY_FHD = "FHD"
 QUALITY_4K = "4K"
+QUALITY_HEIGHT = {QUALITY_HD: 720, QUALITY_FHD: 1080, QUALITY_4K: 2160}
 STANDARD_HEIGHTS = (2160, 1440, 1080, 720, 540, 480, 360)
 TEMP_PREFIX = ".PLVM_BG_TEMP_"
 GUARD_OWNER = "bg"
@@ -119,15 +125,23 @@ GUARD_OWNER = "bg"
 
 @dataclass
 class Clip:
-    """사용자가 고른 MP4 1개 + 사용할 구간. 원본 파일은 읽기만 한다."""
+    """사용자가 고른 영상·사진 1개 + 사용할 구간. 원본 파일은 읽기만 한다.
+
+    사진(meta.is_image): info.duration = 표시 시간, 구간은 항상 전체. motion = 아주 느린 움직임 효과 (기본 정지)."""
     info: VideoInfo
     start: float = 0.0
     end: float | None = None  # None = 끝까지
     enabled: bool = True
+    meta: MediaMeta | None = None
+    motion: str = MOTION_NONE
 
     @property
     def path(self) -> Path:
         return self.info.path
+
+    @property
+    def is_image(self) -> bool:
+        return bool(self.meta and self.meta.is_image)
 
     @property
     def used_end(self) -> float:
@@ -157,6 +171,9 @@ class OutputSpec:
     profile: str = PROFILE_BEST
     maxrate_kbps: int = 0   # >0 이면 CRF + VBV 상한 (-maxrate/-bufsize). 평균 크기를 '제한'할 뿐 정확한 크기를 보장하지 않는다
     bufsize_kbps: int = 0
+    fit: str = FIT_FILL     # 16:9가 아닌 원본 처리: blur(흐림 배경) | fill(꽉 채우기, 기존) | contain(원본 전체+여백)
+    blur: int = DEFAULT_BLUR
+    pad: str = DEFAULT_PAD
 
     @property
     def encoder(self) -> str:
@@ -190,6 +207,20 @@ class Segment:
     path: Path
     start: float
     length: float
+    still: bool = False      # 사진: 같은 화면을 반복(-loop 1)해 영상으로. start는 표시 구간 안의 위치(움직임 효과용)
+    pre: str = ""            # 화면 맞춤 전 필터 (사진 EXIF 방향, 정사각이 아닌 화소 SAR 보정)
+    dw: int = 0              # 보이는 크기 (0 = 모름 → 기존 필터)
+    dh: int = 0
+    motion: str = ""         # 사진 움직임 효과
+    total: float = 0.0       # 사진 전체 표시 시간 (움직임 진행률 계산용)
+
+
+def clip_segment(c: Clip, start: float, length: float) -> Segment:
+    """클립의 한 구간 → Segment (화면 맞춤·사진 정보 포함)."""
+    m = c.meta
+    still = bool(m and m.is_image)
+    return Segment(c.path, start, length, still=still, pre=m.pre_filter if m else "", dw=c.info.width,
+                   dh=c.info.height, motion=(c.motion if still else ""), total=(c.used_length if still else 0.0))
 
 
 @dataclass(frozen=True)
@@ -363,13 +394,16 @@ def _std_fps(fps: float) -> float:
 
 
 def choose_output_spec(infos: Sequence[VideoInfo], quality: str = QUALITY_FHD, *, hevc_available: bool = True,
-                       profile: str = PROFILE_BEST, codec: str = CODEC_H264) -> OutputSpec:
-    """FHD H.264 고화질이 기본 (② LIVE 호환). 원본보다 큰 해상도로 무의미하게 키우지 않는다(16:9 기준).
+                       profile: str = PROFILE_BEST, codec: str = CODEC_H264, fit: str = FIT_BLUR,
+                       blur: int = DEFAULT_BLUR, pad: str = DEFAULT_PAD) -> OutputSpec:
+    """16:9 FHD H.264 고화질이 기본 (② LIVE 호환). 원본보다 큰 해상도로 무의미하게 키우지 않는다.
 
+    fit: 16:9가 아닌 원본(세로·정사각형·4:3·21:9·사진)의 화면 맞춤 — 흐림 배경(기본) / 꽉 채우기 / 원본 전체.
     codec="hevc"는 사용자가 고를 때만 쓰는 저장·업로드용 선택지다 (LIVE READY 조건을 바꾸지 않음).
     """
     use_hevc = codec == CODEC_HEVC and hevc_available
-    base = _base_spec(infos, quality, hevc=use_hevc)
+    base = _base_spec(infos, quality, hevc=use_hevc, fit=fit)
+    base = replace(base, fit=fit, blur=int(blur), pad=pad)
     if codec == CODEC_HEVC and not hevc_available:
         base = replace(base, notes=base.notes + ("이 FFmpeg에는 H.265(libx265) 인코더가 없어 H.264로 만듭니다.",))
     prof = get_profile(profile)
@@ -378,7 +412,7 @@ def choose_output_spec(infos: Sequence[VideoInfo], quality: str = QUALITY_FHD, *
                    profile=prof.key, maxrate_kbps=_scaled_rate(prof.maxrate_kbps, base, use_hevc),
                    bufsize_kbps=_scaled_rate(prof.maxrate_kbps * 2, base, use_hevc))
     cap = f", 상한 {spec.maxrate_kbps / 1000:g} Mbps" if spec.maxrate_kbps else ""
-    return replace(spec, label=f"{base.label} · {prof.label} (CRF {crf}, {spec.preset}{cap})")
+    return replace(spec, label=f"{base.label} · 16:9 {FIT_SHORT.get(fit, '')} · {prof.label} (CRF {crf}, {spec.preset}{cap})")
 
 
 def _scaled_rate(kbps_fhd: int, base: OutputSpec, hevc: bool) -> int:
@@ -392,24 +426,26 @@ def _scaled_rate(kbps_fhd: int, base: OutputSpec, hevc: bool) -> int:
     return int(round(kbps_fhd * k / 100.0)) * 100
 
 
-def _base_spec(infos: Sequence[VideoInfo], quality: str, *, hevc: bool) -> OutputSpec:
+def _base_spec(infos: Sequence[VideoInfo], quality: str, *, hevc: bool, fit: str = FIT_FILL) -> OutputSpec:
     if not infos:
         raise ValueError("영상이 없습니다.")
     notes: list[str] = []
-    want = 2160 if quality == QUALITY_4K else 1080
-    native = max(min(i.height, i.width * 9 / 16) for i in infos)  # 16:9로 채웠을 때 원본이 가진 세로 화소
+    want = QUALITY_HEIGHT.get(quality, 1080)
+    native = max(native_height(i, fit) for i in infos)  # 확대 없이 채울 수 있는 16:9 세로 화소 (화면 맞춤 방식 기준)
     height = next((h for h in STANDARD_HEIGHTS if h <= want and h <= native * 1.05), 360)
     if height < want:
-        notes.append(f"원본 최대 해상도가 {want}p보다 낮아 확대하지 않고 {height}p로 만듭니다.")
+        notes.append(f"원본 최대 해상도가 {want}p보다 낮아 확대하지 않고 {height}p로 만듭니다"
+                     + (" (4K 출력은 실제 4K 원본이 있을 때만 — 작은 원본을 키운 '가짜 4K'는 만들지 않음)."
+                        if want == 2160 else "."))
     width = _even(height * 16 / 9)
-    if any(min(i.height, i.width * 9 / 16) < height * 0.9 for i in infos):
-        notes.append("일부 영상은 출력 해상도보다 작아 확대됩니다 (선명도가 낮아질 수 있음).")
-    if any(abs(i.width / max(i.height, 1) - 16 / 9) > 0.05 for i in infos):
-        notes.append("16:9가 아닌 영상은 화면을 채우도록 가장자리가 잘립니다.")
-    # FPS: 길이 기준 다수결 (최대 60)
+    notes += fit_notes(infos, width, height, fit)
+    # FPS: 길이 기준 다수결 (최대 60). 사진(fps 0)은 FPS가 없으므로 투표하지 않는다 — 사진만이면 30 FPS
     weight: Counter = Counter()
     for i in infos:
-        weight[_std_fps(i.fps)] += max(i.duration, 0.1)
+        if i.fps > 0:
+            weight[_std_fps(i.fps)] += max(i.duration, 0.1)
+    if not weight:
+        weight[30.0] = 1.0
     best = max(weight.values())
     fps = min(f for f, w in weight.items() if w == best)
     fps = min(fps, 60.0)
@@ -434,6 +470,9 @@ def _h264_level(spec: OutputSpec) -> str:
 
 
 # ---------------- 계획 ----------------
+
+STILL_NOTE = "정지 이미지를 영상 길이만큼 보여 주는 장면입니다 (움직이는 촬영 영상이 아님)."
+
 
 def _frames(seconds: float, fps: float) -> int:
     return int(math.floor(seconds * fps + 1e-6))
@@ -465,10 +504,11 @@ def build_bg_plan(clips: Sequence[Clip], target: float, dissolve: float, spec: O
     count = len(lengths)
     for k, (c, s, L) in enumerate(lengths):
         body_len = L - 2 * d
-        pieces.append(Piece("body", Segment(c.path, s + d, body_len), None, body_len, f"장면 {k + 1} 본문"))
+        kind = "사진" if c.is_image else "장면"
+        pieces.append(Piece("body", clip_segment(c, s + d, body_len), None, body_len, f"{kind} {k + 1} 본문"))
         nc, ns, _ = lengths[(k + 1) % count]
-        a = Segment(c.path, s + L - d, d)
-        b = Segment(nc.path, ns, d)
+        a = clip_segment(c, s + L - d, d)
+        b = clip_segment(nc, ns, d)
         nxt = (k + 1) % count + 1
         pieces.append(Piece("xfade", a, b, d, f"장면 {k + 1}→{nxt} 디졸브"))
     cycle = sum(p.length for p in pieces)
@@ -477,11 +517,22 @@ def build_bg_plan(clips: Sequence[Clip], target: float, dissolve: float, spec: O
     expected_size = int(bps * target)
     work_size = int(bps * cycle)
     warnings: list[str] = list(spec.notes)
+    images = [c for c, _, _ in lengths if c.is_image]
     if count == 1:
-        warnings.append("영상 1개를 반복합니다. 반복 지점 분석 결과(적합/확인 필요/부적합)를 꼭 확인하세요.")
+        warnings.append(("사진 1장" if images else "영상 1개") +
+                        "를 반복합니다. 반복 지점 분석 결과(적합/확인 필요/부적합)를 꼭 확인하세요.")
     if repeats >= 2 and cycle < 180:
         warnings.append(f"전체 장면 순서가 약 {repeats}번 반복됩니다 (한 바퀴 {format_duration(cycle)}). "
                         "영상을 더 추가하면 반복이 덜 눈에 띕니다.")
+    if repeats >= 10:
+        short = [c.path.name for c, _, L in lengths if c.is_image or L < 30][:4]
+        if short:
+            warnings.append(f"⚠ 과도한 반복: 같은 {'사진·' if images else ''}짧은 장면이 약 {repeats}번씩 나옵니다 "
+                            f"({', '.join(short)}). 다른 영상·사진을 더 넣으면 훨씬 자연스럽습니다.")
+    if images:
+        share = sum(L for c, _, L in lengths if c.is_image) / max(1e-9, sum(L for _, _, L in lengths))
+        warnings.append(f"사진 {len(images)}장은 {STILL_NOTE}" + (" 전부 사진이라 실제 촬영 영상이 아닌 정지 화면 배경입니다."
+                                                              if share > 0.999 else ""))
     if target < cycle:
         warnings.append("선택한 길이가 한 바퀴보다 짧아 뒤쪽 장면 일부가 빠집니다.")
     return BgPlan(tuple(pieces), d, cycle, float(target), repeats, spec, expected_size, work_size, count, tuple(warnings))
@@ -554,20 +605,44 @@ def _norm_chain(spec: OutputSpec, length: float) -> str:
             f"format=yuv420p,settb=AVTB")
 
 
+def _norm_graph(spec: OutputSpec, seg: Segment, length: float, src: str, dst: str, tag: str) -> str:
+    """입력 1개 → 출력 규격(W×H 16:9, FPS, SAR 1, yuv420p, AVTB)으로 정규화하는 필터 그래프 조각.
+
+    16:9 영상(또는 꽉 채우기)이고 회전·SAR·사진 처리가 없으면 기존 _norm_chain과 글자 하나 다르지 않다."""
+    w, h = spec.width, spec.height
+    fit, branched = fit_filter(spec.fit, w, h, seg.dw, seg.dh, blur=spec.blur, pad=spec.pad, tag=tag)
+    motion = motion_filter(seg.motion, w, h, seg.start, seg.total, exact_fps(spec.fps)) if seg.still else ""
+    if not seg.pre and not branched and not motion and fit.startswith(f"scale={w}:{h}:force_original_aspect_ratio=increase"):
+        return f"{src}{_norm_chain(spec, length)}{dst}"
+    head = (f"setpts=PTS-STARTPTS,trim=duration={length + 0.05:.6f},setpts=PTS-STARTPTS,fps={fps_expr(spec.fps)}"
+            + (f",{seg.pre}" if seg.pre else ""))
+    tail = (f",{motion}" if motion else "") + ",setsar=1,format=yuv420p,settb=AVTB"
+    # 흐림 배경이면 fit = "split=2[..f][..b];...;[..bb][..ff]overlay=..." — 앞뒤에 그대로 이어도 하나의 그래프가 된다
+    return f"{src}{head},{fit}{tail}{dst}"
+
+
+def _input_args(seg: Segment, fps: float) -> list[str]:
+    if seg.still:
+        # 사진: 이름에 %가 있어도 패턴으로 해석하지 않게(pattern_type none), EXIF 방향은 pre 필터로 직접 적용
+        return ["-f", "image2", "-pattern_type", "none", "-noautorotate", "-loop", "1", "-framerate", fps_expr(fps),
+                "-t", f"{seg.length + 0.5:.6f}", "-i", str(seg.path)]
+    # 입력 앞 -ss + 재인코딩 = 프레임 단위 정확한 탐색. -t는 약간 여유를 두고 trim으로 정확히 자른다.
+    return ["-ss", f"{seg.start:.6f}", "-t", f"{seg.length + 0.5:.6f}", "-i", str(seg.path)]
+
+
 def piece_command(ffmpeg: Path, piece: Piece, spec: OutputSpec, out: Path, max_frames: int | None = None) -> list[str]:
     """조각 1개 인코딩. max_frames: 끝 맞춤용 — 같은 필터(디졸브 곡선 포함)로 처음 max_frames 프레임만 만든다."""
     cmd =[str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-nostdin"]
     segs = [piece.a] + ([piece.b] if piece.b is not None else [])
     for seg in segs:
-        # 입력 앞 -ss + 재인코딩 = 프레임 단위 정확한 탐색. -t는 약간 여유를 두고 trim으로 정확히 자른다.
-        cmd += ["-ss", f"{seg.start:.6f}", "-t", f"{seg.length + 0.5:.6f}", "-i", str(seg.path)]
+        cmd += _input_args(seg, spec.fps)
     if piece.kind == "xfade":
-        graph = (f"[0:v]{_norm_chain(spec, piece.a.length)}[a];"
-                 f"[1:v]{_norm_chain(spec, piece.b.length)}[b];"
+        graph = (f"{_norm_graph(spec, piece.a, piece.a.length, '[0:v]', '[a]', 'ia')};"
+                 f"{_norm_graph(spec, piece.b, piece.b.length, '[1:v]', '[b]', 'ib')};"
                  f"[a][b]xfade=transition=fade:duration={piece.length:.6f}:offset=0,"
                  f"trim=duration={piece.length:.6f},setpts=PTS-STARTPTS[v]")
     else:
-        graph = f"[0:v]{_norm_chain(spec, piece.length)}[v]"
+        graph = _norm_graph(spec, piece.a, piece.length, "[0:v]", "[v]", "ia")
     n_frames = max(1, int(round(piece.length * spec.fps)))
     if max_frames is not None:
         n_frames = max(1, min(n_frames, int(max_frames)))
@@ -740,7 +815,7 @@ def _measurement_plan(plan: BgPlan, count: int, seconds: float) -> list[tuple[Pi
         p = max(g, key=lambda x: x.length)
         ln = min(seconds, p.length)
         start = p.a.start + max(0.0, (p.length - ln) / 2)
-        out.append((Piece("body", Segment(p.a.path, start, ln), None, ln, f"용량 측정 · {p.label}"),
+        out.append((Piece("body", replace(p.a, start=start, length=ln), None, ln, f"용량 측정 · {p.label}"),
                     sum(x.length for x in g)))
     return out
 
@@ -1093,7 +1168,14 @@ def seam_segments(clip_a: Clip, clip_b: Clip, dissolve: float, context: float = 
     lb = min(clip_b.used_length, context + dissolve)
     if la < dissolve + 0.2 or lb < dissolve + 0.2:
         raise ValueError("사용 구간이 너무 짧아 미리보기를 만들 수 없습니다.")
-    return Segment(clip_a.path, clip_a.used_end - la, la), Segment(clip_b.path, clip_b.used_start, lb)
+    return (clip_segment(clip_a, clip_a.used_end - la, la), clip_segment(clip_b, clip_b.used_start, lb))
+
+
+def preview_spec_for(spec: OutputSpec | None) -> OutputSpec:
+    """미리보기용 저해상도 규격 — 화면 맞춤 방식(흐림·꽉 채우기·원본 전체)과 블러·여백은 실제 제작과 같게."""
+    if spec is None:
+        return PREVIEW_SPEC
+    return replace(PREVIEW_SPEC, fit=spec.fit, blur=spec.blur, pad=spec.pad)
 
 
 def seam_preview_command(ffmpeg: Path, a: Segment, b: Segment, dissolve: float, out: Path,
@@ -1101,9 +1183,10 @@ def seam_preview_command(ffmpeg: Path, a: Segment, b: Segment, dissolve: float, 
     """제작과 같은 정규화·디졸브(xfade)로 경계 부분만 저해상도로 빠르게 만든다 (소리 없음, 원본은 읽기만)."""
     cmd = [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-nostdin"]
     for seg in (a, b):
-        cmd += ["-ss", f"{seg.start:.6f}", "-t", f"{seg.length + 0.5:.6f}", "-i", str(seg.path)]
+        cmd += _input_args(seg, spec.fps)
     total = a.length + b.length - dissolve
-    graph = (f"[0:v]{_norm_chain(spec, a.length)}[a];[1:v]{_norm_chain(spec, b.length)}[b];"
+    graph = (f"{_norm_graph(spec, a, a.length, '[0:v]', '[a]', 'ia')};"
+             f"{_norm_graph(spec, b, b.length, '[1:v]', '[b]', 'ib')};"
              f"[a][b]xfade=transition=fade:duration={dissolve:.6f}:offset={a.length - dissolve:.6f},"
              f"trim=duration={total:.6f},setpts=PTS-STARTPTS[v]")
     cmd += ["-filter_complex", graph, "-map", "[v]", "-an", "-sn", "-dn", "-map_metadata", "-1",
@@ -1113,12 +1196,12 @@ def seam_preview_command(ffmpeg: Path, a: Segment, b: Segment, dissolve: float, 
 
 
 def make_seam_preview(ffmpeg: Path, clip_a: Clip, clip_b: Clip, dissolve: float, out: Path,
-                      cancel_event: Event) -> Path:
+                      cancel_event: Event, spec: OutputSpec | None = None) -> Path:
     a, b = seam_segments(clip_a, clip_b, dissolve)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        run_ffmpeg_progress(seam_preview_command(ffmpeg, a, b, dissolve, out), cancel_event)
+        run_ffmpeg_progress(seam_preview_command(ffmpeg, a, b, dissolve, out, preview_spec_for(spec)), cancel_event)
     except BaseException:
         try:
             out.unlink()
@@ -1128,6 +1211,38 @@ def make_seam_preview(ffmpeg: Path, clip_a: Clip, clip_b: Clip, dissolve: float,
     if not out.exists() or out.stat().st_size == 0:
         raise BuildError("미리보기를 만들지 못했습니다.")
     return out
+
+
+# ---------------- 화면 맞춤 미리보기 (선택한 원본 1장면) ----------------
+
+def preview_time(clip: Clip) -> float:
+    """미리보기 지점: 사용 구간의 40% (사진은 표시 시간의 40% — 움직임 효과 위치도 같은 지점)."""
+    return clip.used_start + clip.used_length * 0.4
+
+
+def fit_preview_command(ffmpeg: Path, clip: Clip, spec: OutputSpec, size: tuple[int, int] = (480, 270),
+                        at: float | None = None) -> list[str]:
+    """실제 제작과 '같은 규격·같은 필터'(_norm_graph)로 1프레임을 만든 뒤 미리보기 크기로 줄인 PNG (stdout)."""
+    t = preview_time(clip) if at is None else at
+    seg = clip_segment(clip, t, 0.5)
+    graph = (_norm_graph(spec, seg, 0.5, "[0:v]", "[n]", "ia")
+             + f";[n]scale={size[0]}:{size[1]}:flags=area,format=rgb24[v]")
+    return [str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", *_input_args(seg, spec.fps),
+            "-filter_complex", graph, "-map", "[v]", "-frames:v", "1", "-an", "-f", "image2pipe", "-c:v", "png", "pipe:1"]
+
+
+def fit_preview_png(ffmpeg: Path, clip: Clip, spec: OutputSpec, cancel: Event | None = None,
+                    size: tuple[int, int] = (480, 270)) -> bytes:
+    from .bg_fit import _run_png
+    return _run_png(fit_preview_command(ffmpeg, clip, spec, size), cancel)
+
+
+def crop_preview_png(ffmpeg: Path, clip: Clip, spec: OutputSpec, cancel: Event | None = None, box_h: int = 270) -> bytes:
+    """꽉 채우기에서 원본의 어느 부분이 남고 어디가 잘리는지 (원본 전체, 잘리는 곳 어둡게 + 빨간 상자)."""
+    from .bg_fit import source_crop_png
+    seg = clip_segment(clip, preview_time(clip), 0.5)
+    return source_crop_png(ffmpeg, _input_args(seg, spec.fps), seg.pre, seg.dw, seg.dh, spec.width, spec.height,
+                           box_h=box_h, cancel=cancel)
 
 
 def cleanup_stale_temp(folder: Path, max_age_hours: float = 12.0) -> int:
@@ -1199,5 +1314,6 @@ __all__ = [
     "CODEC_H264", "CODEC_HEVC", "HEVC_BASE_CRF", "measure_bitrate", "measurement_pieces", "with_measured_rate",
     "MEASURE_HEADROOM", "OWNER_FILE", "MAX_TARGET_SECONDS", "PROJECT_FPS_CHOICES", "DEFAULT_PROJECT_FPS", "exact_fps",
     "target_frame_count", "parse_length", "format_precise", "length_tag", "split_last_cycle", "estimate_build_seconds",
-    "probe_frames",
+    "probe_frames", "QUALITY_HD", "QUALITY_HEIGHT", "clip_segment", "preview_spec_for", "fit_preview_command",
+    "fit_preview_png", "crop_preview_png", "preview_time", "STILL_NOTE",
 ]

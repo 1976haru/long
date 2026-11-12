@@ -110,16 +110,46 @@ def _run(cmd: list[str], timeout: float) -> bytes:
     return p.stdout
 
 
-def thumbnail_png(ffmpeg: Path, path: Path, duration: float, w: int = 112, h: int = 63) -> bytes:
+def still_input(path: Path) -> list[str]:
+    """사진 1장 입력 (이름의 %를 패턴으로 보지 않음, EXIF 방향은 pre 필터로 직접 — FFmpeg 버전과 무관하게 같게)."""
+    return ["-f", "image2", "-pattern_type", "none", "-noautorotate", "-i", str(path)]
+
+
+def thumbnail_png(ffmpeg: Path, path: Path, duration: float, w: int = 112, h: int = 63, *,
+                  still_pre: str | None = None) -> bytes:
+    """still_pre가 None이 아니면 사진 (그 필터 = EXIF 방향·SAR 보정)."""
     t = max(0.0, duration * 0.4)
-    return _run([str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i", str(path),
+    src = still_input(path) if still_pre is not None else ["-ss", f"{t:.3f}", "-i", str(path)]
+    pre = f"{still_pre}," if still_pre else ""
+    return _run([str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", *src,
                  "-frames:v", "1", "-an",
-                 "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
+                 "-vf", f"{pre}scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
                  "-f", "image2pipe", "-c:v", "png", "pipe:1"], timeout=60)
 
 
-def thumbnail_b64(ffmpeg: Path, path: Path, duration: float) -> str:
-    return base64.b64encode(thumbnail_png(ffmpeg, path, duration)).decode("ascii")
+def thumbnail_b64(ffmpeg: Path, path: Path, duration: float, *, still_pre: str | None = None) -> str:
+    return base64.b64encode(thumbnail_png(ffmpeg, path, duration, still_pre=still_pre)).decode("ascii")
+
+
+def _still_frames(ffmpeg: Path, path: Path, duration: float, pre: str) -> tuple[float, list[bytes], bool]:
+    """사진: 48×27 RGB 1장을 FFmpeg로 만들고, 표시 시간 동안 같은 화면이 이어지는 것으로 본다 (움직임 0)."""
+    sf = 4.0 if duration <= MAX_SAMPLES / 4 else MAX_SAMPLES / duration
+    p = f"{pre}," if pre else ""
+    raw = _run([str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", *still_input(path), "-frames:v", "1",
+                "-vf", f"{p}scale={SW}:{SH}:flags=area,format=rgb24", "-f", "rawvideo", "pipe:1"], timeout=60)
+    size = SW * SH * 3
+    if len(raw) < size:
+        raise AnalysisError("사진을 읽지 못했습니다 (손상되었거나 지원하지 않는 형식).")
+    n = max(2, int(duration * sf))
+    return sf, [raw[:size]] * n, False
+
+
+def _still_sharp(ffmpeg: Path, path: Path, pre: str) -> list[bytes]:
+    p = f"{pre}," if pre else ""
+    raw = _run([str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", *still_input(path), "-frames:v", "1",
+                "-vf", f"{p}scale={SHARP_W}:{SHARP_H}:flags=area,format=gray", "-f", "rawvideo", "pipe:1"], timeout=60)
+    size = SHARP_W * SHARP_H
+    return [raw[:size]] if len(raw) >= size else []
 
 
 def sample_frames(ffmpeg: Path, path: Path, duration: float) -> tuple[float, list[bytes], bool]:
@@ -292,9 +322,13 @@ def classify_camera(motion: float, drift: float) -> str:
 
 
 def analyze_clip(ffmpeg: Path, path: Path, duration: float, cancel: Event | None = None,
-                 *, with_sha: bool = True) -> ClipAnalysis:
+                 *, with_sha: bool = True, still_pre: str | None = None) -> ClipAnalysis:
+    """still_pre가 None이 아니면 사진 (표시 시간 = duration, 같은 화면이 이어짐 → 고정 촬영·움직임 0)."""
     path = Path(path)
-    sf, frames, decode_errors = sample_frames(ffmpeg, path, duration)
+    if still_pre is not None:
+        sf, frames, decode_errors = _still_frames(ffmpeg, path, duration, still_pre)
+    else:
+        sf, frames, decode_errors = sample_frames(ffmpeg, path, duration)
     if cancel is not None and cancel.is_set():
         raise AnalysisError("분석이 중지되었습니다.")
     lumas = [_luma(f) for f in frames]
@@ -327,7 +361,8 @@ def analyze_clip(ffmpeg: Path, path: Path, duration: float, cancel: Event | None
         head_luma=sum(means[:head]) / head, tail_luma=sum(means[-head:]) / head, stats=stats, dhash_seq=seq,
     )
     try:
-        sharp = [laplacian_var(g) for g in sharp_frames(ffmpeg, path, duration)]
+        grays = _still_sharp(ffmpeg, path, still_pre) if still_pre is not None else sharp_frames(ffmpeg, path, duration)
+        sharp = [laplacian_var(g) for g in grays]
         an.sharpness = statistics.median(sharp) if sharp else None
     except AnalysisError:
         an.sharpness = None
