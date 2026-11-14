@@ -498,7 +498,10 @@ def boundary_key_dts(ffprobe: Path, path: Path, at: float, fps: float) -> float 
 
 def last_keyframe(ffprobe: Path, path: Path, duration: float) -> tuple[float, float] | None:
     """파일 끝 쪽 마지막 키프레임의 (표시 시각, DTS). 0초 키프레임만 있으면 None."""
-    cmd = [str(ffprobe), "-v", "error", "-select_streams", "v:0", "-read_intervals", f"{max(0.0, duration - 30):.3f}%",
+    # FFprobe 7.1에서 ``0%``는 파일 전체가 아니라 첫 seek 구간만 반환할 수 있다.
+    # 끝 시각을 명시해 마지막 GOP의 키프레임까지 반드시 읽는다.
+    start = max(0.0, duration - 30)
+    cmd = [str(ffprobe), "-v", "error", "-select_streams", "v:0", "-read_intervals", f"{start:.3f}%{duration + 0.001:.3f}",
            "-show_entries", "packet=pts_time,dts_time,flags", "-of", "csv=p=0", str(path)]
     rc, out, _ = _run_capture(cmd, None, 120)
     if rc != 0:
