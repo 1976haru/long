@@ -34,6 +34,8 @@ def busy_message(owner: str | None) -> str:
         return "현재 LIVE 송출 중입니다."
     if owner == "convert":
         return "현재 LIVE READY 파일을 만드는 중입니다."
+    if owner == "bg":
+        return "현재 ④ 배경 영상을 만드는 중입니다."
     return "다른 FFmpeg 작업이 실행 중입니다."
 
 

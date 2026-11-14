@@ -99,9 +99,116 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
             ok("japanese_assistant", jp.winfo_exists(), jp.title())
         except Exception as e:  # 한 화면 오류로 결과 JSON이 안 남는 일이 없게
             ok("live_steps", False, repr(e)[:300])
+        app.after(step_ms, s_bg)
+
+    bg_state: dict[str, object] = {}
+
+    def s_bg():
+        """④ 배경 만들기: 임시 폴더에 FFmpeg 시험 클립 2개 → 분석 → 3분 제작 → 검증 → 임시 폴더 삭제 (원본/설정 무관)."""
+        import shutil
+        import subprocess
+        import tempfile
+        try:
+            w = app._open_bg()
+            ok("bg_window", w.winfo_exists() and hasattr(w, "btn_start"), w.title())
+            from . import media_audio as _MA
+            ok("bg_audio_ui", hasattr(w, "btn_silent") and hasattr(w, "btn_recheck_audio") and bool(w.always_exclude.get())
+               and _MA.check_audio(None, Path("x.mp4")).status == _MA.UNKNOWN, _MA.EXCLUDE_OPTION)
+            ok("bg_ui_steps", len(getattr(w, "step_labels", [])) == 8 and hasattr(w, "btn_measure")
+               and hasattr(w, "btn_order") and w.codec_key() in ("h264", "hevc"), w.step_hint.get()[:40])
+            if not (app.ffmpeg and app.ffprobe):
+                ok("bg_build", True, "SKIP: FFmpeg 없음")
+                app.after(step_ms, s6)
+                return
+            tmp = Path(tempfile.mkdtemp(prefix="plvm_selftest_bg_"))
+            bg_state["tmp"] = tmp
+            clips = []
+            for name, src in (("a.mp4", "testsrc2=s=320x180:r=30"), ("b.mp4", "mandelbrot=s=320x180:r=25")):
+                p = tmp / name
+                subprocess.run([str(app.ffmpeg), "-v", "error", "-y", "-f", "lavfi", "-i", src, "-t", "8",
+                                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(p)],
+                               check=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=60)
+                clips.append(p)
+            w.quiet_errors = True
+            w.outdir.set(str(tmp / "out"))
+            w.add_paths(clips)
+            bg_state["t"] = time.monotonic()
+            bg_state["w"] = w
+            bg_state["shutil"] = shutil
+            app.after(500, bg_wait_analysis)
+        except Exception as e:
+            ok("bg_build", False, repr(e)[:300])
+            bg_cleanup()
+            app.after(step_ms, s6)
+
+    def bg_wait_analysis():
+        w = bg_state["w"]
+        if (w.loading or len(w.analyses) < 2) and time.monotonic() - bg_state["t"] < 120:
+            app.after(500, bg_wait_analysis)
+            return
+        ok("bg_analysis", len(w.analyses) == 2 and all(p in w.advice for p in w.analyses),
+           ", ".join(a.verdict for a in w.advice.values()))
+        w.minutes.set(3)
+        w._options_changed()
+        started = w.start(confirm=False)
+        bg_state["t"] = time.monotonic()
+        if not started:
+            ok("bg_build", False, "start() 실패: " + w.plan_text.get())
+            bg_cleanup()
+            app.after(step_ms, s6)
+            return
+        app.after(1000, bg_wait_build)
+
+    def bg_wait_build():
+        w = bg_state["w"]
+        if w.running and time.monotonic() - bg_state["t"] < 300:
+            app.after(1000, bg_wait_build)
+            return
+        r = getattr(w, "result", None)
+        good = r is not None and abs(r.duration - 180) < 1.0 and r.size > 0
+        ok("bg_build", good, f"{r.width}x{r.height} {r.duration:.2f}s {r.size} bytes" if r else getattr(w, "error", "timeout"))
+        bg_cleanup()
         app.after(step_ms, s6)
 
+    def bg_cleanup():
+        w = bg_state.get("w")
+        try:
+            if w is not None and w.winfo_exists():
+                w.destroy()
+        except Exception:
+            pass
+        tmp = bg_state.get("tmp")
+        if tmp:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+            ok("bg_cleanup", not Path(tmp).exists(), tmp)
+
     def s6():
+        try:  # ⑤ 검색 화면: 네트워크 없이 창·주제 변환·모드 분리만 확인 (실제 검색·다운로드는 하지 않음)
+            sw = app._open_stock()
+            from .stock_sources import MODE_LONG, build_query
+            q = build_query(["lake", "snow"], "")
+            sw.mode.set(MODE_LONG)
+            sw._mode_changed()
+            ok("stock_window", sw.winfo_exists() and hasattr(sw, "btn_dl") and hasattr(sw, "btn_send")
+               and hasattr(sw, "btn_silent") and not sw.save_silent.get()
+               and q.text == "lake snow" and len(q.groups) == 2 and "stock" in app.mode_cards, sw.title())
+            sw.destroy()
+        except Exception as e:
+            ok("stock_window", False, repr(e)[:300])
+        try:  # ⑥ 플레이리스트: 창·제목 추출·12초 SRT 형식만 확인 (실제 제작·FFmpeg 실행 없음)
+            pw = app._open_playlist()
+            from . import pl_core as PC
+            tr = [PC.Track(Path(f"{k:02d}. 曲{k}.mp3"), PC.title_from_filename(f"{k:02d}. 曲{k}.mp3"), 180.0 + k, 0.0,
+                           "mp3", 44100, 2, 1, str(k)) for k in range(1, PC.SET_SIZE + 1)]
+            ent, total = PC.build_timeline(tr)
+            srt = PC.build_srt(ent)
+            ok("playlist_window", pw.winfo_exists() and hasattr(pw, "btn_start") and hasattr(pw, "btn_srt")
+               and "playlist" in app.mode_cards and not PC.validate_srt(srt, ent) and ent[1].label == "02. 曲2"
+               and abs(ent[0].title_end - PC.TITLE_SECONDS) < 1e-6, pw.title())
+            pw.destroy()
+        except Exception as e:
+            ok("playlist_window", False, repr(e)[:300])
         for w in (getattr(app, "jp_helper_win", None), getattr(app, "live_schedule_win", None), app._live_window()):
             try:
                 if w is not None and w.winfo_exists():
