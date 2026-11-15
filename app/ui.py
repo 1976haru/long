@@ -153,7 +153,71 @@ class MainWindow(tk.Tk):
                         continue
                     w.bind("<Button-1>", lambda e, c=cmd: c())
             self.mode_cards[key] = card
+        self._bg_card(bar)
         ttk.Frame(root, height=6).pack(fill="x")
+
+    def _bg_card(self, bar):
+        """④ 내 영상으로 배경 만들기 — 기존 3개 카드 크기를 그대로 두고 아래 한 줄 카드로 연다."""
+        bg, border, fg = "#f6f6f6", "#c4c4c4", "#202020"
+        card = tk.Frame(bar, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border, cursor="hand2")
+        card.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        foot = tk.Label(card, text="배경 만들기 열기 ▶", bg=bg, fg="#1d4fa8", font="PLS.Strong")
+        foot.pack(side="right", padx=10)
+        why = tk.Label(card, text="ⓘ 언제 쓰나요?", bg=bg, fg="#1d4fa8", cursor="hand2")
+        why.pack(side="right", padx=(10, 4))
+        why.bind("<Button-1>", lambda e: (self._card_help("bg", "④ 내 영상으로 배경 만들기"), "break")[1])
+        self.card_help_links["bg"] = why
+        title = tk.Label(card, text="④ 내 영상으로 배경 만들기", bg=bg, fg=fg, font="PLS.Section")
+        title.pack(side="left", padx=(10, 8), pady=5)
+        desc = tk.Label(card, text="MP4 여러 개를 자연스러운 디졸브로 이어 3~60분 배경 영상", bg=bg, fg="#333333", anchor="w")
+        desc.pack(side="left", fill="x", expand=True, pady=5)
+        for w in (card, title, desc, foot):
+            w.bind("<Button-1>", lambda e: self._open_bg())
+        self.mode_cards["bg"] = card
+        self._stock_card(bar)
+
+    def _stock_card(self, bar):
+        """⑤ 배경 영상 검색·다운로드 — ④ 카드 아래 줄의 왼쪽 절반 (⑥과 한 줄: 메인 화면 높이를 늘리지 않음)."""
+        bg, border, fg = "#f6f6f6", "#c4c4c4", "#202020"
+        row = ttk.Frame(bar)
+        row.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        row.columnconfigure(0, weight=1, uniform="half")
+        row.columnconfigure(1, weight=1, uniform="half")
+        self._row56 = row
+        card = tk.Frame(row, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border, cursor="hand2")
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
+        foot = tk.Label(card, text="열기 ▶", bg=bg, fg="#1d4fa8", font="PLS.Strong")
+        foot.pack(side="right", padx=10)
+        why = tk.Label(card, text="ⓘ 도움말", bg=bg, fg="#1d4fa8", cursor="hand2")
+        why.pack(side="right", padx=(10, 4))
+        why.bind("<Button-1>", lambda e: (self._card_help("stock", "⑤ 배경 영상 검색·다운로드"), "break")[1])
+        self.card_help_links["stock"] = why
+        title = tk.Label(card, text="⑤ 배경 영상 검색·다운로드", bg=bg, fg=fg, font="PLS.Section", anchor="w")
+        title.pack(side="left", fill="x", expand=True, padx=(10, 8), pady=5)
+        desc = tk.Label(card, text="무료 영상 검색·재생·권리 확인 → ④", bg=bg, fg="#333333", anchor="w")  # 반쪽 카드: 설명은 ⓘ 도움말로 (잘린 글자를 보이지 않게)
+        for w in (card, title, desc, foot):
+            w.bind("<Button-1>", lambda e: self._open_stock())
+        self.mode_cards["stock"] = card
+        self._playlist_card(bar)
+
+    def _playlist_card(self, bar):
+        """⑥ 음악 플레이리스트 만들기 — ⑤ 카드 오른쪽 절반."""
+        bg, border, fg = "#f6f6f6", "#c4c4c4", "#202020"
+        card = tk.Frame(self._row56, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border,
+                        cursor="hand2")
+        card.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
+        foot = tk.Label(card, text="열기 ▶", bg=bg, fg="#1d4fa8", font="PLS.Strong")
+        foot.pack(side="right", padx=10)
+        why = tk.Label(card, text="ⓘ 도움말", bg=bg, fg="#1d4fa8", cursor="hand2")
+        why.pack(side="right", padx=(10, 4))
+        why.bind("<Button-1>", lambda e: (self._card_help("playlist", "⑥ 음악 플레이리스트 만들기"), "break")[1])
+        self.card_help_links["playlist"] = why
+        title = tk.Label(card, text="⑥ 음악 플레이리스트 만들기", bg=bg, fg=fg, font="PLS.Section", anchor="w")
+        title.pack(side="left", fill="x", expand=True, padx=(10, 8), pady=5)
+        desc = tk.Label(card, text="음원 15곡 → MP4 + 12초 제목 SRT", bg=bg, fg="#333333", anchor="w")  # 반쪽 카드: 설명은 ⓘ 도움말로 (잘린 글자를 보이지 않게)
+        for w in (card, title, desc, foot):
+            w.bind("<Button-1>", lambda e: self._open_playlist())
+        self.mode_cards["playlist"] = card
 
     # ---------- 글자 크기 ----------
     def _set_font_size(self, size):
@@ -456,6 +520,11 @@ class MainWindow(tk.Tk):
     def _add_video(self):
         if not self._need_tools(): return
         paths=filedialog.askopenfilenames(title="완성 SET MP4 선택",filetypes=[("MP4","*.mp4"),("영상","*.mov *.mkv *.m4v"),("모든 파일","*.*")])
+        self.add_set_paths(paths)
+
+    def add_set_paths(self,paths):
+        """① SET 목록에 파일 추가 (영상 추가 버튼 / ④ 배경 만들기에서 보내기 공용)."""
+        if not paths or not self._need_tools(): return
         for raw in paths:
             p=Path(raw).resolve()
             if any(x.path==p for x in self.infos): continue
@@ -684,6 +753,61 @@ class MainWindow(tk.Tk):
                                                     tools=self._live_tools)
         return self.live_schedule_win
 
+    def _open_bg(self):
+        w = self._alive(getattr(self, "bg_win", None))
+        if w is not None:
+            w.deiconify(); w.lift(); w.focus_set(); return w
+        from .bg_ui import BackgroundMakerWindow
+        self.bg_win = BackgroundMakerWindow(self, tools=self._live_tools, send_to_long=self._receive_from_bg)
+        return self.bg_win
+
+    def _open_stock(self):
+        w = self._alive(getattr(self, "stock_win", None))
+        if w is not None:
+            w.deiconify(); w.lift(); w.focus_set(); return w
+        from .stock_ui import StockSearchWindow
+        self.stock_win = StockSearchWindow(self, tools=self._live_tools, send_to_bg=self._receive_stock,
+                                           peek_tools=self._peek_tools)
+        return self.stock_win
+
+    def _open_playlist(self):
+        w = self._alive(getattr(self, "playlist_win", None))
+        if w is not None:
+            w.deiconify(); w.lift(); w.focus_set(); return w
+        from .pl_ui import PlaylistMakerWindow
+        self.playlist_win = PlaylistMakerWindow(self, tools=self._live_tools, peek_tools=self._peek_tools,
+                                                send_to_long=lambda p: self._receive_from_bg(p, source="⑥ 플레이리스트"),
+                                                send_to_live=self._receive_to_live,
+                                                send_to_upload=lambda p: self._open_upload(str(p), Path(p).stem))
+        return self.playlist_win
+
+    def _receive_to_live(self, path):
+        """⑥ 결과를 ② LIVE Playlist에 넣는다 — LIVE READY 검사는 ②의 기존 검사 그대로, 송출은 시작하지 않는다."""
+        self._open_live()
+        w = self._live_window()
+        if w is None:
+            return []
+        added = w.add_playlist_paths([str(path)])
+        w.deiconify(); w.lift()
+        return added
+
+    def _receive_stock(self, paths):
+        """⑤에서 받은 영상을 ④ MP4 목록에 추가 (④의 디졸브·반복·중복·화질 설정은 그대로 재사용)."""
+        w = self._open_bg()
+        if getattr(w, "running", False):
+            messagebox.showwarning("④ 배경 만들기", "④에서 제작이 진행 중입니다. 끝난 뒤 다시 보내세요.", parent=w); return False
+        ok = w.add_paths([Path(p) for p in paths])
+        w.deiconify(); w.lift()
+        return ok
+
+    def _receive_from_bg(self, path, source="④ 배경 영상"):
+        """④·⑥에서 만든 영상을 ① SET 목록에 넣는다 (① 무손실 반복 경로 그대로)."""
+        if self.running:
+            messagebox.showwarning("① 영상 늘리기", "장시간 제작이 진행 중입니다. 끝난 뒤 다시 보내세요.", parent=self); return
+        self.add_set_paths([str(path)])
+        self.deiconify(); self.lift(); self.focus_set()
+        self.status.set(f"{source}을 SET에 추가했습니다: {Path(path).name}")
+
     def _live_playlist_snapshot(self):
         """예약 LIVE 창: 열려 있는 LIVE 창의 Playlist (없으면 빈 목록)."""
         w = self._live_window()
@@ -698,6 +822,12 @@ class MainWindow(tk.Tk):
         if j.status != "완료" or not out.is_file():
             messagebox.showwarning("예약 업로드", "제작이 완료된 영상만 예약 업로드로 보낼 수 있습니다."); return None
         return self._open_upload(str(out), out.stem)
+
+    def _peek_tools(self):
+        """FFmpeg 선택 창 없이 현재 찾을 수 있는 FFmpeg만 돌려준다 (⑤ 창 열기·썸네일용)."""
+        if self.ffmpeg and self.ffprobe and self.ffmpeg.exists() and self.ffprobe.exists():
+            return (self.ffmpeg, self.ffprobe)
+        return (self.ffmpeg, self.ffprobe) if self._tools() else (None, None)
 
     def _live_tools(self):
         return (self.ffmpeg,self.ffprobe) if self._need_tools() else (None,None)
@@ -774,6 +904,8 @@ class MainWindow(tk.Tk):
 
     def _close_after_live(self):
         if self.running and not messagebox.askyesno("작업 중","현재 작업을 중지하고 종료할까요?"):return
+        bgw=self._alive(getattr(self,"bg_win",None))
+        if bgw is not None and bgw.running and not messagebox.askyesno("배경 영상 제작 중","④ 배경 영상 제작을 중단하고 종료할까요?"):return
         uploading=self.upload_queue is not None and self.upload_queue.running
         work=self._running_work_lines()
         if work and not ask_exit(self,work):return  # 종료하면 업로드/댓글 확인이 멈춘다고 정확히 안내
@@ -784,7 +916,7 @@ class MainWindow(tk.Tk):
     def _finish_close(self):
         w=self._live_window()
         if w:w.destroy()
-        for w in (self._alive(self.upload_win),self._alive(self.live_schedule_win),self._alive(self.comment_win)):
+        for w in (self._alive(self.upload_win),self._alive(self.live_schedule_win),self._alive(self.comment_win),self._alive(getattr(self,"bg_win",None))):
             if w:w.destroy()
         if self.comment_service is not None:self.comment_service.stop(timeout=3.0)
         self._save();self.destroy();release_tk_variables(self)
