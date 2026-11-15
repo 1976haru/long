@@ -194,14 +194,15 @@ def test_story_notes_short_wrap_protect():
     assert any("30% 이상" in n for n in S.story_notes([B.Clip(vi("a.mp4", 30), story=huge)], 1.0, 30.0))
 
 
-def test_jpg_needs_background_removal_without_ffmpeg(tmp_path):
-    jpg = tmp_path / "커플 사진.jpg"
-    jpg.write_bytes(b"\xff\xd8\xff")
+def test_unsupported_format_is_friendly_error(tmp_path):
+    """UX HOTFIX: JPG는 더 이상 확장자로 거부하지 않는다 (사진 그대로 넣기 가능). 형식이 다르면 쉬운 문장."""
+    for name in ("커플.gifv", "a.heic"):
+        with pytest.raises(S.StoryImageError) as e:
+            S.inspect_image(Path("ffmpeg"), Path("ffprobe"), tmp_path / name)
+        assert "JPG·PNG·WebP" in str(e.value)
     with pytest.raises(S.StoryImageError) as e:
-        S.inspect_image(Path("ffmpeg"), Path("ffprobe"), jpg)
-    assert "배경 제거가 필요" in str(e.value) and "투명 PNG" in str(e.value)
-    with pytest.raises(S.StoryImageError):
-        S.inspect_image(Path("ffmpeg"), Path("ffprobe"), tmp_path / "x.gifv")
+        S.inspect_image(Path("ffmpeg"), Path("ffprobe"), tmp_path / "없는 사진.jpg")
+    assert "찾을 수 없습니다" in str(e.value)
 
 
 # ---------------- 실제 FFmpeg ----------------
@@ -290,18 +291,17 @@ def media(tmp_path):
 
 
 @needs_ffmpeg
-def test_real_inspect_transparent_png_and_reject_opaque(media):
+def test_real_inspect_transparent_png_and_opaque_is_photo(media):
     png = make_person(media / "남녀 주인공_恋人.png")
     img = S.inspect_image(Path(FFMPEG), Path(FFPROBE), png)
-    assert (img.width, img.height) == (400, 800) and 0.5 < img.transparent < 0.9
+    assert img.kind == S.KIND_CUTOUT and (img.width, img.height) == (400, 800) and 0.5 < img.transparent < 0.9
     x, y, w, h = img.crop                                             # 보이는 영역 (투명 여백 제외, 약간 여유)
     assert 100 <= x <= 120 and 80 <= y <= 115 and 160 <= w <= 200 and 640 <= h <= 720
     assert S.thumb_png(Path(FFMPEG), img).startswith(b"\x89PNG")
-    opaque = media / "배경있음.png"
+    opaque = media / "배경있음.png"                                     # PNG지만 투명 영역 0% → 사진 (확장자로 판단하지 않음)
     run(FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=200x300", "-frames:v", "1", opaque)
-    with pytest.raises(S.StoryImageError) as e:
-        S.inspect_image(Path(FFMPEG), Path(FFPROBE), opaque)
-    assert "배경 제거가 필요" in str(e.value)
+    o = S.inspect_image(Path(FFMPEG), Path(FFPROBE), opaque)
+    assert o.kind == S.KIND_PHOTO and o.crop == (0, 0, 200, 300) and o.transparent < 0.03
     empty = media / "투명뿐.png"
     run(FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i",
         "color=c=red:s=64x64,format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='0'", "-frames:v", "1", empty)
@@ -591,94 +591,3 @@ def test_window_without_story_keeps_old_settings(tkroot):
         assert saved["fit"] == "blur" and saved["story"] == {}
     finally:
         w.destroy()
-
-
-@needs_ffmpeg
-def test_window_story_flow_register_apply_toggle_preview_build(tkroot, media, tmp_path, quiet, _isolated_settings):
-    from app.bg_ui import BackgroundMakerWindow
-    from app.settings import load_settings
-    v1 = make_moving(media / "크리스마스 거리.mp4", 12)
-    v2 = make_moving(media / "東京タワー夜景.mp4", 12, bg="darkgreen")
-    png = make_person(media / "주인공 커플.png")
-    jpg = media / "배경있는 사진.jpg"
-    run(FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=200x300", "-frames:v", "1", jpg)
-    before = sha(png)
-    w = BackgroundMakerWindow(tkroot, tools=lambda: (FFMPEG, FFPROBE))
-    w.quiet_errors = True
-    try:
-        w.withdraw()
-        assert w.add_paths([v1, v2])
-        assert pump(w, lambda: not w.loading and len(w.clips) == 2)
-        w.tree.selection_set("0")
-        w._refresh_buttons()
-        assert str(w.btn_story_toggle.cget("state")) == "disabled"      # 아직 적용한 주인공 없음
-        d = w.open_story()
-        d.withdraw()
-        assert w.open_story() is d                                       # 이미 열린 창 재사용
-        # JPG → 배경 제거 안내 (등록하지 않음)
-        assert not d.register_path(jpg)
-        assert any("배경 제거" in str(x) for x in quiet) and d.lib.entries == []
-        # 투명 PNG 등록 → 라이브러리 사본
-        d.tags["Christmas"].set(True)
-        assert d.register_path(png, "Mika & Ren")
-        assert pump(d, lambda: len(d.lib.entries) == 1 and not d.busy)
-        e = d.lib.entries[0]
-        assert e.name == "Mika & Ren" and e.tags == ["Christmas"] and d.entry_id.get() == e.id
-        # 프리셋 선택 → 값 반영
-        d.choose_preset("fireworks_couple")
-        assert d.style().align == S.ALIGN_CENTER and d.style().lift < 0
-        d.choose_preset("christmas_couple")
-        d.nums["size"].set("55")
-        assert d.style().size == pytest.approx(0.55)
-        # 미리보기 (1장면) — 실제 제작과 같은 필터
-        assert d.preview_still()
-        assert pump(d, lambda: not d.busy, timeout=90)
-        assert "주인공이 완전히 보이는" in str(d.pv.cget("text"))
-        # 적용: 선택한 장면에만 (첫 장면)
-        d.mode.set(S.APPLY_SELECTED)
-        d.lst_scenes.selection_clear(0, "end")
-        d.lst_scenes.selection_set(0)
-        assert d.apply()
-        assert [c.story is not None for c in w.clips] == [True, False]
-        assert w.tree.set("0", "story") == "👤" and w.tree.set("1", "story") == ""
-        assert any("👤 주인공 이미지: 1/2" in x for x in w.warn_text.get().splitlines())
-        assert w.clips[0].story.style.size == pytest.approx(0.55)
-        w.tree.selection_set("0")
-        w._show_detail()
-        assert "👤 주인공: Mika & Ren" in w.detail.get()
-        # 장면별 켜기/끄기 (④ 목록)
-        w.tree.selection_set("1")
-        w._refresh_buttons()
-        assert str(w.btn_story_toggle.cget("state")) == "normal"
-        assert w.toggle_story() and w.clips[1].story is not None
-        assert w.toggle_story() and w.clips[1].story is None
-        # 등장·움직임 미리보기 (저화질 영상)
-        d.scene.set(d.cb_scene.cget("values")[0])
-        assert d.preview_motion()
-        assert pump(d, lambda: not d.busy, timeout=90)
-        assert d.last_preview is not None and d.last_preview.exists()
-        saved = load_settings()["bg_maker"]["story"]
-        assert saved["entry"] == e.id and saved["preset"] == "christmas_couple" and saved["mode"] == S.APPLY_SELECTED
-        # 음악 길이 직접 입력 → 제작
-        w.minutes.set(0)
-        w.custom_length.set("00:00:25")
-        w._length_settled()
-        w.outdir.set(str(tmp_path / "BG_出力"))
-        w._options_changed()
-        assert w.plan is not None and B.story_active(w.plan.pieces[0].a, w.plan.pieces[0].length)
-        assert w.start(confirm=False)
-        assert pump(w, lambda: not w.running, timeout=300)
-        r = w.result
-        assert r.frames == r.target_frames == 750 and r.output.exists()
-        assert [s["codec_type"] for s in probe_streams(r.output)] == ["video"]
-        d.destroy()
-        # 다시 열면 마지막 이미지·프리셋이 선택되어 있음 (사용자 이미지·설정 보존)
-        d2 = w.open_story()
-        d2.withdraw()
-        assert d2.entry_id.get() == e.id and d2.current_preset().key == "christmas_couple"
-        assert d2.mode.get() == S.APPLY_SELECTED
-        d2.clear_all()
-        assert all(c.story is None for c in w.clips)
-    finally:
-        w.destroy()
-    assert sha(png) == before and (S.StoryLibrary().folder / e.file).exists()

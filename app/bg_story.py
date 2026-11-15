@@ -56,14 +56,20 @@ EDGE_GAP = 0.5            # 디졸브와 등장 구간 사이 여유 (초)
 
 ALPHA_MAP_W = 128         # 투명 영역 확인용 알파 지도 폭 (FFmpeg가 축소)
 ALPHA_ON = 24             # 이 값보다 큰 알파 = 보이는 화소
-NEED_TRANSPARENT = 0.03   # 투명 화소가 이보다 적으면 '배경 제거 필요'
+NEED_TRANSPARENT = 0.03   # 투명 화소가 이보다 적으면 '배경이 남아 있는 사진' (확장자가 아니라 실제 알파로 판단)
 
-STORY_EXTS = (".png", ".webp")
-OPAQUE_EXTS = (".jpg", ".jpeg", ".bmp", ".gif", ".heic", ".tif", ".tiff")
+KIND_CUTOUT = "cutout"    # 배경이 투명한 인물 (인물만 겹쳐짐)
+KIND_PHOTO = "photo"      # 배경이 남아 있는 사진 → '사진 그대로 넣기' = 네모난 사진 레이어
+STORY_EXTS = (".png", ".webp", ".jpg", ".jpeg", ".bmp")
+OPAQUE_EXTS = (".jpg", ".jpeg", ".bmp")   # 투명 정보를 담을 수 없는 형식 (항상 '배경이 남아 있는 사진')
+PHOTO_MAX_AREA = 0.20     # 사진 그대로 넣기: 네모난 사진이 화면의 이 비율보다 크지 않게
+PHOTO_MIN_LIFT = 0.05     # 사진 그대로 넣기: 화면 아래 끝에 붙지 않게 살짝 띄움
 
-BG_REMOVAL_NOTE = ("JPG처럼 배경이 있는 이미지는 그대로 겹치면 사각형 배경까지 함께 보입니다. 배경 제거가 필요합니다 — "
-                   "CapCut [배경 제거], 휴대폰 사진 앱의 '피사체 분리', 이미지 편집 프로그램 등으로 인물만 남긴 "
-                   "투명 PNG를 만들어 다시 선택하세요. (이 프로그램에는 검증된 자동 배경 제거 모델이 포함되어 있지 않습니다.)")
+BG_REMOVAL_NOTE = ("배경이 남아 있는 사진입니다. 그대로 겹치면 사진의 네모난 배경까지 함께 보입니다. "
+                   "[배경 제거하기]로 인물만 남기거나, [사진 그대로 넣기]로 네모난 사진을 겹치거나, "
+                   "배경을 지운 PNG(CapCut 배경 제거·휴대폰 '피사체 분리' 등)를 [다른 사진 선택]으로 고르세요.")
+PHOTO_NOTE = ("사진 그대로 넣기: 네모난 사진이 배경 위에 겹쳐집니다 (인물만 오려낸 합성이 아닙니다). "
+              "화면의 약 20% 이하 크기로, 아래 끝에서 조금 띄워 놓습니다.")
 STATIC_NOTE = ("인물 이미지는 그대로 겹쳐집니다 — 표정·걷기·시선은 바뀌지 않으며, 크기·위치·투명도·페이드와 "
                "아주 느린 확대/좌우 이동만 적용됩니다 (2D 합성).")
 
@@ -144,20 +150,20 @@ class StoryPreset:
 
 
 BUILTIN_PRESETS: tuple[StoryPreset, ...] = (
-    StoryPreset("christmas_couple", "Christmas Couple", "Christmas",
+    StoryPreset("christmas_couple", "🎄 크리스마스 커플", "Christmas",
                 "크리스마스 거리 — 인물을 오른쪽(또는 왼쪽)에 두어 거리 풍경과 불빛이 보이게. 부드러운 페이드.",
                 StoryStyle(size=0.62, align=ALIGN_RIGHT, margin=0.06, lift=0.0, fade=1.5, duration=30.0, delay=1.0,
                            motion=SMOTION_NONE, brightness=0.95, warmth=0.06, saturation=0.95, feather=1), True),
-    StoryPreset("fireworks_couple", "Fireworks Couple", "Fireworks",
+    StoryPreset("fireworks_couple", "🎆 불꽃축제 커플", "Fireworks",
                 "불꽃축제 — 화면 하단 가운데에 인물 뒷모습(상반신). 위쪽 하늘(불꽃 공간)은 비워 둡니다.",
                 StoryStyle(size=0.46, align=ALIGN_CENTER, margin=0.0, lift=-0.12, fade=2.0, duration=30.0, delay=1.5,
                            motion=SMOTION_NONE, brightness=0.72, warmth=0.03, saturation=0.85, feather=1,
                            protect_top=0.55), True),
-    StoryPreset("tokyo_night", "Tokyo Night Story", "Night",
+    StoryPreset("tokyo_night", "🌃 도쿄 야경 STORY", "Night",
                 "도쿄 야경 — 왼쪽 옆 인물, 아주 느린 확대와 긴 페이드. 야경에 맞게 조금 어둡고 차갑게.",
                 StoryStyle(size=0.66, align=ALIGN_LEFT, margin=0.05, lift=0.0, fade=2.0, duration=35.0, delay=1.5,
                            motion=SMOTION_ZOOM, brightness=0.85, warmth=-0.04, saturation=0.9, feather=1), True),
-    StoryPreset("cafe_story", "Cafe Story", "Cafe",
+    StoryPreset("cafe_story", "☕ 카페 STORY", "Cafe",
                 "카페 — 왼쪽 아래 상반신, 따뜻한 색감, 움직임 없음.",
                 StoryStyle(size=0.58, align=ALIGN_LEFT, margin=0.07, lift=-0.05, fade=1.5, duration=30.0, delay=1.0,
                            motion=SMOTION_NONE, brightness=0.97, warmth=0.05, saturation=0.95, feather=1), True),
@@ -175,6 +181,12 @@ class StoryImage:
     crop: tuple[int, int, int, int]   # 보이는(불투명) 영역 x, y, w, h — 투명 여백은 크기 계산에서 뺀다
     name: str = ""
     transparent: float = 0.0          # 투명 화소 비율 (참고)
+    kind: str = KIND_CUTOUT           # cutout(투명 배경 인물) | photo(배경이 남아 있는 사진 = 네모난 레이어)
+    pre: str = ""                     # EXIF 방향 보정 필터 (휴대폰 JPG) — 미리보기·제작 모두 같은 필터
+
+    @property
+    def is_photo(self) -> bool:
+        return self.kind == KIND_PHOTO
 
 
 @dataclass(frozen=True)
@@ -202,23 +214,24 @@ def _run(cmd: list[str], timeout: float = 60) -> subprocess.CompletedProcess:
 
 
 def image_input_args(path: Path) -> list[str]:
-    """인물 이미지 입력 (1장만 읽고 필터의 loop로 반복 — 매 프레임 다시 디코딩하지 않음). 이름의 %는 패턴이 아님."""
-    return ["-f", "image2", "-pattern_type", "none", "-i", str(path)]
+    """인물 이미지 입력 (1장만 읽고 필터의 loop로 반복 — 매 프레임 다시 디코딩하지 않음). 이름의 %는 패턴이 아님.
+    EXIF 방향은 FFmpeg 버전마다 처리가 달라 자동 회전을 끄고 StoryImage.pre 필터로 직접 적용한다."""
+    return ["-f", "image2", "-pattern_type", "none", "-noautorotate", "-i", str(path)]
 
 
 def inspect_image(ffmpeg: Path, ffprobe: Path, path: Path, name: str = "") -> StoryImage:
-    """투명 PNG(RGBA)인지 확인하고 보이는 영역을 찾는다. 배경이 있으면 StoryImageError(배경 제거 안내).
+    """사진을 실제로 읽어 투명 배경 인물(cutout)인지 배경이 남아 있는 사진(photo)인지 구분한다.
 
-    FFmpeg가 만든 128화소 폭 알파 지도만 Python으로 본다 (이미지 디코딩은 FFmpeg 안에서만)."""
+    확장자가 PNG라는 이유만으로 투명하다고 보지 않는다 — FFmpeg가 만든 128화소 폭 알파 지도로 판단
+    (이미지 디코딩은 FFmpeg 안에서만). 배경이 있는 사진도 오류로 멈추지 않고 kind=photo로 돌려준다.
+    읽을 수 없거나 형식이 다르거나 전부 투명한 경우에만 StoryImageError (화면 안내용 쉬운 문장)."""
+    from .bg_fit import EXIF_FILTERS, read_exif_orientation
     path = Path(path)
     ext = path.suffix.lower()
-    if ext in OPAQUE_EXTS:
-        raise StoryImageError(f"'{path.name}'은(는) {ext.lstrip('.').upper()} 이미지라 투명 배경이 없습니다.\n\n"
-                              + BG_REMOVAL_NOTE)
     if ext not in STORY_EXTS:
-        raise StoryImageError(f"'{path.name}': 주인공 이미지는 투명 PNG(또는 투명 WebP)만 쓸 수 있습니다.")
+        raise StoryImageError(f"'{path.name}'은(는) 쓸 수 없는 형식입니다. JPG·PNG·WebP 사진을 고르세요.")
     if not path.is_file():
-        raise StoryImageError(f"파일이 없습니다: {path}")
+        raise StoryImageError(f"사진 파일을 찾을 수 없습니다: {path.name}")
     p = _run([str(ffprobe), "-v", "error", "-select_streams", "v:0", "-show_entries",
               "stream=codec_name,width,height,pix_fmt", "-of", "json", str(path)])
     try:
@@ -227,22 +240,26 @@ def inspect_image(ffmpeg: Path, ffprobe: Path, path: Path, name: str = "") -> St
     except (ValueError, TypeError, IndexError):
         w = h = 0
     if p.returncode != 0 or w < 16 or h < 16:
-        raise StoryImageError(f"이미지를 읽을 수 없습니다: {path.name}")
+        raise StoryImageError(f"'{path.name}'을(를) 사진으로 읽을 수 없습니다. 파일이 손상되었거나 사진이 아닐 수 있습니다.")
+    exif = read_exif_orientation(path)
+    pre = ",".join(EXIF_FILTERS.get(exif, []))
+    if exif in (5, 6, 7, 8):
+        w, h = h, w                          # 보이는 방향 기준 크기
     mw = min(ALPHA_MAP_W, w)
     mh = max(1, int(round(h * mw / w)))
     q = _run([str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", *image_input_args(path), "-vf",
-              f"format=rgba,alphaextract,scale={mw}:{mh}:flags=area,format=gray", "-frames:v", "1",
-              "-f", "rawvideo", "-"])
+              f"{pre + ',' if pre else ''}format=rgba,alphaextract,scale={mw}:{mh}:flags=area,format=gray",
+              "-frames:v", "1", "-f", "rawvideo", "-"])
     amap = q.stdout[:mw * mh] if q.returncode == 0 else b""
     if len(amap) < mw * mh:
-        raise StoryImageError(f"'{path.name}'의 투명 정보를 읽을 수 없습니다.\n\n" + BG_REMOVAL_NOTE)
+        raise StoryImageError(f"'{path.name}'을(를) 사진으로 읽을 수 없습니다.")
     on = [v > ALPHA_ON for v in amap]
     transparent = 1.0 - sum(on) / len(on)
-    if transparent < NEED_TRANSPARENT:
-        raise StoryImageError(f"'{path.name}'에는 투명한 배경이 거의 없습니다 (투명 영역 {transparent:.0%}).\n\n"
-                              + BG_REMOVAL_NOTE)
+    nm = name or path.stem
     if sum(on) < max(4, len(on) * 0.005):
-        raise StoryImageError(f"'{path.name}'은(는) 거의 전부 투명해서 보이는 인물이 없습니다.")
+        raise StoryImageError(f"'{path.name}'은(는) 거의 전부 투명해서 보이는 인물이 없습니다. 다른 사진을 고르세요.")
+    if transparent < NEED_TRANSPARENT or ext in OPAQUE_EXTS:
+        return StoryImage(path.resolve(), w, h, (0, 0, w, h), nm, round(transparent, 4), KIND_PHOTO, pre)
     xs = [i % mw for i, v in enumerate(on) if v]
     ys = [i // mw for i, v in enumerate(on) if v]
     sx, sy = w / mw, h / mh                       # 지도 1칸 = 원본 sx×sy 화소 — 바깥쪽으로 1칸 여유
@@ -250,15 +267,16 @@ def inspect_image(ffmpeg: Path, ffprobe: Path, path: Path, name: str = "") -> St
     y0 = max(0, int(math.floor((min(ys) - 1) * sy)))
     x1 = min(w, int(math.ceil((max(xs) + 2) * sx)))
     y1 = min(h, int(math.ceil((max(ys) + 2) * sy)))
-    return StoryImage(path.resolve(), w, h, (x0, y0, max(2, x1 - x0), max(2, y1 - y0)), name or path.stem,
-                      round(transparent, 4))
+    return StoryImage(path.resolve(), w, h, (x0, y0, max(2, x1 - x0), max(2, y1 - y0)), nm, round(transparent, 4),
+                      KIND_CUTOUT, pre)
 
 
 def thumb_png(ffmpeg: Path, image: StoryImage, box: tuple[int, int] = (150, 190)) -> bytes:
     """라이브러리 미리보기: 보이는 영역을 회색 바탕 위에 (투명한 곳 = 회색)."""
     bw, bh = box
     x, y, cw, ch = image.crop
-    graph = (f"[0:v]format=rgba,crop={cw}:{ch}:{x}:{y},scale={bw}:{bh}:force_original_aspect_ratio=decrease:"
+    pre = f"{image.pre}," if image.pre else ""
+    graph = (f"[0:v]{pre}format=rgba,crop={cw}:{ch}:{x}:{y},scale={bw}:{bh}:force_original_aspect_ratio=decrease:"
              f"flags=lanczos[c];color=c=0x8a8a8a:s={bw}x{bh}:d=1,format=rgba[b];"
              f"[b][c]overlay=x=(W-w)/2:y=(H-h)/2:format=auto,format=rgb24[v]")
     p = _run([str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", *image_input_args(image.path),
@@ -291,6 +309,12 @@ def placement(layer: StoryLayer, W: int, H: int) -> Placement:
     if w > W * 0.95:                       # 아주 넓은 이미지는 화면 폭 안으로 (비율 유지)
         w = max(2, int(W * 0.95))
         h = max(2, int(round(w * ch / cw)))
+    lift = s.lift
+    if layer.image.is_photo:               # 네모난 사진: 화면을 많이 가리지 않게, 아래 끝에 붙지 않게
+        if w * h > W * H * PHOTO_MAX_AREA:
+            k = math.sqrt(W * H * PHOTO_MAX_AREA / (w * h))
+            w, h = max(2, int(w * k)), max(2, int(h * k))
+        lift = max(lift, PHOTO_MIN_LIFT)
     m = int(round(W * s.margin))
     if s.align == ALIGN_LEFT:
         x = m
@@ -298,7 +322,7 @@ def placement(layer: StoryLayer, W: int, H: int) -> Placement:
         x = W - w - m
     else:
         x = (W - w) // 2
-    y = H - h - int(round(H * s.lift))
+    y = H - h - int(round(H * lift))
     y = min(y, H - max(2, h // 5))         # 아무리 내려도 인물 위쪽 1/5은 보이게
     return Placement(x, y, w, h)
 
@@ -353,7 +377,7 @@ def overlay_graph(layer: StoryLayer, W: int, H: int, fps: float, fps_text: str, 
     s = layer.style
     pl = placement(layer, W, H)
     x, y, cw, ch = layer.image.crop
-    chain = [f"{src}format=rgba,crop={cw}:{ch}:{x}:{y}",
+    chain = [f"{src}{layer.image.pre + ',' if layer.image.pre else ''}format=rgba,crop={cw}:{ch}:{x}:{y}",
              f"premultiply=inplace=1,scale={pl.w}:{pl.h}:flags=lanczos,unpremultiply=inplace=1,format=rgba"]
     pre = ",".join(chain)
     sigma = FEATHER_SIGMA.get(int(s.feather), 0.0)
@@ -467,6 +491,8 @@ def story_notes(clips: Sequence, dissolve: float, fps: float, W: int = 1920, H: 
     for layer in {c.story for c in on}:
         pl = placement(layer, W, H)
         st = layer.style
+        if layer.image.is_photo:
+            notes.append(f"'{layer.image.name}': " + PHOTO_NOTE)
         if st.protect_top > 0 and pl.visible_top < H * st.protect_top:
             notes.append(f"'{layer.label or layer.image.name}': 인물이 화면 위쪽 {st.protect_top:.0%} (불꽃 공간)까지 "
                          "올라옵니다. 크기를 줄이거나 하단 높이를 낮추세요.")
@@ -579,10 +605,15 @@ class LibraryEntry:
     style: dict | None = None     # 자주 쓰는 위치·크기 (이 이미지의 기본값)
     preset: str = ""
     added: str = ""
+    kind: str = KIND_CUTOUT       # 예전 목록(통합 08)에는 없음 → 투명 인물
+    exif: int = 1
+    sha256: str = ""
 
     def image(self, folder: Path) -> StoryImage:
+        from .bg_fit import EXIF_FILTERS
+        kind = self.kind if self.kind in (KIND_CUTOUT, KIND_PHOTO) else KIND_CUTOUT
         return StoryImage((folder / self.file).resolve(), self.width, self.height, tuple(self.crop), self.name,
-                          self.transparent)
+                          self.transparent, kind, ",".join(EXIF_FILTERS.get(int(self.exif or 1), [])))
 
 
 class StoryLibrary:
@@ -611,6 +642,7 @@ class StoryLibrary:
                 e.crop = tuple(int(v) for v in e.crop)[:4] if len(e.crop) == 4 else (0, 0, e.width, e.height)
                 e.tags = [t for t in e.tags if isinstance(t, str)][:8]
                 e.width, e.height = int(e.width), int(e.height)
+                e.exif = int(e.exif or 1)
             except (TypeError, ValueError):
                 continue
             if Path(e.file).name != e.file:     # 라이브러리 폴더 밖 경로는 쓰지 않음
@@ -624,8 +656,21 @@ class StoryLibrary:
     def get(self, entry_id: str) -> LibraryEntry | None:
         return next((e for e in self.entries if e.id == entry_id), None)
 
+    def find_same(self, path: Path) -> LibraryEntry | None:
+        """같은 내용(SHA256)의 이미지가 이미 목록에 있으면 그 항목 (다시 골라도 사본을 또 만들지 않음)."""
+        digest = _sha256(path)
+        for e in self.entries:
+            if not e.sha256 and self.available(e):
+                e.sha256 = _sha256(self.folder / e.file)
+            if e.sha256 == digest and self.available(e):
+                return e
+        return None
+
     def add(self, image: StoryImage, name: str = "", tags: Sequence[str] = ()) -> LibraryEntry:
-        """원본은 읽기만 하고 사본을 라이브러리 폴더에 만든다 (같은 원본도 사본은 따로)."""
+        """원본은 읽기만 하고 사본을 라이브러리 폴더에 만든다. 같은 내용이 이미 있으면 그 항목을 돌려준다."""
+        same = self.find_same(image.path)
+        if same is not None:
+            return same
         self.folder.mkdir(parents=True, exist_ok=True)
         eid = uuid.uuid4().hex[:12]
         fname = f"{eid}{image.path.suffix.lower()}"
@@ -633,9 +678,12 @@ class StoryLibrary:
         tmp = self.folder / f"{fname}.part"
         shutil.copyfile(image.path, tmp)
         os.replace(tmp, dst)
+        from .bg_fit import EXIF_FILTERS
+        exif = next((k for k, v in EXIF_FILTERS.items() if ",".join(v) == image.pre), 1) if image.pre else 1
         e = LibraryEntry(eid, (name or image.name or image.path.stem).strip()[:60], fname, str(image.path),
                          [t for t in tags if t in TAGS], image.width, image.height, tuple(image.crop),
-                         image.transparent, None, "", time.strftime("%Y-%m-%d %H:%M"))
+                         image.transparent, None, "", time.strftime("%Y-%m-%d %H:%M"), image.kind, exif,
+                         _sha256(dst))
         self.entries.append(e)
         self.save()
         return e
@@ -672,6 +720,18 @@ class StoryLibrary:
         return (self.folder / entry.file).is_file()
 
 
+def _sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
 def layer_for(entry_image: StoryImage, preset: StoryPreset, style: StoryStyle | None = None) -> StoryLayer:
     return StoryLayer(entry_image, (style or preset.style).clamped(), preset.name)
 
@@ -681,5 +741,5 @@ __all__ = [
     "BUILTIN_PRESETS", "StoryImage", "StoryLayer", "StoryWindow", "StoryImageError", "inspect_image", "thumb_png",
     "placement", "story_window", "overlay_graph", "assign_story", "clip_window", "story_notes", "load_presets",
     "save_preset", "duplicate_preset", "delete_preset", "get_preset", "StoryLibrary", "LibraryEntry", "layer_for",
-    "BG_REMOVAL_NOTE", "STATIC_NOTE", "image_input_args",
+    "BG_REMOVAL_NOTE", "STATIC_NOTE", "image_input_args", "KIND_CUTOUT", "KIND_PHOTO", "PHOTO_NOTE",
 ]

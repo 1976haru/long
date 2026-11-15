@@ -37,7 +37,10 @@ git diff --check
 - app/bg_story.py, app/bg_story_ui.py: ④ 주인공 이미지 합성 (통합 08). 투명 PNG 인물을 16:9 정규화가 끝난 장면 위에 overlay
   (_norm_graph의 story_src). 등장·페이드·확대는 장면 안 시간(Segment.local0) 기준이라 한 바퀴 1회 인코딩 + -c copy 반복 구조 그대로,
   기본 등장 구간은 디졸브 바깥. 주인공이 없는 구간은 기존 필터 문자열 그대로(회귀 테스트). 프리셋·라이브러리는 설정 폴더
-  (story_presets.json, story_library/ 사본) — 원본 이미지는 읽기만, 손상 파일은 .broken으로 보존. 자동 배경 제거 모델은 포함하지 않음
+  (story_presets.json, story_library/ 사본) — 원본 이미지는 읽기만, 손상 파일은 .broken으로 보존.
+  UX HOTFIX: 창은 초보자 3단계(사진 → 분위기 카드 → 큰 미리보기 + 고정 [✓ 이 모습으로 적용]), 숫자·관리는 [고급 설정]에 접음.
+  사진은 실제 알파로 cutout/photo 판별 (확장자로 판단 금지) — photo는 오류 대신 화면 안 선택지, '사진 그대로 넣기' = 네모난 레이어.
+  app/bg_remove.py: 배경 제거 인터페이스. 검증된 로컬 제거기가 등록될 때만 동작(기본 없음 → 버튼 비활성 + 이유), 외부 전송 금지
 - app/stock_net.py, app/stock_sources.py, app/stock_rights.py, app/stock_keys.py, app/stock_download.py, app/stock_player.py, app/stock_ui.py: ⑤ 배경 영상 검색·다운로드 (Pexels·Pixabay·Wikimedia Commons·Internet Archive 공식 API만, 표준 라이브러리 urllib). 허용 호스트+redirect 재검사, 제공처별 간격·429·24시간 캐시, API 키는 DPAPI 파일만, 길이 모드(10~120초 / 확인된 180초 이상) 엄격 분리·자동 대체 금지, 권리 상태는 참고용(보증 문구 금지), 선택한 영상만 다운로드, 미리보기는 ffplay 프로세스 제어(Python 프레임 디코딩 없음)
 - app/pl_core.py, app/pl_ui.py: ⑥ 음악 플레이리스트 (배경 MP4 + 음원 15곡 → MP4 + 곡 시작 12초 제목 SRT). 음원은 디코드로 실제 길이 확인, 오디오는 AAC 하나로 연결(공백 없음·크로스페이드는 선택 시만). 영상은 규격이 맞고 제목 입히기가 없으면 -c copy 반복만, 해상도·코덱 변경·제목 입히기 때만 인코딩. ④ 결과는 `*.plvm_bg.json`(한 바퀴 길이)으로 경계 키프레임 DTS에서만 반복. ①②③에는 보내기만 (자동 시작 금지)
 - app/media_audio.py: 배경 원본 오디오 검사(ffprobe 스트림 기준 — 조용하다고 '없음'으로 보지 않음, 실패는 '확인 불가')와 무음 사본(-map 0:v:0 -c:v copy -an, 실제 컨테이너 기준, 안 맞으면 재인코딩 대신 이유 표시, .part → 검증 → 교체, SHA256·권리 기록 연결). ④는 영상만 매핑하고 결과에 오디오가 있으면 실패, ⑥은 결과 오디오가 음원 1개인지 검증
