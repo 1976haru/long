@@ -22,6 +22,7 @@ from dataclasses import replace
 
 from . import bg_analysis as A
 from . import bg_fit as F
+from . import bg_story as S
 from . import media_audio as MA
 from .bg_core import (
     CODEC_H264, CODEC_HEVC, DEFAULT_DISSOLVE, DEFAULT_PROJECT_FPS, DISSOLVE_CHOICES, ENCODE_PROFILES, GUARD_OWNER,
@@ -108,6 +109,9 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.last_silent = None
         self.always_exclude = tk.BooleanVar(value=True)
         self.last_preview: Path | None = None
+        self.story_layer: S.StoryLayer | None = None   # 통합 08: 마지막으로 적용한 주인공 (장면별 켜기/끄기용)
+        self.story_dialog = None
+        self._story_sig = None
 
         saved = load_settings().get(SETTINGS_KEY)
         saved = saved if isinstance(saved, dict) else {}
@@ -143,6 +147,8 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.motion_default = tk.StringVar(value=F.MOTION_LABELS[m0_])
         self.still_sel = tk.StringVar()
         self.motion_sel = tk.StringVar()
+        st0 = saved.get("story")   # 통합 08 새 키 (없으면 빈 값 — 기존 설정과 호환)
+        self.story_last = {k: st0[k] for k in ("entry", "preset", "mode", "every") if k in st0} if isinstance(st0, dict) else {}
         self.show_advanced = tk.BooleanVar(value=False)
         self.fit_note = tk.StringVar()
         self.fit_previewing = False
@@ -221,14 +227,14 @@ class BackgroundMakerWindow(tk.Toplevel):
         ttk.Button(br, text="추천 구간 모두 적용", command=self._apply_all_advice).pack(side="right", padx=4)
 
         tf = ttk.Frame(f1); tf.pack(fill="both", expand=True)
-        cols = ("use", "name", "dur", "res", "fps", "range", "loop", "next", "quality", "audio")
+        cols = ("use", "name", "dur", "res", "fps", "range", "loop", "next", "quality", "audio", "story")
         self.tree = ttk.Treeview(tf, columns=cols, show="tree headings", height=4, style="BG.Treeview",
                                  selectmode="browse")
         self.tree.heading("#0", text="미리보기")
         self.tree.column("#0", width=THUMB_W + 26, stretch=False)
-        for c, h, w in zip(cols, ("사용", "파일명", "길이", "해상도·비율", "FPS", "사용 구간", "반복 평가", "→ 다음 전환",
-                                  "품질·중복 (참고)", "원본 오디오"),
-                           (44, 160, 64, 130, 50, 100, 104, 96, 140, 100)):
+        for c, h, w in zip(cols, ("사용", "파일명", "길이", "해상도·비율", "FPS", "사용 구간", "반복 평가",
+                                  "→ 다음 전환", "품질·중복 (참고)", "원본 오디오", "주인공"),
+                           (44, 150, 60, 126, 46, 96, 100, 92, 136, 96, 50)):
             self.tree.heading(c, text=h)
             self.tree.column(c, width=w, anchor="w" if c in ("name", "quality", "loop", "next") else "center")
         vs = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
@@ -237,6 +243,13 @@ class BackgroundMakerWindow(tk.Toplevel):
         vs.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", lambda e: (self._show_detail(), self._refresh_buttons()))
         ttk.Label(f1, textvariable=self.summary).pack(anchor="w", pady=(4, 0))
+        sr = ttk.Frame(f1); sr.pack(fill="x", pady=(4, 0))   # 통합 08: 움직이는 배경 위에 주인공 이미지 겹치기
+        self.btn_story = ttk.Button(sr, text="＋ 주인공 이미지 넣기", command=self.open_story, style="Primary.TButton")
+        self.btn_story.pack(side="left")
+        self.btn_story_toggle = ttk.Button(sr, text="👤 선택 장면 주인공 켜기/끄기", command=self.toggle_story)
+        self.btn_story_toggle.pack(side="left", padx=(6, 0))
+        ttk.Label(sr, text="영상 위에 STORY 주인공(투명 PNG)을 겹칩니다 (사진을 한 장면으로 넣기와 다름)",
+                  style="Hint.TLabel").pack(side="left", padx=(8, 0))
         ar0 = ttk.Frame(f1); ar0.pack(fill="x", pady=(2, 0))
         ttk.Checkbutton(ar0, text=MA.EXCLUDE_OPTION, variable=self.always_exclude, state="disabled").pack(side="left")
         ttk.Label(ar0, text="④ 배경 영상은 항상 영상만 사용합니다 (원본 자연음·말소리·음악은 결과에 들어가지 않음). "
@@ -822,6 +835,54 @@ class BackgroundMakerWindow(tk.Toplevel):
         return choose_output_spec(infos, self.quality.get(), hevc_available=False, profile=self.profile_key(),
                                   fit=self.fit_key(), blur=self.blur_key(), pad=self.pad_key())
 
+    # ---------------- 주인공 이미지 (통합 08) ----------------
+    def open_story(self):
+        """[＋ 주인공 이미지 넣기] 창 (이미 열려 있으면 앞으로)."""
+        if self.running:
+            return None
+        if self.story_dialog is not None:
+            try:
+                self.story_dialog.deiconify()
+                self.story_dialog.lift()
+                return self.story_dialog
+            except tk.TclError:
+                self.story_dialog = None
+        from .bg_story_ui import StoryDialog
+        self.story_dialog = StoryDialog(self)
+        return self.story_dialog
+
+    def apply_story(self, layer, mode=S.DEFAULT_APPLY, selected=(), every=S.DEFAULT_EVERY, last=None) -> int:
+        """주인공을 장면에 넣는다 (원본 파일은 그대로, 목록 정보만). 넣은 장면 수."""
+        if self.running:
+            return 0
+        sel = self._selected_index()
+        self.clips = S.assign_story(self.clips, layer, mode, selected, every)
+        self.story_layer = layer
+        if last:
+            self.story_last = dict(last)
+            self._save_settings()
+        self._refresh_all(select=sel)
+        return sum(1 for c in self.clips if c.story is not None)
+
+    def clear_story(self) -> None:
+        if self.running:
+            return
+        self.clips = S.assign_story(self.clips, None)
+        self._refresh_all()
+
+    def toggle_story(self) -> bool:
+        """선택한 장면만 주인공 켜기/끄기 (마지막으로 적용한 주인공·스타일)."""
+        i = self._selected_index()
+        if i is None or self.running:
+            return False
+        c = self.clips[i]
+        if c.story is None and self.story_layer is None:
+            self.open_story()
+            return False
+        self.clips[i] = replace(c, story=None if c.story is not None else self.story_layer)
+        self._refresh_all(select=i)
+        return True
+
     # ---------------- 화면 맞춤 미리보기 ----------------
     def preview_fit(self) -> bool:
         """선택한 영상·사진 1장면이 16:9 출력에서 어떻게 보이는지 (실제 제작과 같은 필터·해상도로 1프레임 → 축소).
@@ -997,7 +1058,8 @@ class BackgroundMakerWindow(tk.Toplevel):
                                               "project_fps": self.project_fps_value(),
                                               "fit": self.fit_key(), "blur": self.blur_key(), "pad": self.pad_key(),
                                               "still_seconds": self.still_default_seconds(),
-                                              "motion": self.motion_key(self.motion_default.get())}})
+                                              "motion": self.motion_key(self.motion_default.get()),
+                                              "story": dict(self.story_last)}})
         except Exception:
             pass
 
@@ -1017,8 +1079,8 @@ class BackgroundMakerWindow(tk.Toplevel):
     @staticmethod
     def plan_key(plan: BgPlan) -> tuple:
         """실측값을 다시 쓸 수 있는지 판단하는 서명 (설정·영상·구간이 바뀌면 다시 재야 함). 길이는 무관."""
-        return (plan.spec, plan.dissolve, tuple((p.kind, str(p.a.path), round(p.a.start, 3), round(p.length, 3))
-                                                for p in plan.pieces))
+        return (plan.spec, plan.dissolve, tuple((p.kind, str(p.a.path), round(p.a.start, 3), round(p.length, 3),
+                                                 p.a.story, p.a.window) for p in plan.pieces))
 
     def _hevc_ok(self) -> bool:
         if self._hevc is None:
@@ -1171,7 +1233,8 @@ class BackgroundMakerWindow(tk.Toplevel):
                 "✓" if c.enabled else "제외", c.path.name, format_duration(c.info.duration),
                 f"{c.info.width}×{c.info.height} {F.aspect_label(c.info.width, c.info.height)}",
                 "사진" if c.is_image else f"{c.info.fps:.2f}", rng, self._loop_cell(c),
-                self._next_cell(c), self._quality_cell(c, dup_map), self._audio_cell(c)))
+                self._next_cell(c), self._quality_cell(c, dup_map), self._audio_cell(c),
+                "👤" if c.story is not None else ""))
         if select is not None and 0 <= select < len(self.clips):
             self.tree.selection_set(str(select))
             self.tree.see(str(select))
@@ -1189,6 +1252,14 @@ class BackgroundMakerWindow(tk.Toplevel):
         self._recalc(dups)
         self._show_detail()
         self._refresh_buttons()
+        sig = tuple((c.path, c.enabled, c.story is not None) for c in self.clips)
+        if self.story_dialog is not None and sig != self._story_sig:
+            try:
+                self.story_dialog._refresh_scenes()
+                self.story_dialog._update_buttons()
+            except tk.TclError:
+                pass
+        self._story_sig = sig
 
     def _recalc(self, dups=None):
         self.plan = None
@@ -1352,6 +1423,17 @@ class BackgroundMakerWindow(tk.Toplevel):
                 lines.append(f"화면 맞춤: 16:9 · {g.scale:.2f}배 확대 (선명도가 조금 낮아질 수 있음)")
         except ValueError:
             pass
+        if c.story is not None:
+            try:
+                sp = self.current_spec()
+                w = S.clip_window(c, self.effective_dissolve()[0], sp.fps)
+                pl = S.placement(c.story, sp.width, sp.height)
+                lines.append(f"👤 주인공: {c.story.image.name} ({c.story.label}) · "
+                             + (f"장면 {w.start:.1f}~{w.end:.1f}초 등장 (페이드 {w.fade:.1f}초)" if w
+                                else "장면이 짧아 넣지 못함 (디졸브 바깥 2초 미만)")
+                             + f" · {S.ALIGN_LABELS[c.story.style.align]} · 크기 {pl.w}×{pl.h}")
+            except ValueError:
+                pass
         ac = self.audio_checks.get(c.path)
         lines.append(ac.detail if ac else "원본 오디오 검사 중…")
         if c.path in self.analysis_errors:
@@ -1387,6 +1469,9 @@ class BackgroundMakerWindow(tk.Toplevel):
             for b in (self.btn_preview_loop, self.btn_preview_next):
                 b.configure(state="disabled" if busy or not sel else "normal")
             self.btn_fit_preview.configure(state="disabled" if busy or not sel else "normal")
+            self.btn_story.configure(state="disabled" if self.running else "normal")
+            self.btn_story_toggle.configure(state="disabled" if self.running or not sel or (
+                self.story_layer is None and not (sel and i < len(self.clips) and self.clips[i].story)) else "normal")
             for w in (self.cb_still_sel, self.btn_still_apply):
                 w.configure(state="disabled" if self.running or not img else "normal")
             self.cb_motion_sel.configure(state="disabled" if self.running or not img else "readonly")
@@ -1632,6 +1717,12 @@ class BackgroundMakerWindow(tk.Toplevel):
         self.destroy()
 
     def destroy(self):
+        if self.story_dialog is not None:
+            try:
+                self.story_dialog.destroy()
+            except tk.TclError:
+                pass
+            self.story_dialog = None
         self.cancel.set()
         self.stop_loading.set()
         self.preview_cancel.set()

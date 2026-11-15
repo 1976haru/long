@@ -36,6 +36,9 @@ from .bg_fit import (
     DEFAULT_BLUR, DEFAULT_PAD, FIT_BLUR, FIT_FILL, FIT_SHORT, MOTION_NONE, MediaMeta, fit_filter, fit_notes,
     motion_filter, native_height,
 )
+from .bg_story import (
+    StoryLayer, StoryWindow, clip_window, image_input_args, overlay_graph, story_notes, window_overlaps,
+)
 from .core import (
     BuildCancelled, BuildError, BuildPlan, VideoInfo, creationflags_no_window, enough_disk_space, escape_concat_path,
     format_duration, free_bytes, probe_video, run_concat_copy, write_concat_file,
@@ -134,6 +137,7 @@ class Clip:
     enabled: bool = True
     meta: MediaMeta | None = None
     motion: str = MOTION_NONE
+    story: StoryLayer | None = None   # 통합 08: 이 장면 위에 겹칠 주인공 이미지 (None = 없음)
 
     @property
     def path(self) -> Path:
@@ -213,14 +217,25 @@ class Segment:
     dh: int = 0
     motion: str = ""         # 사진 움직임 효과
     total: float = 0.0       # 사진 전체 표시 시간 (움직임 진행률 계산용)
+    story: StoryLayer | None = None    # 주인공 이미지 (통합 08)
+    window: StoryWindow | None = None  # 장면 안 시간 기준 등장 구간
+    clip_start: float = 0.0  # 장면 사용 구간 시작 (원본 시간) → local0 = start - clip_start
+
+    @property
+    def local0(self) -> float:
+        """이 구간 첫 프레임의 '장면 안 시간' (사용 구간 시작 = 0). 사진은 start가 이미 장면 안 시간."""
+        return self.start - self.clip_start
 
 
-def clip_segment(c: Clip, start: float, length: float) -> Segment:
-    """클립의 한 구간 → Segment (화면 맞춤·사진 정보 포함)."""
+def clip_segment(c: Clip, start: float, length: float, window: StoryWindow | None = None) -> Segment:
+    """클립의 한 구간 → Segment (화면 맞춤·사진·주인공 정보 포함). window: 주인공 등장 구간 (clip_window)."""
     m = c.meta
     still = bool(m and m.is_image)
+    story = c.story if window is not None else None
     return Segment(c.path, start, length, still=still, pre=m.pre_filter if m else "", dw=c.info.width,
-                   dh=c.info.height, motion=(c.motion if still else ""), total=(c.used_length if still else 0.0))
+                   dh=c.info.height, motion=(c.motion if still else ""), total=(c.used_length if still else 0.0),
+                   story=story, window=window if story is not None else None,
+                   clip_start=(0.0 if still else c.used_start))
 
 
 @dataclass(frozen=True)
@@ -502,13 +517,16 @@ def build_bg_plan(clips: Sequence[Clip], target: float, dissolve: float, spec: O
 
     pieces: list[Piece] = []
     count = len(lengths)
+    # 주인공 등장 구간: 장면 안 시간 기준 (프레임 맞춤 길이·디졸브로 계산 → 미리보기와 같은 값)
+    windows = [clip_window(c, dissolve, fps) for c, _, _ in lengths]
     for k, (c, s, L) in enumerate(lengths):
         body_len = L - 2 * d
         kind = "사진" if c.is_image else "장면"
-        pieces.append(Piece("body", clip_segment(c, s + d, body_len), None, body_len, f"{kind} {k + 1} 본문"))
+        pieces.append(Piece("body", clip_segment(c, s + d, body_len, windows[k]), None, body_len,
+                            f"{kind} {k + 1} 본문"))
         nc, ns, _ = lengths[(k + 1) % count]
-        a = clip_segment(c, s + L - d, d)
-        b = clip_segment(nc, ns, d)
+        a = clip_segment(c, s + L - d, d, windows[k])
+        b = clip_segment(nc, ns, d, windows[(k + 1) % count])
         nxt = (k + 1) % count + 1
         pieces.append(Piece("xfade", a, b, d, f"장면 {k + 1}→{nxt} 디졸브"))
     cycle = sum(p.length for p in pieces)
@@ -535,6 +553,7 @@ def build_bg_plan(clips: Sequence[Clip], target: float, dissolve: float, spec: O
                                                               if share > 0.999 else ""))
     if target < cycle:
         warnings.append("선택한 길이가 한 바퀴보다 짧아 뒤쪽 장면 일부가 빠집니다.")
+    warnings += story_notes([c for c, _, _ in lengths], dissolve, fps, spec.width, spec.height)
     return BgPlan(tuple(pieces), d, cycle, float(target), repeats, spec, expected_size, work_size, count, tuple(warnings))
 
 
@@ -605,20 +624,49 @@ def _norm_chain(spec: OutputSpec, length: float) -> str:
             f"format=yuv420p,settb=AVTB")
 
 
-def _norm_graph(spec: OutputSpec, seg: Segment, length: float, src: str, dst: str, tag: str) -> str:
+def story_active(seg: Segment, length: float) -> bool:
+    """이 구간에 주인공이 한 프레임이라도 보이는가 (아니면 이미지 입력·overlay를 넣지 않음 — 기존 필터 그대로)."""
+    return seg.story is not None and window_overlaps(seg.window, seg.local0, length)
+
+
+def _norm_graph(spec: OutputSpec, seg: Segment, length: float, src: str, dst: str, tag: str,
+                story_src: str | None = None) -> str:
     """입력 1개 → 출력 규격(W×H 16:9, FPS, SAR 1, yuv420p, AVTB)으로 정규화하는 필터 그래프 조각.
 
-    16:9 영상(또는 꽉 채우기)이고 회전·SAR·사진 처리가 없으면 기존 _norm_chain과 글자 하나 다르지 않다."""
+    16:9 영상(또는 꽉 채우기)이고 회전·SAR·사진 처리·주인공이 없으면 기존 _norm_chain과 글자 하나 다르지 않다.
+    story_src: 주인공 이미지 입력 라벨 (예: '[2:v]') — 16:9 정규화가 끝난 화면 위에 overlay (통합 08)."""
     w, h = spec.width, spec.height
     fit, branched = fit_filter(spec.fit, w, h, seg.dw, seg.dh, blur=spec.blur, pad=spec.pad, tag=tag)
     motion = motion_filter(seg.motion, w, h, seg.start, seg.total, exact_fps(spec.fps)) if seg.still else ""
-    if not seg.pre and not branched and not motion and fit.startswith(f"scale={w}:{h}:force_original_aspect_ratio=increase"):
+    story = bool(story_src) and story_active(seg, length)
+    if (not seg.pre and not branched and not motion and not story
+            and fit.startswith(f"scale={w}:{h}:force_original_aspect_ratio=increase")):
         return f"{src}{_norm_chain(spec, length)}{dst}"
     head = (f"setpts=PTS-STARTPTS,trim=duration={length + 0.05:.6f},setpts=PTS-STARTPTS,fps={fps_expr(spec.fps)}"
             + (f",{seg.pre}" if seg.pre else ""))
-    tail = (f",{motion}" if motion else "") + ",setsar=1,format=yuv420p,settb=AVTB"
-    # 흐림 배경이면 fit = "split=2[..f][..b];...;[..bb][..ff]overlay=..." — 앞뒤에 그대로 이어도 하나의 그래프가 된다
-    return f"{src}{head},{fit}{tail}{dst}"
+    tail = (f",{motion}" if motion else "") + ",setsar=1"
+    end = ",format=yuv420p,settb=AVTB"
+    if not story:
+        # 흐림 배경이면 fit = "split=2[..f][..b];...;[..bb][..ff]overlay=..." — 앞뒤에 그대로 이어도 하나의 그래프가 된다
+        return f"{src}{head},{fit}{tail}{end}{dst}"
+    char, ov = overlay_graph(seg.story, w, h, exact_fps(spec.fps), fps_expr(spec.fps), seg.local0, length,
+                             seg.window, story_src, tag)
+    return f"{src}{head},{fit}{tail}[{tag}bg];{char};[{tag}bg][{tag}c]{ov}{end}{dst}"
+
+
+def _story_inputs(items: Sequence[tuple[Segment, float]], first: int) -> tuple[list[str], list[str | None]]:
+    """주인공이 보이는 구간마다 이미지 입력 1개 (인덱스 first부터). (FFmpeg 인자, 구간별 입력 라벨 또는 None)."""
+    args: list[str] = []
+    labels: list[str | None] = []
+    n = first
+    for seg, length in items:
+        if story_active(seg, length):
+            args += image_input_args(seg.story.image.path)
+            labels.append(f"[{n}:v]")
+            n += 1
+        else:
+            labels.append(None)
+    return args, labels
 
 
 def _input_args(seg: Segment, fps: float) -> list[str]:
@@ -637,12 +685,15 @@ def piece_command(ffmpeg: Path, piece: Piece, spec: OutputSpec, out: Path, max_f
     for seg in segs:
         cmd += _input_args(seg, spec.fps)
     if piece.kind == "xfade":
-        graph = (f"{_norm_graph(spec, piece.a, piece.a.length, '[0:v]', '[a]', 'ia')};"
-                 f"{_norm_graph(spec, piece.b, piece.b.length, '[1:v]', '[b]', 'ib')};"
+        extra, lab = _story_inputs([(piece.a, piece.a.length), (piece.b, piece.b.length)], 2)
+        graph = (f"{_norm_graph(spec, piece.a, piece.a.length, '[0:v]', '[a]', 'ia', lab[0])};"
+                 f"{_norm_graph(spec, piece.b, piece.b.length, '[1:v]', '[b]', 'ib', lab[1])};"
                  f"[a][b]xfade=transition=fade:duration={piece.length:.6f}:offset=0,"
                  f"trim=duration={piece.length:.6f},setpts=PTS-STARTPTS[v]")
     else:
-        graph = _norm_graph(spec, piece.a, piece.length, "[0:v]", "[v]", "ia")
+        extra, lab = _story_inputs([(piece.a, piece.length)], 1)
+        graph = _norm_graph(spec, piece.a, piece.length, "[0:v]", "[v]", "ia", lab[0])
+    cmd += extra
     n_frames = max(1, int(round(piece.length * spec.fps)))
     if max_frames is not None:
         n_frames = max(1, min(n_frames, int(max_frames)))
@@ -1159,16 +1210,19 @@ PREVIEW_CONTEXT = 2.5  # 경계 앞뒤로 보여 줄 초
 PREVIEW_SPEC = OutputSpec(640, 360, 30.0, "h264", 26, "veryfast", "미리보기 640×360")
 
 
-def seam_segments(clip_a: Clip, clip_b: Clip, dissolve: float, context: float = PREVIEW_CONTEXT) -> tuple[Segment, Segment]:
+def seam_segments(clip_a: Clip, clip_b: Clip, dissolve: float, context: float = PREVIEW_CONTEXT,
+                  fps: float = 30.0) -> tuple[Segment, Segment]:
     """clip_a 사용 구간의 마지막 (context+디졸브)초, clip_b 사용 구간의 처음 (디졸브+context)초.
 
     같은 클립을 두 번 주면 '이 영상만 반복할 때의 이음새(끝 → 처음)'가 된다.
+    주인공이 있으면 실제 제작과 같은 등장 구간(fps = 실제 출력 FPS)으로 함께 보여 준다.
     """
     la = min(clip_a.used_length, context + dissolve)
     lb = min(clip_b.used_length, context + dissolve)
     if la < dissolve + 0.2 or lb < dissolve + 0.2:
         raise ValueError("사용 구간이 너무 짧아 미리보기를 만들 수 없습니다.")
-    return (clip_segment(clip_a, clip_a.used_end - la, la), clip_segment(clip_b, clip_b.used_start, lb))
+    return (clip_segment(clip_a, clip_a.used_end - la, la, clip_window(clip_a, dissolve, fps)),
+            clip_segment(clip_b, clip_b.used_start, lb, clip_window(clip_b, dissolve, fps)))
 
 
 def preview_spec_for(spec: OutputSpec | None) -> OutputSpec:
@@ -1185,8 +1239,10 @@ def seam_preview_command(ffmpeg: Path, a: Segment, b: Segment, dissolve: float, 
     for seg in (a, b):
         cmd += _input_args(seg, spec.fps)
     total = a.length + b.length - dissolve
-    graph = (f"{_norm_graph(spec, a, a.length, '[0:v]', '[a]', 'ia')};"
-             f"{_norm_graph(spec, b, b.length, '[1:v]', '[b]', 'ib')};"
+    extra, lab = _story_inputs([(a, a.length), (b, b.length)], 2)
+    cmd += extra
+    graph = (f"{_norm_graph(spec, a, a.length, '[0:v]', '[a]', 'ia', lab[0])};"
+             f"{_norm_graph(spec, b, b.length, '[1:v]', '[b]', 'ib', lab[1])};"
              f"[a][b]xfade=transition=fade:duration={dissolve:.6f}:offset={a.length - dissolve:.6f},"
              f"trim=duration={total:.6f},setpts=PTS-STARTPTS[v]")
     cmd += ["-filter_complex", graph, "-map", "[v]", "-an", "-sn", "-dn", "-map_metadata", "-1",
@@ -1197,7 +1253,7 @@ def seam_preview_command(ffmpeg: Path, a: Segment, b: Segment, dissolve: float, 
 
 def make_seam_preview(ffmpeg: Path, clip_a: Clip, clip_b: Clip, dissolve: float, out: Path,
                       cancel_event: Event, spec: OutputSpec | None = None) -> Path:
-    a, b = seam_segments(clip_a, clip_b, dissolve)
+    a, b = seam_segments(clip_a, clip_b, dissolve, fps=spec.fps if spec is not None else 30.0)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1221,20 +1277,88 @@ def preview_time(clip: Clip) -> float:
 
 
 def fit_preview_command(ffmpeg: Path, clip: Clip, spec: OutputSpec, size: tuple[int, int] = (480, 270),
-                        at: float | None = None) -> list[str]:
-    """실제 제작과 '같은 규격·같은 필터'(_norm_graph)로 1프레임을 만든 뒤 미리보기 크기로 줄인 PNG (stdout)."""
+                        at: float | None = None, dissolve: float = DEFAULT_DISSOLVE) -> list[str]:
+    """실제 제작과 '같은 규격·같은 필터'(_norm_graph)로 1프레임을 만든 뒤 미리보기 크기로 줄인 PNG (stdout).
+
+    at: 장면 안 시간 (사용 구간 시작 = 0이 아니라 원본 시간 — 기존과 같음). 주인공이 있으면 같은 등장 구간으로 겹친다."""
     t = preview_time(clip) if at is None else at
-    seg = clip_segment(clip, t, 0.5)
-    graph = (_norm_graph(spec, seg, 0.5, "[0:v]", "[n]", "ia")
+    seg = clip_segment(clip, t, 0.5, clip_window(clip, dissolve, spec.fps))
+    extra, lab = _story_inputs([(seg, 0.5)], 1)
+    graph = (_norm_graph(spec, seg, 0.5, "[0:v]", "[n]", "ia", lab[0])
              + f";[n]scale={size[0]}:{size[1]}:flags=area,format=rgb24[v]")
-    return [str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", *_input_args(seg, spec.fps),
+    return [str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", *_input_args(seg, spec.fps), *extra,
             "-filter_complex", graph, "-map", "[v]", "-frames:v", "1", "-an", "-f", "image2pipe", "-c:v", "png", "pipe:1"]
 
 
 def fit_preview_png(ffmpeg: Path, clip: Clip, spec: OutputSpec, cancel: Event | None = None,
-                    size: tuple[int, int] = (480, 270)) -> bytes:
+                    size: tuple[int, int] = (480, 270), at: float | None = None,
+                    dissolve: float = DEFAULT_DISSOLVE) -> bytes:
     from .bg_fit import _run_png
-    return _run_png(fit_preview_command(ffmpeg, clip, spec, size), cancel)
+    return _run_png(fit_preview_command(ffmpeg, clip, spec, size, at, dissolve), cancel)
+
+
+# ---------------- 주인공 미리보기 (통합 08) ----------------
+
+STORY_PREVIEW_SECONDS = 9.0
+
+
+def story_preview_time(clip: Clip, dissolve: float, fps: float) -> float:
+    """주인공이 완전히 보이는 지점 (등장 구간 가운데) — 원본 시간. 주인공이 없으면 기존 미리보기 지점."""
+    w = clip_window(clip, dissolve, fps)
+    if w is None:
+        return preview_time(clip)
+    local = (w.start + w.end) / 2
+    return (0.0 if clip.is_image else clip.used_start) + local
+
+
+def story_preview_png(ffmpeg: Path, clip: Clip, spec: OutputSpec, dissolve: float, cancel: Event | None = None,
+                      size: tuple[int, int] = (480, 270), at: float | None = None) -> bytes:
+    """실제 제작과 같은 해상도·필터·등장 구간으로 주인공이 보이는 1장면을 만든 뒤 줄인 PNG."""
+    t = story_preview_time(clip, dissolve, spec.fps) if at is None else at
+    return fit_preview_png(ffmpeg, clip, spec, cancel, size, t, dissolve)
+
+
+def story_motion_segment(clip: Clip, dissolve: float, fps: float,
+                         seconds: float = STORY_PREVIEW_SECONDS) -> Segment:
+    """움직임 미리보기 구간: 등장 1초 전부터 (페이드인 + 아주 느린 확대·이동 시작)."""
+    w = clip_window(clip, dissolve, fps)
+    if w is None:
+        raise ValueError("이 장면은 주인공이 등장하지 않습니다 (장면이 짧거나 주인공을 넣지 않은 장면).")
+    base = 0.0 if clip.is_image else clip.used_start
+    local = max(0.0, w.start - 1.0)
+    length = max(1.0, min(seconds, clip.used_length - local))
+    return clip_segment(clip, base + local, length, w)
+
+
+def story_motion_command(ffmpeg: Path, clip: Clip, spec: OutputSpec, dissolve: float, out: Path) -> list[str]:
+    seg = story_motion_segment(clip, dissolve, spec.fps)
+    pv = preview_spec_for(spec)
+    pv = replace(pv, fps=spec.fps)       # 같은 FPS → 같은 프레임 시간 (페이드·움직임 위치 일치)
+    extra, lab = _story_inputs([(seg, seg.length)], 1)
+    graph = _norm_graph(pv, seg, seg.length, "[0:v]", "[v]", "ia", lab[0])
+    return [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-y", "-nostdin", *_input_args(seg, pv.fps), *extra,
+            "-filter_complex", graph, "-map", "[v]", "-an", "-sn", "-dn", "-map_metadata", "-1",
+            "-frames:v", str(max(1, int(round(seg.length * pv.fps)))), "-c:v", pv.encoder, "-preset", pv.preset,
+            "-crf", str(pv.crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
+            str(out)]
+
+
+def make_story_preview(ffmpeg: Path, clip: Clip, spec: OutputSpec, dissolve: float, out: Path,
+                       cancel_event: Event) -> Path:
+    """주인공 등장(페이드인 + 움직임)을 저해상도 짧은 영상으로 (소리 없음, 원본은 읽기만)."""
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        run_ffmpeg_progress(story_motion_command(ffmpeg, clip, spec, dissolve, out), cancel_event)
+    except BaseException:
+        try:
+            out.unlink()
+        except OSError:
+            pass
+        raise
+    if not out.exists() or out.stat().st_size == 0:
+        raise BuildError("주인공 미리보기를 만들지 못했습니다.")
+    return out
 
 
 def crop_preview_png(ffmpeg: Path, clip: Clip, spec: OutputSpec, cancel: Event | None = None, box_h: int = 270) -> bytes:
@@ -1315,5 +1439,6 @@ __all__ = [
     "MEASURE_HEADROOM", "OWNER_FILE", "MAX_TARGET_SECONDS", "PROJECT_FPS_CHOICES", "DEFAULT_PROJECT_FPS", "exact_fps",
     "target_frame_count", "parse_length", "format_precise", "length_tag", "split_last_cycle", "estimate_build_seconds",
     "probe_frames", "QUALITY_HD", "QUALITY_HEIGHT", "clip_segment", "preview_spec_for", "fit_preview_command",
-    "fit_preview_png", "crop_preview_png", "preview_time", "STILL_NOTE",
+    "fit_preview_png", "crop_preview_png", "preview_time", "STILL_NOTE", "story_active", "story_preview_png",
+    "story_preview_time", "make_story_preview", "story_motion_command", "story_motion_segment",
 ]

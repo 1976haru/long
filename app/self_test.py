@@ -116,6 +116,9 @@ def run(app, out_path: str, step_ms: int = 1200) -> None:
                and _MA.check_audio(None, Path("x.mp4")).status == _MA.UNKNOWN, _MA.EXCLUDE_OPTION)
             ok("bg_ui_steps", len(getattr(w, "step_labels", [])) == 8 and hasattr(w, "btn_measure")
                and hasattr(w, "btn_order") and w.codec_key() in ("h264", "hevc"), w.step_hint.get()[:40])
+            from . import bg_story as _S
+            ok("bg_story_ui", hasattr(w, "btn_story") and hasattr(w, "btn_story_toggle")
+               and len(_S.BUILTIN_PRESETS) >= 3 and all(c.story is None for c in w.clips), str(w.btn_story.cget("text")))
             if not (app.ffmpeg and app.ffprobe):
                 ok("bg_build", True, "SKIP: FFmpeg 없음")
                 app.after(step_ms, s6)
