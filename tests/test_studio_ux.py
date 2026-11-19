@@ -342,8 +342,11 @@ def test_main_window_small_screen_scrolls_to_start_stop(tmp_path, monkeypatch):
             return None
         spin = find(app.scroll.body, "TSpinbox")
         assert spin is not None and app.scroll._on_wheel(SimpleNamespace(widget=spin, delta=-120, num=0)) is None
-        # 큰 화면: 스크롤 필요 없음, 기존처럼 꽉 차게
+        # 큰 화면: 기존처럼 꽉 차게. 1080 화면에서는 창이 1061px로 제한되고 본문(⑦⑧ 줄 포함 1653px)이 더 길어
+        # 스크롤이 남는다 (기준 커밋도 1602px — 바로 위 휠 위치에서 3px 차이로만 보였음) → 끝까지 내려 확인
         app.geometry("1080x1060+0+0")
+        app.update()
+        cv.yview_moveto(1.0)
         app.update()
         assert visible(app.start)
     finally:

@@ -218,6 +218,32 @@ class MainWindow(tk.Tk):
         for w in (card, title, desc, foot):
             w.bind("<Button-1>", lambda e: self._open_playlist())
         self.mode_cards["playlist"] = card
+        self._shorts_card(bar)
+
+    def _shorts_card(self, bar):
+        """⑧ 숏츠 만들기 — ⑤·⑥ 줄 아래 반쪽 카드 줄의 오른쪽 절반 (⑤⑥ 카드 크기는 그대로)."""
+        bg, border, fg = "#f6f6f6", "#c4c4c4", "#202020"
+        row = ttk.Frame(bar)
+        row.grid(row=3, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+        row.columnconfigure(0, weight=1, uniform="half")
+        row.columnconfigure(1, weight=1, uniform="half")
+        self._row78 = row
+        # ⑦ AI 스튜디오 자리 (다른 브랜치에서 추가 예정)
+        card = tk.Frame(row, bg=bg, highlightthickness=2, highlightbackground=border, highlightcolor=border,
+                        cursor="hand2")
+        card.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
+        foot = tk.Label(card, text="열기 ▶", bg=bg, fg="#1d4fa8", font="PLS.Strong")
+        foot.pack(side="right", padx=10)
+        why = tk.Label(card, text="ⓘ 도움말", bg=bg, fg="#1d4fa8", cursor="hand2")
+        why.pack(side="right", padx=(10, 4))
+        why.bind("<Button-1>", lambda e: (self._card_help("shorts", "⑧ 숏츠 만들기"), "break")[1])
+        self.card_help_links["shorts"] = why
+        title = tk.Label(card, text="⑧ 숏츠 만들기", bg=bg, fg=fg, font="PLS.Section", anchor="w")
+        title.pack(side="left", fill="x", expand=True, padx=(10, 8), pady=5)
+        desc = tk.Label(card, text="곡 + 배경 → 9:16 숏츠 자동 제작", bg=bg, fg="#333333", anchor="w")  # 반쪽 카드: 설명은 ⓘ 도움말로 (⑤⑥과 같게)
+        for w in (card, title, desc, foot):
+            w.bind("<Button-1>", lambda e: self._open_shorts())
+        self.mode_cards["shorts"] = card
 
     # ---------- 글자 크기 ----------
     def _set_font_size(self, size):
@@ -781,6 +807,21 @@ class MainWindow(tk.Tk):
                                                 send_to_upload=lambda p: self._open_upload(str(p), Path(p).stem))
         return self.playlist_win
 
+    def _open_shorts(self):
+        w = self._alive(getattr(self, "shorts_win", None))
+        if w is not None:
+            w.deiconify(); w.lift(); w.focus_set(); return w
+        from .shorts_ui import ShortsMakerWindow
+        self.shorts_win = ShortsMakerWindow(self, send_to_upload=lambda p: self._open_upload(str(p), Path(p).stem))
+        return self.shorts_win
+
+    def send_to_shorts(self, audio_path, title=""):
+        """⑦ AI 스튜디오 등에서 곡 1개를 ⑧ 숏츠 목록에 넣는다 (창만 열고 제작은 시작하지 않음). 이름·인자 고정."""
+        try:
+            return bool(self._open_shorts().add_audio(audio_path, title))
+        except Exception:
+            return False
+
     def _receive_to_live(self, path):
         """⑥ 결과를 ② LIVE Playlist에 넣는다 — LIVE READY 검사는 ②의 기존 검사 그대로, 송출은 시작하지 않는다."""
         self._open_live()
@@ -906,6 +947,8 @@ class MainWindow(tk.Tk):
         if self.running and not messagebox.askyesno("작업 중","현재 작업을 중지하고 종료할까요?"):return
         bgw=self._alive(getattr(self,"bg_win",None))
         if bgw is not None and bgw.running and not messagebox.askyesno("배경 영상 제작 중","④ 배경 영상 제작을 중단하고 종료할까요?"):return
+        shw=self._alive(getattr(self,"shorts_win",None))
+        if shw is not None and shw.running and not messagebox.askyesno("숏츠 제작 중","⑧ 숏츠 제작 중 — 중단하고 종료할까요?"):return
         uploading=self.upload_queue is not None and self.upload_queue.running
         work=self._running_work_lines()
         if work and not ask_exit(self,work):return  # 종료하면 업로드/댓글 확인이 멈춘다고 정확히 안내
@@ -916,7 +959,7 @@ class MainWindow(tk.Tk):
     def _finish_close(self):
         w=self._live_window()
         if w:w.destroy()
-        for w in (self._alive(self.upload_win),self._alive(self.live_schedule_win),self._alive(self.comment_win),self._alive(getattr(self,"bg_win",None))):
+        for w in (self._alive(self.upload_win),self._alive(self.live_schedule_win),self._alive(self.comment_win),self._alive(getattr(self,"bg_win",None)),self._alive(getattr(self,"shorts_win",None))):
             if w:w.destroy()
         if self.comment_service is not None:self.comment_service.stop(timeout=3.0)
         self._save();self.destroy();release_tk_variables(self)
