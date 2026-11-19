@@ -262,4 +262,3 @@ class ShortsRun:
                 self.proc.stdin.close()
         except OSError:
             pass
-
